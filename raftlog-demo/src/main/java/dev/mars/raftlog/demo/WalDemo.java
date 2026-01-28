@@ -16,13 +16,11 @@
 package dev.mars.raftlog.demo;
 
 import dev.mars.raftlog.storage.FileRaftStorage;
-import dev.mars.raftlog.storage.RaftStorage;
 import dev.mars.raftlog.storage.RaftStorage.LogEntryData;
 import dev.mars.raftlog.storage.RaftStorage.PersistentMeta;
 import dev.mars.raftlog.storage.RaftStorageConfig;
 
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 

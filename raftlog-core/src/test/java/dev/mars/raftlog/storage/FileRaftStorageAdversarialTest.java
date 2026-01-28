@@ -15,7 +15,6 @@
  */
 package dev.mars.raftlog.storage;
 
-import dev.mars.raftlog.storage.FileRaftStorage.StorageException;
 import dev.mars.raftlog.storage.RaftStorage.LogEntryData;
 import dev.mars.raftlog.storage.RaftStorage.PersistentMeta;
 import org.junit.jupiter.api.AfterEach;
@@ -35,7 +34,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.Random;
@@ -44,12 +42,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.zip.CRC32C;
-
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
