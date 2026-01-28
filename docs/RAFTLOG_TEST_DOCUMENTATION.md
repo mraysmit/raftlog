@@ -12,7 +12,8 @@ This document provides a comprehensive overview of all test cases in the RaftLog
 | `ProtectionGuaranteeTest` | 24 | Thread safety and crash consistency |
 | `EnhancedProtectionTest` | 16 | File locking, disk space, verification |
 | `NastyEdgeCaseTest` | 17 | JVM/OS/Hardware interaction failure modes |
-| **Total** | **154** | |
+| `WalChaos` | 38 | Interactive chaos testing suite |
+| **Total** | **192** | |
 
 ---
 
@@ -201,6 +202,142 @@ Adversarial tests that attempt to break the storage implementation through corru
 
 ---
 
+## 7. WalChaos (Interactive Chaos Testing)
+
+**File:** `raftlog-demo/src/main/java/dev/mars/raftlog/demo/WalChaos.java`
+
+An interactive chaos testing suite that throws every nasty scenario at the WAL to verify its robustness. Unlike the JUnit tests, this is a standalone executable that can be run manually to stress test the storage implementation.
+
+### Running WalChaos
+
+```bash
+# Build
+mvn package -pl raftlog-demo -am -DskipTests
+
+# Run all chaos tests
+java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos
+
+# Run specific test category
+java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos concurrent
+java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos corruption
+java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos boundary
+java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos stress
+```
+
+### Concurrency Chaos Tests (6 tests)
+
+Tests for race conditions, deadlocks, and concurrent access patterns.
+
+| Test | Description | Validation |
+|------|-------------|------------|
+| `Concurrent Writer Storm` | 20 threads × 100 entries all writing simultaneously | All 2,000 entries written without corruption or data loss |
+| `Concurrent Metadata Thrashing` | 50 threads rapidly updating metadata | Final metadata readable and consistent |
+| `Mixed Operations Chaos` | 10 threads performing random append/truncate/metadata/sync ops | Log replays successfully after chaos |
+| `Rapid Open/Close Cycles` | 50 cycles of open, write single entry, close immediately | All 50 entries survive across restarts |
+| `Concurrent Replay During Writes` | Writer thread and replay thread running in parallel for 2 seconds | No crashes, deadlocks, or corruption |
+| `Thread Interrupt Storm` | 10 threads writing while being randomly interrupted | Log survives with partial data intact |
+
+**What these tests catch:**
+- Race conditions between concurrent writers
+- Deadlocks in internal synchronization
+- Data interleaving between writers
+- Resource cleanup issues during interrupts
+- Lock contention under high load
+
+### Corruption Chaos Tests (8 tests)
+
+Tests for resilience against file-level corruption scenarios.
+
+| Test | Description | Validation |
+|------|-------------|------------|
+| `Random Byte Corruption in WAL` | Flip random byte in second half of WAL file | Entries before corruption point recovered |
+| `Zero-Fill Corruption` | Append 4KB of zeros (SSD block failure simulation) | All 5 valid entries recovered, zeros ignored |
+| `Magic Number Corruption` | Corrupt magic number of 3rd entry to `0xDEADBEEF` | Entries before corruption recovered |
+| `CRC Bit Flip` | Single bit flip in payload of first entry | CRC mismatch detected, file truncated at corruption |
+| `Partial Record (Torn Write)` | Append partial 10-byte header (no index/term/payload/CRC) | All 5 valid entries recovered, partial record ignored |
+| `Metadata File Corruption` | Flip first byte of `meta.dat` file | Corruption detected on metadata load |
+| `Garbage Append After Valid Data` | Append 256 bytes of random garbage after valid entries | All 5 valid entries recovered |
+| `Truncation Point Corruption` | Write 10 entries, truncate at 5, write 3 more | Correct 7 entries with proper terms after recovery |
+
+**What these tests catch:**
+- Recovery from disk-level corruption
+- CRC32C checksum effectiveness
+- Handling of torn/partial writes
+- Zero-fill persistence trap (SSD/VM failure mode)
+- Garbage data rejection
+- Metadata integrity verification
+
+### Boundary Chaos Tests (9 tests)
+
+Tests for extreme values and boundary conditions.
+
+| Test | Description | Validation |
+|------|-------------|------------|
+| `Maximum Payload Size` | Store 16 MB - 1 byte payload | Payload survives round-trip intact |
+| `Empty Payload` | Store 3 entries with zero-length payloads | All 3 entries with `payload.length == 0` |
+| `Binary Payload (All Bytes 0x00-0xFF)` | Store payload containing all 256 possible byte values | Exact byte-for-byte match on replay |
+| `Unicode Payload Storm` | 10 entries with various Unicode (Chinese, Arabic, Cyrillic, Emoji, control chars, supplementary) | All UTF-8 encoded strings survive intact |
+| `Max Long Index` | Entry with `index = Long.MAX_VALUE` | Index preserved exactly |
+| `Max Long Term` | Entry and metadata with `term = Long.MAX_VALUE` | Term preserved in both entry and metadata |
+| `Very Long VotedFor String` | 10,000+ character node ID in votedFor | String preserved exactly |
+| `Null-like Payloads` | Payloads: `{0}`, `{0,0,0,0}`, `"null"`, `"NULL"`, `"\0\0\0\0"`, `{0xFF,0xFF,0xFF,0xFF}` | Each preserved exactly |
+| `Payload Contains Magic Bytes` | Payload containing fake RAFT header (magic, version, type, index, term, length, CRC) | Evil payload stored without parser confusion |
+
+**What these tests catch:**
+- Integer overflow in size calculations
+- Off-by-one errors at boundaries
+- Binary data handling (no string assumptions)
+- Unicode encoding/decoding correctness
+- Long.MAX_VALUE handling in serialization
+- Parser confusion from magic bytes in data
+
+### Stress Chaos Tests (5 tests)
+
+High-volume and resource-intensive tests.
+
+| Test | Description | Validation |
+|------|-------------|------------|
+| `10,000 Small Entries` | Single batch with 10,000 tiny entries | All entries recovered on replay |
+| `Rapid Metadata Toggle` | 1,000 sequential metadata updates toggling between nodeA/nodeB | Final metadata reflects last update |
+| `Append-Truncate-Append Cycles` | 100 cycles of: append 10, truncate to 5, repeat | Final log has correct entries |
+| `Memory Pressure (Large Batches)` | 10 batches × 1,000 entries × 4KB payload (≈40MB total) | All 10,000 entries recovered |
+| `Fsync Hammer` | 100 entries, each followed by `sync()` (100 fsyncs) | All entries durable after fsync storm |
+
+**What these tests catch:**
+- Performance under high volume
+- Memory management during large operations
+- Truncate/append interaction correctness
+- File handle exhaustion
+- I/O subsystem saturation
+- Fsync reliability
+
+### Nasty Edge Cases Tests (10 tests)
+
+Tests for subtle protocol violations and API misuse.
+
+| Test | Description | Validation |
+|------|-------------|------------|
+| `Double Open Same Directory` | Open two FileRaftStorage instances on same directory | Second instance blocked by file lock |
+| `Double Close` | Call `close()` twice on same instance | No exception thrown (idempotent close) |
+| `Operations After Close` | Attempt append after `close()` | Operation rejected with appropriate exception |
+| `Negative Index (Protocol Violation)` | Store entry with `index = -1` | Value stored as-is (storage doesn't validate) |
+| `Negative Term (Protocol Violation)` | Store entry with `term = -1` | Value stored as-is |
+| `Non-Sequential Indices` | Batch with indices [1, 5, 3, 100] (gaps and out-of-order) | All 4 entries stored as-is |
+| `Duplicate Indices in Batch` | Batch with 3 entries all having `index = 1` | All 3 entries stored (dedup is protocol layer's job) |
+| `Empty Batch Append` | Append empty `List.of()` followed by real entry | No-op for empty, real entry stored |
+| `Truncate to Negative` | `truncateSuffix(-1)` after writing 2 entries | All entries removed (truncate everything) |
+| `Truncate Beyond Log` | `truncateSuffix(1000)` on 2-entry log | No-op (both entries preserved) |
+
+**What these tests catch:**
+- File locking mechanism effectiveness
+- Resource cleanup on close
+- Idempotent operations
+- Storage layer vs protocol layer responsibility separation
+- Edge cases in truncation logic
+- Handling of invalid/malicious input
+
+---
+
 ## 4. ProtectionGuaranteeTest
 
 **File:** `raftlog-core/src/test/java/dev/mars/raftlog/storage/ProtectionGuaranteeTest.java`
@@ -359,18 +496,22 @@ Tests that verify we never rely on file timestamps.
 
 | Threat | Protection Mechanism | Test Coverage |
 |--------|---------------------|---------------|
-| **Concurrent writes (same process)** | Single-threaded executor | G1-G5 |
-| **Concurrent writes (different processes)** | Exclusive file lock | File Locking Tests |
-| **Torn writes / power loss** | CRC32C + recovery truncation | G6-G12, F1-F5 |
-| **Bit rot / bit flips** | CRC32C checksums | G6-G8, F4 |
-| **Process crashes** | WAL replay on restart | Recovery Tests |
-| **Partial metadata updates** | Atomic rename | G10 |
+| **Concurrent writes (same process)** | Single-threaded executor | G1-G5, WalChaos Concurrency |
+| **Concurrent writes (different processes)** | Exclusive file lock | File Locking Tests, WalChaos Double Open |
+| **Torn writes / power loss** | CRC32C + recovery truncation | G6-G12, F1-F5, WalChaos Corruption |
+| **Bit rot / bit flips** | CRC32C checksums | G6-G8, F4, WalChaos CRC Bit Flip |
+| **Process crashes** | WAL replay on restart | Recovery Tests, WalChaos Open/Close Cycles |
+| **Partial metadata updates** | Atomic rename | G10, WalChaos Metadata Corruption |
 | **Disk full** | Pre-flight space check | Disk Space Tests |
 | **Silent filesystem corruption** | Read-after-write verification | Verification Tests |
-| **Zero-fill persistence trap** | MAGIC != 0x00000000 | NastyEdgeCaseTest |
-| **Middle-of-log corruption** | Truncate at corruption point | NastyEdgeCaseTest |
-| **Integer overflow in batches** | Payload size limits | NastyEdgeCaseTest |
+| **Zero-fill persistence trap** | MAGIC != 0x00000000 | NastyEdgeCaseTest, WalChaos Zero-Fill |
+| **Middle-of-log corruption** | Truncate at corruption point | NastyEdgeCaseTest, WalChaos Random Corruption |
+| **Integer overflow in batches** | Payload size limits | NastyEdgeCaseTest, WalChaos Boundary |
 | **Clock skew / timestamp attacks** | Atomic rename only | NastyEdgeCaseTest |
+| **Thread interrupts during I/O** | Graceful handling | WalChaos Thread Interrupt Storm |
+| **Large payload attacks** | 16 MB limit enforced | WalChaos Max Payload Size |
+| **Binary/Unicode data corruption** | Byte-for-byte storage | WalChaos Binary/Unicode Payloads |
+| **API misuse** | Defensive coding | WalChaos Nasty Edge Cases |
 
 ### ⚠️ Known Limitations
 
@@ -404,6 +545,8 @@ The implementation relies on the following assumptions about the underlying syst
 
 ## Running Tests
 
+### Unit Tests (JUnit)
+
 ```bash
 # Run all tests
 mvn test
@@ -418,6 +561,31 @@ mvn test -Dtest=ProtectionGuaranteeTest$ThreadSafetyGuarantees
 mvn test -Dtest=EnhancedProtectionTest -Dsurefire.useFile=false
 ```
 
+### Chaos Tests (WalChaos)
+
+WalChaos is an interactive chaos testing suite that runs as a standalone Java application:
+
+```bash
+# Build the demo module
+mvn package -pl raftlog-demo -am -DskipTests
+
+# Run all 38 chaos tests
+java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos
+
+# Run specific category
+java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos concurrent
+java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos corruption
+java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos boundary
+java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos stress
+```
+
+**WalChaos Output:**
+- Creates temporary directory for test files
+- Runs tests with real-time pass/fail indication
+- Reports total passed/failed at end
+- Returns exit code 0 on success, 1 on any failure
+- Automatically cleans up temporary files
+
 ---
 
 ## Test Design Principles
@@ -427,6 +595,24 @@ mvn test -Dtest=EnhancedProtectionTest -Dsurefire.useFile=false
 3. **Fast**: Most tests complete in milliseconds
 4. **Comprehensive**: Cover happy path, edge cases, and failure modes
 5. **Documented**: Each test name describes what it verifies
+
+### WalChaos vs Unit Tests
+
+| Aspect | JUnit Tests | WalChaos |
+|--------|-------------|----------|
+| **Execution** | Automated via Maven | Manual/CI via command line |
+| **Output** | JUnit reports | Console with pass/fail indicators |
+| **Isolation** | Per-test temp directories | Single chaos directory with cleanup |
+| **Purpose** | Regression testing | Exploratory chaos testing |
+| **Timing** | Fixed scenarios | Extended stress durations |
+| **Verbosity** | Configurable | Real-time logging from WAL |
+
+WalChaos complements the JUnit tests by:
+- Running longer-duration stress scenarios
+- Providing visual feedback during execution
+- Testing multi-threaded scenarios that are timing-dependent
+- Being runnable outside of the build system
+- Simulating realistic chaos scenarios (power loss, corruption, races)
 
 ---
 

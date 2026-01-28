@@ -18,7 +18,6 @@ package dev.mars.raftlog.storage;
 import dev.mars.raftlog.storage.FileRaftStorage.StorageException;
 import dev.mars.raftlog.storage.RaftStorage.LogEntryData;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;

@@ -32,24 +32,20 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.CRC32C;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -277,8 +273,6 @@ class ProtectionGuaranteeTest {
             ExecutorService executor = Executors.newFixedThreadPool(numThreads);
             CyclicBarrier barrier = new CyclicBarrier(numThreads);
             AtomicInteger indexCounter = new AtomicInteger(1);
-            Random random = new Random(42);
-
             List<Future<?>> futures = new ArrayList<>();
 
             for (int t = 0; t < numThreads; t++) {
@@ -474,8 +468,6 @@ class ProtectionGuaranteeTest {
             // Verify metadata file exists and is valid
             Path metaPath = tempDir.resolve("meta.dat");
             assertTrue(Files.exists(metaPath));
-            byte[] originalData = Files.readAllBytes(metaPath);
-
             // Simulate partial overwrite (as if crash during write)
             // Write partial garbage
             try (FileChannel fc = FileChannel.open(metaPath, StandardOpenOption.WRITE)) {

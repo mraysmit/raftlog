@@ -102,12 +102,6 @@ public final class FileRaftStorage implements RaftStorage {
     /** CRC size */
     private static final int CRC_SIZE = 4;
 
-    /** Maximum allowed payload size (16 MB) */
-    private static final int MAX_PAYLOAD_SIZE = 16 * 1024 * 1024;
-
-    /** Minimum free disk space required (64 MB) */
-    private static final long MIN_FREE_SPACE = 64 * 1024 * 1024;
-
     /** Lock file name */
     private static final String LOCK_FILE = "raft.lock";
 

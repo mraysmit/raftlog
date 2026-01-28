@@ -346,8 +346,6 @@ class FileRaftStorageTest {
         )).get(5, TimeUnit.SECONDS);
         storage.sync().get(5, TimeUnit.SECONDS);
 
-        long validSize = Files.size(tempDir.resolve("raft.log"));
-
         storage.appendEntries(List.of(
                 new LogEntryData(2, 1, "valid-2".getBytes())
         )).get(5, TimeUnit.SECONDS);

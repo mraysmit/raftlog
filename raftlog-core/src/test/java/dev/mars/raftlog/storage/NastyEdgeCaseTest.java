@@ -15,7 +15,6 @@
  */
 package dev.mars.raftlog.storage;
 
-import dev.mars.raftlog.storage.FileRaftStorage.StorageException;
 import dev.mars.raftlog.storage.RaftStorage.LogEntryData;
 import dev.mars.raftlog.storage.RaftStorage.PersistentMeta;
 import org.junit.jupiter.api.AfterEach;
@@ -30,7 +29,6 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
@@ -202,8 +200,6 @@ class NastyEdgeCaseTest {
         void interruptedRenameDetectable() throws Exception {
             // Simulate crash: temp file exists but rename didn't complete
             Path tmpPath = tempDir.resolve("meta.dat.tmp");
-            Path metaPath = tempDir.resolve("meta.dat");
-            
             // Write "old" metadata
             storage.updateMetadata(1L, Optional.of("old")).get(5, TimeUnit.SECONDS);
             storage.close();
@@ -508,7 +504,6 @@ class NastyEdgeCaseTest {
             storage.updateMetadata(5L, Optional.of("node-a")).get(5, TimeUnit.SECONDS);
             storage.close();
 
-            Path metaPath = tempDir.resolve("meta.dat");
             Path tmpPath = tempDir.resolve("meta.dat.tmp");
 
             // Create a "newer" temp file with older content (clock skew scenario)
