@@ -12,8 +12,24 @@
     <name>Raft WAL</name>
     <description>Minimal Write-Ahead Log for Raft Consensus</description>
 
+    <licenses>
+        <license>
+            <name>Apache License, Version 2.0</name>
+            <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <developers>
+        <developer>
+            <id>markr</id>
+            <name>Mark Andrew Ray-Smith</name>
+        </developer>
+    </developers>
+
     <modules>
         <module>raftlog-core</module>
+        <module>raftlog-demo</module>
     </modules>
 
     <properties>

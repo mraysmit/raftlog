@@ -1,0 +1,37 @@
+# Raft WAL Storage Configuration
+# ===============================
+# Place this file in the classpath or working directory.
+# Values can also be set via system properties (-Draftlog.xxx) or
+# environment variables (RAFTLOG_XXX).
+#
+# Priority: System Property > Environment Variable > Properties File > Default
+
+# Data directory for WAL and metadata files
+# Default: ~/.raftlog/data
+# System property: -Draftlog.dataDir=/path
+# Environment: RAFTLOG_DATA_DIR=/path
+#raftlog.dataDir=/var/lib/raftlog/data
+
+# Enable fsync after writes (should be true in production)
+# Default: true
+# System property: -Draftlog.syncEnabled=true
+# Environment: RAFTLOG_SYNC_ENABLED=true
+#raftlog.syncEnabled=true
+
+# Enable read-after-write verification (slower but detects silent corruption)
+# Default: false
+# System property: -Draftlog.verifyWrites=true
+# Environment: RAFTLOG_VERIFY_WRITES=true
+#raftlog.verifyWrites=false
+
+# Minimum free disk space in MB before writes are rejected
+# Default: 64
+# System property: -Draftlog.minFreeSpaceMb=64
+# Environment: RAFTLOG_MIN_FREE_SPACE_MB=64
+#raftlog.minFreeSpaceMb=64
+
+# Maximum payload size per log entry in MB
+# Default: 16
+# System property: -Draftlog.maxPayloadSizeMb=16
+# Environment: RAFTLOG_MAX_PAYLOAD_SIZE_MB=16
+#raftlog.maxPayloadSizeMb=16

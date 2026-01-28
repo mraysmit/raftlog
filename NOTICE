@@ -1,0 +1,21 @@
+Raft WAL - Minimal Write-Ahead Log for Raft Consensus
+Copyright 2026 Mark Andrew Ray-Smith
+
+This product includes software developed by Mark Andrew Ray-Smith.
+
+================================================================================
+
+This software contains the following third-party components:
+
+JUnit 5 Testing Framework (org.junit.jupiter:junit-jupiter:5.10.2)
+  License: Eclipse Public License 2.0
+  Copyright 2015-2024 the original author or authors
+  https://github.com/junit-team/junit5
+
+================================================================================
+
+For complete license texts, see the respective project repositories or the
+licenses directory in this distribution.
+
+This software is provided "AS IS" without warranty of any kind. See the
+LICENSE file for complete terms and conditions.
