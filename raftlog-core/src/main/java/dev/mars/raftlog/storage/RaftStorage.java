@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 Mark Andrew Ray-Smith
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package dev.mars.raftlog.storage;
 
 import java.io.Closeable;
@@ -92,10 +107,20 @@ public interface RaftStorage extends Closeable {
      * Deletes all log entries with index >= fromIndex.
      * <p>
      * Used to resolve conflicts when a follower diverges from the leader.
-     * NOT required to fsync immediately - use {@link #sync()} for that.
+     * <p>
+     * <b>WARNING: Truncation is NOT durable until {@link #sync()} is called.</b>
+     * <p>
+     * This method must NEVER be called standalone in RaftNode. Always use the pattern:
+     * <pre>{@code
+     * // Correct usage (via AppendPlan):
+     * wal.truncateSuffix(plan.truncateFromIndex())
+     *    .thenCompose(v -> wal.appendEntries(plan.entriesToAppend()))
+     *    .thenCompose(v -> wal.sync())  // DURABILITY BARRIER
+     *    .thenAccept(v -> plan.applyTo(memoryLog));
+     * }</pre>
      *
      * @param fromIndex the first index to delete (inclusive)
-     * @return a Future that completes when the truncation record is written
+     * @return a Future that completes when the truncation record is written (but NOT synced)
      */
     CompletableFuture<Void> truncateSuffix(long fromIndex);
 
