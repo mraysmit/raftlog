@@ -4,7 +4,7 @@
 
     <groupId>dev.mars.raftlog</groupId>
     <artifactId>raftlog</artifactId>
-    <version>1.0</version>
+    <version>1.1-SNAPSHOT</version>
     <packaging>pom</packaging>
 
     <name>RaftLog</name>
@@ -37,7 +37,7 @@
         <connection>scm:git:https://github.com/mraysmit/raftlog.git</connection>
         <developerConnection>scm:git:https://github.com/mraysmit/raftlog.git</developerConnection>
         <url>https://github.com/mraysmit/raftlog</url>
-        <tag>v1.0</tag>
+        <tag>HEAD</tag>
     </scm>
 
     <issueManagement>
