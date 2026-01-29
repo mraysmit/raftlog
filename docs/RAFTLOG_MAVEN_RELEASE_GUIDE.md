@@ -462,3 +462,153 @@ Before releasing, verify:
 - [OSSRH Guide](https://central.sonatype.org/publish/publish-guide/)
 - [GPG Best Practices](https://riseup.net/en/security/message-security/openpgp/best-practices)
 - [Maven Password Encryption](https://maven.apache.org/guides/mini/guide-encryption.html)
+
+---
+
+## Appendix: Common Maven Release Practices in the Industry
+
+This appendix describes common release management approaches used across Java/Maven projects, from traditional to modern CI-driven workflows.
+
+### A.1 Maven Release Plugin (Most Common)
+
+The standard approach used by Apache projects, Spring, and most open source libraries.
+
+```bash
+mvn release:prepare release:perform
+```
+
+**Pros:**
+- Automates version bump, Git tagging, and deployment
+- Well-documented with broad community support
+- Enforces a consistent release workflow
+
+**Cons:**
+- Can be finicky (rollback issues, CI integration challenges)
+- Creates multiple commits during release
+- Requires clean Git state
+
+### A.2 Versions Plugin + Manual Tagging
+
+Many teams find the release plugin too heavyweight and prefer explicit control:
+
+```bash
+# Set the release version
+mvn versions:set -DnewVersion=1.0.0
+git commit -am "Release 1.0.0"
+git tag v1.0.0
+
+# Deploy the release
+mvn clean deploy -Prelease
+
+# Set next development version
+mvn versions:set -DnewVersion=1.1-SNAPSHOT
+git commit -am "Next development cycle"
+git push && git push --tags
+```
+
+**Pros:**
+- Full control over each step
+- Easier to debug when things go wrong
+- Works well with any CI system
+
+**Cons:**
+- More manual steps
+- Easy to forget a step
+
+### A.3 CI-Driven Releases (Increasingly Popular)
+
+Let CI/CD handle versioning entirely, removing manual version management:
+
+**Tag-triggered releases:**
+- Push a `v1.0.0` tag → CI builds and deploys that version
+- Version derived from Git tag, not POM
+
+**Branch-based releases:**
+- Merge to `release` branch → CI bumps version and deploys
+- Often combined with GitFlow or trunk-based development
+
+**Example GitHub Actions workflow:**
+```yaml
+on:
+  push:
+    tags:
+      - 'v*'
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set version from tag
+        run: mvn versions:set -DnewVersion=${GITHUB_REF#refs/tags/v}
+      - name: Deploy
+        run: mvn clean deploy -Prelease
+```
+
+### A.4 CI Versioning with ${revision} Property
+
+Modern approach for multi-module projects that avoids editing POMs during releases:
+
+**Parent POM:**
+```xml
+<groupId>dev.mars</groupId>
+<artifactId>raftlog-parent</artifactId>
+<version>${revision}</version>
+
+<properties>
+    <revision>1.0-SNAPSHOT</revision>
+</properties>
+```
+
+**Build command:**
+```bash
+# CI sets version at build time
+mvn clean deploy -Drevision=1.0.0
+```
+
+**Requires:** Maven Flatten Plugin to resolve `${revision}` in published POMs.
+
+**Pros:**
+- No POM edits needed for releases
+- Version controlled entirely by CI/CD
+- Clean Git history
+
+**Cons:**
+- Requires flatten plugin setup
+- Less intuitive for developers reading POMs
+
+### A.5 JGitVer / GitFlow Maven Plugin
+
+Version derived automatically from Git history and tags with zero manual version management:
+
+```xml
+<plugin>
+    <groupId>fr.brouillard.oss</groupId>
+    <artifactId>jgitver-maven-plugin</artifactId>
+    <version>1.9.0</version>
+</plugin>
+```
+
+**How it works:**
+- Tagged commit `v1.0.0` → version is `1.0.0`
+- 3 commits after tag → version is `1.0.1-SNAPSHOT` or `1.0.0-3`
+- Entirely driven by Git state
+
+**Pros:**
+- Zero version management overhead
+- Git tags are the single source of truth
+
+**Cons:**
+- Less control over version numbers
+- Can produce unexpected versions if Git history is complex
+
+### A.6 Choosing an Approach
+
+| Approach | Best For |
+|----------|----------|
+| Maven Release Plugin | Traditional projects, Maven Central publishing |
+| Versions + Manual | Teams wanting explicit control |
+| CI-Driven (tag-based) | Modern CI/CD pipelines, GitHub/GitLab projects |
+| ${revision} property | Multi-module projects, frequent releases |
+| JGitVer | Projects wanting zero version management |
+
+**RaftLog uses** the Maven Release Plugin approach with support for manual versioning, providing flexibility for different deployment scenarios.
