@@ -174,6 +174,62 @@ mvn release:clean
 mvn release:prepare release:perform
 ```
 
+### Verifying the Release
+
+After `release:prepare` completes, verify the Git state:
+
+```bash
+# List all tags
+git tag -l
+
+# Show recent commits
+git log --oneline -5
+
+# Verify tag was pushed to remote
+git ls-remote --tags origin
+```
+
+Expected output after a successful release:
+```
+v1.0
+abc1234 (HEAD -> main, tag: v1.0) [release] prepare release v1.0
+def5678 [release] prepare for next development iteration
+```
+
+### Deploying from a Tag (If release:perform Failed)
+
+If `release:prepare` succeeded but `release:perform` failed (e.g., due to file locks on Windows or network issues), you can deploy manually from the tag:
+
+```bash
+# Checkout the release tag
+git checkout v1.0
+
+# Build and deploy with the release profile
+mvn clean deploy -Prelease
+
+# Return to main branch
+git checkout main
+```
+
+This is useful when:
+- The `release:perform` step was interrupted
+- You need to re-deploy an existing release
+- You want to deploy to a different repository
+
+### Common Windows Issues
+
+On Windows, the release plugin may fail during the completion `clean` goal due to file locks:
+
+```
+Failed to delete ...\target\test-classes\...
+```
+
+**This is typically harmless** — the release tag and artifacts are already created. Simply:
+1. Run `mvn release:clean` to remove temporary files
+2. Push any remaining commits: `git push`
+3. Push tags: `git push --tags`
+4. If needed, deploy from the tag manually (see above)
+
 ### Non-Interactive Release
 
 For CI/CD pipelines, use batch mode:
