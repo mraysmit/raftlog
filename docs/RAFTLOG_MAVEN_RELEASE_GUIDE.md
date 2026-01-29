@@ -500,7 +500,43 @@ gpg-agent --daemon
 mvn clean install -Prelease -Dgpg.keyname=your-key-id
 ```
 
-#### 4. "401 Unauthorized" During Deploy
+#### 4. GPG Not Installed (Local Builds Only)
+
+If GPG is not installed on your machine and you only need to install artifacts locally (not deploying to Maven Central), you can skip GPG signing entirely:
+
+```bash
+# Skip GPG signing for local installation
+mvn clean install -Prelease -DskipTests -Dgpg.skip=true
+```
+
+**Windows PowerShell Note:** PowerShell may incorrectly parse the `-Dgpg.skip=true` argument. Wrap it in quotes:
+
+```powershell
+# Windows PowerShell - quote the gpg.skip parameter
+mvn clean install -Prelease -DskipTests "-Dgpg.skip=true"
+```
+
+This installs the release artifacts to your local `~/.m2/repository/` without requiring GPG keys.
+
+**Why GPG Signing Can Be Skipped Locally But Not for Maven Central:**
+
+| Scenario | GPG Required? | Reason |
+|----------|---------------|--------|
+| `mvn install` (local `.m2`) | No | You're the only consumer; trust is implicit |
+| `mvn deploy` to private repo | Optional | Depends on your organization's policy |
+| `mvn deploy` to Maven Central | **Yes** | Sonatype/Maven Central requires all artifacts to be signed |
+
+Maven Central enforces GPG signing to ensure:
+1. **Authenticity** — Consumers can verify artifacts come from the claimed author
+2. **Integrity** — Artifacts haven't been tampered with in transit
+3. **Non-repudiation** — Publishers can't deny releasing a specific version
+
+When you skip GPG signing with `-Dgpg.skip=true`, the artifacts are still fully functional—they just can't be deployed to repositories that require signatures. This is perfectly acceptable for:
+- Local development and testing
+- Sharing artifacts within a trusted team via manual copy
+- Private repositories without signing requirements
+
+#### 6. "401 Unauthorized" During Deploy
 
 - Verify OSSRH credentials in `~/.m2/settings.xml`
 - Check server ID matches (`ossrh`)
@@ -526,6 +562,65 @@ mvn release:clean
 git reset --hard HEAD
 git clean -fd
 ```
+
+#### 7. Release Artifact Not Found on Another Machine
+
+The local `.m2` repository (`~/.m2/repository/`) is **machine-specific**. When you run `mvn install`, artifacts are only stored locally and are not automatically shared across machines.
+
+**Solution A: Rebuild from the Release Tag (Simplest)**
+
+If you have access to the source code on the new machine:
+
+```bash
+# Clone the repo (if needed) and checkout the release tag
+git checkout v1.0.0  # Replace with your release tag
+
+# Build and install to local .m2
+mvn clean install -Prelease -DskipTests
+```
+
+**Solution B: Deploy to a Remote Repository (Recommended for Teams)**
+
+Instead of `mvn install`, use `mvn deploy` to publish artifacts to a shared repository that all team members can access:
+
+| Repository Type | Use Case |
+|-----------------|----------|
+| Maven Central | Public open-source releases |
+| GitHub Packages | Free, integrates with GitHub repos |
+| Nexus/Artifactory | Private company repositories |
+
+```bash
+# Deploy to configured remote repository
+mvn clean deploy -Prelease
+```
+
+Other team members can then pull the artifact automatically via normal Maven dependency resolution.
+
+**Solution C: Manually Copy Artifacts**
+
+As a quick workaround, copy the artifacts from the original machine:
+
+```
+# Copy this folder from the source machine to the target machine
+~/.m2/repository/dev/mars/raftlog/
+```
+
+Ensure you copy the entire `raftlog` folder (including all subfolders for each module and version) to the same path on the new machine.
+
+**Solution D: Use GitHub Packages**
+
+For projects hosted on GitHub, GitHub Packages provides free artifact hosting. Add to your `pom.xml`:
+
+```xml
+<distributionManagement>
+    <repository>
+        <id>github</id>
+        <url>https://maven.pkg.github.com/OWNER/REPOSITORY</url>
+    </repository>
+</distributionManagement>
+```
+
+Then deploy with `mvn deploy -Prelease`. Team members will need to configure authentication in their `~/.m2/settings.xml` to pull from GitHub Packages.
 
 ### Encrypted Passwords
 
