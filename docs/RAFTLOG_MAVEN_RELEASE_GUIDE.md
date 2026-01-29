@@ -247,6 +247,33 @@ mvn release:prepare release:perform -B \
 
 For more control over the release process:
 
+### Version Naming Conventions
+
+Maven has specific conventions for version naming. Follow these standards:
+
+| Format | Usage | Status |
+|--------|-------|--------|
+| `1.0-SNAPSHOT` | Development versions | ✅ Standard |
+| `1.0` or `1.0.0` | Release versions | ✅ Recommended |
+| `1.0-RELEASE` | Release versions | ❌ Deprecated |
+| `1.0.RELEASE` | Release versions | ❌ Old Spring convention |
+| `1.0.Final` | Release versions | ❌ Old Hibernate convention |
+
+**Why plain versions (without `-RELEASE`) are preferred:**
+
+1. **Redundant qualifier** — If it's not `-SNAPSHOT`, it's a release by definition
+2. **Industry standard** — Spring Framework dropped `.RELEASE` suffix in Spring 6
+3. **Maven Central norm** — Plain versions are the standard on Maven Central
+4. **Simpler comparisons** — Maven's version ordering works better without qualifiers
+5. **SemVer alignment** — Semantic Versioning uses plain `MAJOR.MINOR.PATCH`
+
+**Recommended version progression:**
+```
+1.0-SNAPSHOT → 1.0 → 1.1-SNAPSHOT → 1.1 → 2.0-SNAPSHOT → 2.0
+```
+
+This is the convention used by Apache projects, Spring (6+), JUnit, Vert.x, and most modern Java libraries.
+
 ### Update Version Numbers
 
 ```bash
