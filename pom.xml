@@ -35,9 +35,9 @@
 
     <scm>
         <connection>scm:git:https://github.com/mraysmit/raftlog.git</connection>
-        <developerConnection>scm:git:git@github.com:mraysmit/raftlog.git</developerConnection>
+        <developerConnection>scm:git:https://github.com/mraysmit/raftlog.git</developerConnection>
         <url>https://github.com/mraysmit/raftlog</url>
-        <tag>v1.0</tag>
+        <tag>HEAD</tag>
     </scm>
 
     <issueManagement>
