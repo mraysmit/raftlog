@@ -132,6 +132,48 @@ mvn release:rollback
 mvn release:clean
 ```
 
+### Understanding Release Temporary Files
+
+During `release:prepare`, Maven creates several temporary files:
+
+| File | Purpose |
+|------|---------|
+| `pom.xml.releaseBackup` | Backup of original POM before modifications |
+| `pom.xml.next` | POM with the next development version (e.g., `1.2-SNAPSHOT`) |
+| `pom.xml.tag` | POM with the release version (e.g., `1.1`) |
+| `release.properties` | Tracks release state for resume/rollback |
+
+These files are created in each module directory (parent and children).
+
+**For dry runs** (`-DdryRun=true`):
+- All temporary files are created
+- No Git commits or tags are made
+- Allows you to verify versions and configuration before actual release
+
+**Cleaning up temporary files:**
+```bash
+mvn release:clean
+```
+
+Always run `release:clean` after a dry run or failed release before attempting another release.
+
+### Recommended Release Workflow
+
+```bash
+# 1. Verify clean working directory
+git status
+
+# 2. Dry run to verify configuration
+mvn release:prepare -DdryRun=true
+
+# 3. Review the generated .next and .tag files if needed
+# 4. Clean up dry run artifacts
+mvn release:clean
+
+# 5. Perform actual release
+mvn release:prepare release:perform
+```
+
 ### Non-Interactive Release
 
 For CI/CD pipelines, use batch mode:
