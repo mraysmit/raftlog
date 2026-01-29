@@ -4,7 +4,7 @@
 
     <groupId>dev.mars.raftlog</groupId>
     <artifactId>raftlog</artifactId>
-    <version>1.0</version>
+    <version>1.1-SNAPSHOT</version>
     <packaging>pom</packaging>
 
     <name>RaftLog</name>
