@@ -45,11 +45,14 @@ mvn clean verify
 
 This is the recommended release path for this repo.
 
-```bash
-# 0) Optional on Windows if previous attempts left locks
+Windows optional cleanup before deploy:
+
+```powershell
 Stop-Process -Name "gpg" -Force -ErrorAction SilentlyContinue
 Remove-Item -Force -Recurse ".\target" -ErrorAction SilentlyContinue
+```
 
+```bash
 # 1) Verify state
 git status
 mvn clean verify
@@ -320,7 +323,7 @@ mvn --encrypt-password your-central-token-password
 Before releasing, verify:
 
 - [ ] All tests pass: `mvn clean verify`
-- [ ] No SNAPSHOT dependencies: `mvn dependency:tree | grep SNAPSHOT`
+- [ ] No SNAPSHOT dependencies: `mvn dependency:tree` shows no `SNAPSHOT` artifacts
 - [ ] Documentation is updated
 - [ ] CHANGELOG is updated
 - [ ] Version numbers are correct

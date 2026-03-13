@@ -185,10 +185,10 @@ raftlog/
 mvn clean package -DskipTests
 
 # Run with default config (~/.raftlog/data)
-java -jar raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar
+java -jar raftlog-demo/target/raftlog-demo-1.1.0.jar
 
 # Run with custom data directory
-java -Draftlog.dataDir=/tmp/wal-demo -jar raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar
+java -Draftlog.dataDir=/tmp/wal-demo -jar raftlog-demo/target/raftlog-demo-1.1.0.jar
 ```
 
 ## Documentation
