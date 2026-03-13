@@ -20,6 +20,30 @@ RaftLog provides the durability core for Raft-based distributed systems. It impl
 - Java 21 or later
 - Maven 3.8+
 
+## Maven Coordinates
+
+### Maven
+
+```xml
+<dependency>
+    <groupId>io.github.mraysmit</groupId>
+    <artifactId>raftlog-core</artifactId>
+    <version>1.1.0</version>
+</dependency>
+```
+
+### Gradle (Groovy)
+
+```groovy
+implementation 'io.github.mraysmit:raftlog-core:1.1.0'
+```
+
+### Gradle (Kotlin)
+
+```kotlin
+implementation("io.github.mraysmit:raftlog-core:1.1.0")
+```
+
 ## Building
 
 ```bash

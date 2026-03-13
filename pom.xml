@@ -1,10 +1,10 @@
-<?xml version="1.0" encoding="UTF-8"?>
+mvn -Prelease -DskipTests clean deploy<?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>dev.mars.raftlog</groupId>
+    <groupId>io.github.mraysmit</groupId>
     <artifactId>raftlog</artifactId>
-    <version>1.1-SNAPSHOT</version>
+    <version>1.1.0</version>
     <packaging>pom</packaging>
 
     <name>RaftLog</name>
@@ -45,19 +45,6 @@
         <url>https://github.com/mraysmit/raftlog/issues</url>
     </issueManagement>
 
-    <distributionManagement>
-        <repository>
-            <id>ossrh</id>
-            <name>Central Repository OSSRH</name>
-            <url>https://oss.sonatype.org/service/local/staging/deploy/maven2/</url>
-        </repository>
-        <snapshotRepository>
-            <id>ossrh</id>
-            <name>Central Repository OSSRH Snapshots</name>
-            <url>https://oss.sonatype.org/content/repositories/snapshots/</url>
-        </snapshotRepository>
-    </distributionManagement>
-
     <modules>
         <module>raftlog-core</module>
         <module>raftlog-demo</module>
@@ -84,12 +71,13 @@
         <maven.jar.plugin.version>3.3.0</maven.jar.plugin.version>
         <maven.source.plugin.version>3.3.0</maven.source.plugin.version>
         <maven.javadoc.plugin.version>3.6.3</maven.javadoc.plugin.version>
-        <maven.gpg.plugin.version>3.1.0</maven.gpg.plugin.version>
+        <maven.gpg.plugin.version>3.2.7</maven.gpg.plugin.version>
         <maven.release.plugin.version>3.0.1</maven.release.plugin.version>
         <maven.enforcer.plugin.version>3.4.1</maven.enforcer.plugin.version>
         <maven.toolchains.plugin.version>3.1.0</maven.toolchains.plugin.version>
         <maven.shade.plugin.version>3.5.2</maven.shade.plugin.version>
         <jacoco.plugin.version>0.8.12</jacoco.plugin.version>
+        <central.publishing.plugin.version>0.10.0</central.publishing.plugin.version>
 
         <!-- Test Configuration -->
         <test.parallel>classes</test.parallel>
@@ -104,12 +92,12 @@
             <!-- Module Dependencies     -->
             <!-- ======================= -->
             <dependency>
-                <groupId>dev.mars.raftlog</groupId>
+                <groupId>io.github.mraysmit</groupId>
                 <artifactId>raftlog-core</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>dev.mars.raftlog</groupId>
+                <groupId>io.github.mraysmit</groupId>
                 <artifactId>raftlog-demo</artifactId>
                 <version>${project.version}</version>
             </dependency>
@@ -449,6 +437,19 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-enforcer-plugin</artifactId>
             </plugin>
+
+            <!-- Sonatype Central Portal publishing (replaces legacy maven-deploy-plugin) -->
+            <plugin>
+                <groupId>org.sonatype.central</groupId>
+                <artifactId>central-publishing-maven-plugin</artifactId>
+                <version>${central.publishing.plugin.version}</version>
+                <extensions>true</extensions>
+                <configuration>
+                    <publishingServerId>central</publishingServerId>
+                    <autoPublish>true</autoPublish>
+                    <waitUntil>published</waitUntil>
+                </configuration>
+            </plugin>
         </plugins>
     </build>
 
@@ -611,6 +612,7 @@
                 <test.threadCount>2</test.threadCount>
             </properties>
         </profile>
+
     </profiles>
 
 </project>
