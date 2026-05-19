@@ -287,11 +287,13 @@ class HighCoverageTest {
 
         @Test
         @DisplayName("Open fails on non-existent parent with no permission")
-        void testOpenInvalidPath() {
+        void testOpenInvalidPath() throws Exception {
             FileRaftStorage storage = new FileRaftStorage(true);
 
-            // Try to open in a path that can't be created (null byte in path on Windows)
-            Path invalidPath = Path.of("Z:\\nonexistent\\path\\that\\cannot\\exist\\raftlog");
+            // Create a temp dir then delete it so the parent is guaranteed not to exist on any OS
+            Path parent = Files.createTempDirectory("raftlog-invalid-test");
+            Files.delete(parent);
+            Path invalidPath = parent.resolve("raftlog");
 
             ExecutionException ex = assertThrows(ExecutionException.class, () ->
                     storage.open(invalidPath).get(5, TimeUnit.SECONDS));
