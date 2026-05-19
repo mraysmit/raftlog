@@ -249,7 +249,7 @@ class ConfigResolverTest {
             RaftStorageConfig config = RaftStorageConfig.builder().build();
             
             // Default dataDir is ~/.raftlog/data
-            assertTrue(config.dataDir().toString().endsWith("data"));
+            assertTrue(config.dataDir().endsWith(Path.of("data")));
             
             // Default syncEnabled is true
             assertTrue(config.syncEnabled());

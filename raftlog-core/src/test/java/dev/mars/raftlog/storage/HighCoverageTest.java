@@ -19,6 +19,8 @@ import dev.mars.raftlog.storage.FileRaftStorage.StorageException;
 import dev.mars.raftlog.storage.RaftStorage.LogEntryData;
 import dev.mars.raftlog.storage.RaftStorage.PersistentMeta;
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.ByteBuffer;
@@ -27,11 +29,14 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.PosixFilePermission;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 /**
  * High-coverage tests targeting the remaining uncovered code paths.
@@ -290,10 +295,11 @@ class HighCoverageTest {
         void testOpenInvalidPath() throws Exception {
             FileRaftStorage storage = new FileRaftStorage(true);
 
-            // Create a temp dir then delete it so the parent is guaranteed not to exist on any OS
-            Path parent = Files.createTempDirectory("raftlog-invalid-test");
-            Files.delete(parent);
-            Path invalidPath = parent.resolve("raftlog");
+            // Use a regular file as a path component — Files.createDirectories cannot
+            // create a subdirectory inside a file on any OS (Windows, Linux, macOS).
+            Path tempFile = Files.createTempFile("raftlog-blocked", ".tmp");
+            tempFile.toFile().deleteOnExit();
+            Path invalidPath = tempFile.resolve("raftlog");
 
             ExecutionException ex = assertThrows(ExecutionException.class, () ->
                     storage.open(invalidPath).get(5, TimeUnit.SECONDS));
@@ -917,6 +923,87 @@ class HighCoverageTest {
             assertEquals(1, entries.size());
 
             storage2.close();
+        }
+    }
+
+    // ========================================================================
+    // Linux-Specific Tests
+    // ========================================================================
+
+    @Nested
+    @DisplayName("Linux-Specific Behaviour")
+    @EnabledOnOs(OS.LINUX)
+    class LinuxSpecificTests {
+
+        @Test
+        @DisplayName("Read-only parent directory prevents WAL creation")
+        void testReadOnlyParentBlocksDirectoryCreation() throws Exception {
+            Path readOnlyDir = Files.createTempDirectory("raftlog-readonly");
+            readOnlyDir.toFile().setWritable(false);
+            try {
+                // Skip if running as root — root bypasses POSIX permission enforcement
+                assumeFalse(readOnlyDir.toFile().canWrite(),
+                        "Skipped: read-only enforcement not available (running as root?)");
+
+                FileRaftStorage storage = new FileRaftStorage(true);
+                Path target = readOnlyDir.resolve("subdir");
+
+                ExecutionException ex = assertThrows(ExecutionException.class,
+                        () -> storage.open(target).get(5, TimeUnit.SECONDS));
+
+                assertTrue(ex.getCause() instanceof StorageException);
+                storage.close();
+            } finally {
+                readOnlyDir.toFile().setWritable(true);
+                Files.deleteIfExists(readOnlyDir);
+            }
+        }
+
+        @Test
+        @DisplayName("raft.lock is not world-writable or group-writable after open")
+        void testLockFileIsNotWorldWritable() throws Exception {
+            FileRaftStorage storage = new FileRaftStorage(true);
+            storage.open(tempDir).get(5, TimeUnit.SECONDS);
+            try {
+                Path lockFile = tempDir.resolve("raft.lock");
+                assertTrue(Files.exists(lockFile), "raft.lock should exist after open");
+
+                Set<PosixFilePermission> perms = Files.getPosixFilePermissions(lockFile);
+                assertFalse(perms.contains(PosixFilePermission.OTHERS_WRITE),
+                        "raft.lock must not be world-writable");
+                assertFalse(perms.contains(PosixFilePermission.GROUP_WRITE),
+                        "raft.lock must not be group-writable");
+            } finally {
+                storage.close();
+            }
+        }
+
+        @Test
+        @DisplayName("WAL opens and replays correctly via a symlink to the data directory")
+        void testSymlinkDataDirectory() throws Exception {
+            Path realDir = Files.createTempDirectory("raftlog-real");
+            Path symlinkParent = Files.createTempDirectory("raftlog-symlink-parent");
+            Path symlink = symlinkParent.resolve("link");
+            Files.createSymbolicLink(symlink, realDir);
+            try {
+                FileRaftStorage storage = new FileRaftStorage(true);
+                storage.open(symlink).get(5, TimeUnit.SECONDS);
+
+                List<LogEntryData> entries = List.of(new LogEntryData(1, 1, "data".getBytes()));
+                storage.appendEntries(entries).get(5, TimeUnit.SECONDS);
+                storage.sync().get(5, TimeUnit.SECONDS);
+
+                List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
+                assertEquals(1, replayed.size());
+                storage.close();
+            } finally {
+                Files.deleteIfExists(symlink);
+                Files.deleteIfExists(symlinkParent);
+                Files.deleteIfExists(realDir.resolve("raft.lock"));
+                Files.deleteIfExists(realDir.resolve("raft.log"));
+                Files.deleteIfExists(realDir.resolve("meta.dat"));
+                Files.deleteIfExists(realDir);
+            }
         }
     }
 }
