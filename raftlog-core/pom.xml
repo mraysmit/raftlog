@@ -53,6 +53,30 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-jar-plugin</artifactId>
             </plugin>
+            <!-- Ensure the custom java.io.tmpdir exists before any test thread starts.
+                 The parent POM sets java.io.tmpdir to target/test-tmp via Surefire
+                 systemPropertyVariables, but Maven does not create that directory
+                 automatically.  Without it, parallel test classes that call
+                 Files.createTempFile() or rely on @TempDir can fail on a clean build. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <version>3.1.0</version>
+                <executions>
+                    <execution>
+                        <id>create-test-tmp-dir</id>
+                        <phase>generate-test-resources</phase>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <configuration>
+                            <target>
+                                <mkdir dir="${project.build.directory}/test-tmp"/>
+                            </target>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
     </build>
 
