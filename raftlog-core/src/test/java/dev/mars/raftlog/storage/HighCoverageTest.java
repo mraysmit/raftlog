@@ -290,21 +290,30 @@ class HighCoverageTest {
     @DisplayName("Error Path Tests")
     class ErrorPathTests {
 
+        // Own temp dir so its lifecycle is unambiguously scoped to each test
+        // method in this nested class.  Relying on the outer-class @TempDir field
+        // requires JUnit to inject the enclosing-instance field before running a
+        // nested-class test — a subtlety that has caused CI flakiness.
+        @TempDir
+        Path errorTestTempDir;
+
         @Test
         @DisplayName("Open fails when dataDir path is an existing regular file")
         void testOpenInvalidPath() throws Exception {
             FileRaftStorage storage = new FileRaftStorage(true);
 
-            // Create the blocking file inside JUnit's @TempDir so it is guaranteed
-            // to still exist when the walExecutor runs Files.createDirectories.
-            // Using the system temp dir risks a race: if the OS cleans up the file
-            // before the executor runs, createDirectories happily creates the path
-            // as a normal directory and open() succeeds — the test then fails.
-            // @TempDir is alive for the full test duration so there is no race.
-            Path blockingFile = Files.createTempFile(tempDir, "raftlog-blocked", ".tmp");
+            // Create a regular file inside our own @TempDir.  JUnit guarantees
+            // errorTestTempDir (and everything inside it) exists for the full
+            // duration of this test method, so there is no race between
+            // Files.createTempFile() returning and the walExecutor calling
+            // Files.createDirectories().
+            Path blockingFile = Files.createTempFile(errorTestTempDir, "raftlog-blocked", ".tmp");
 
-            // Use the regular file itself as dataDir: createDirectories throws
-            // FileAlreadyExistsException because it exists but is not a directory.
+            // Use the regular file itself as dataDir.  Files.createDirectories()
+            // calls mkdir() on an existing regular file, which returns EEXIST on
+            // Linux.  Java maps that to FileAlreadyExistsException, which
+            // createDirectories re-throws (it only swallows *other* IOExceptions).
+            // open() catches IOException → StorageException → ExecutionException.
             ExecutionException ex = assertThrows(ExecutionException.class, () ->
                     storage.open(blockingFile).get(5, TimeUnit.SECONDS));
 
