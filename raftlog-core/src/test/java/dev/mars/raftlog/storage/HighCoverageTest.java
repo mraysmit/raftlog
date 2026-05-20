@@ -291,18 +291,22 @@ class HighCoverageTest {
     class ErrorPathTests {
 
         @Test
-        @DisplayName("Open fails on non-existent parent with no permission")
+        @DisplayName("Open fails when dataDir path is an existing regular file")
         void testOpenInvalidPath() throws Exception {
             FileRaftStorage storage = new FileRaftStorage(true);
 
-            // Use a regular file as a path component — Files.createDirectories cannot
-            // create a subdirectory inside a file on any OS (Windows, Linux, macOS).
-            Path tempFile = Files.createTempFile("raftlog-blocked", ".tmp");
-            tempFile.toFile().deleteOnExit();
-            Path invalidPath = tempFile.resolve("raftlog");
+            // Create the blocking file inside JUnit's @TempDir so it is guaranteed
+            // to still exist when the walExecutor runs Files.createDirectories.
+            // Using the system temp dir risks a race: if the OS cleans up the file
+            // before the executor runs, createDirectories happily creates the path
+            // as a normal directory and open() succeeds — the test then fails.
+            // @TempDir is alive for the full test duration so there is no race.
+            Path blockingFile = Files.createTempFile(tempDir, "raftlog-blocked", ".tmp");
 
+            // Use the regular file itself as dataDir: createDirectories throws
+            // FileAlreadyExistsException because it exists but is not a directory.
             ExecutionException ex = assertThrows(ExecutionException.class, () ->
-                    storage.open(invalidPath).get(5, TimeUnit.SECONDS));
+                    storage.open(blockingFile).get(5, TimeUnit.SECONDS));
 
             assertTrue(ex.getCause() instanceof StorageException);
             storage.close();
