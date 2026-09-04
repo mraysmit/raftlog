@@ -125,6 +125,23 @@ public interface RaftStorage extends Closeable {
     CompletableFuture<Void> truncateSuffix(long fromIndex);
 
     /**
+     * Deletes all log entries with index <= toIndex, compacting the journal on disk.
+     * <p>
+     * Used after a snapshot has captured the state machine up to {@code toIndex}. Later
+     * entries keep their indices; the journal is rewritten so that earlier records, including
+     * resolved suffix truncations, no longer occupy space or replay time.
+     * <p>
+     * <b>Safety:</b> only call this after a snapshot that includes every entry up to
+     * {@code toIndex} has been made durable. The rewrite is atomic: a crash leaves either the
+     * old journal or the compacted one, never a mixture.
+     *
+     * @param toIndex the last index to delete (inclusive); a value below the first retained
+     *                index is a no-op
+     * @return a Future that completes when the compacted journal is durable
+     */
+    CompletableFuture<Void> truncatePrefix(long toIndex);
+
+    /**
      * Universal Durability Barrier.
      * <p>
      * Forces all pending appends/truncations to physical disk.

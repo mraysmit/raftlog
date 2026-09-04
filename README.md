@@ -28,20 +28,20 @@ RaftLog provides the durability core for Raft-based distributed systems. It impl
 <dependency>
     <groupId>io.github.mraysmit</groupId>
     <artifactId>raftlog-core</artifactId>
-    <version>1.1.0</version>
+    <version>1.2.0</version>
 </dependency>
 ```
 
 ### Gradle (Groovy)
 
 ```groovy
-implementation 'io.github.mraysmit:raftlog-core:1.1.0'
+implementation 'io.github.mraysmit:raftlog-core:1.2.0'
 ```
 
 ### Gradle (Kotlin)
 
 ```kotlin
-implementation("io.github.mraysmit:raftlog-core:1.1.0")
+implementation("io.github.mraysmit:raftlog-core:1.2.0")
 ```
 
 ## Building
@@ -185,10 +185,10 @@ raftlog/
 mvn clean package -DskipTests
 
 # Run with default config (~/.raftlog/data)
-java -jar raftlog-demo/target/raftlog-demo-1.1.0.jar
+java -jar raftlog-demo/target/raftlog-demo-1.2.0.jar
 
 # Run with custom data directory
-java -Draftlog.dataDir=/tmp/wal-demo -jar raftlog-demo/target/raftlog-demo-1.1.0.jar
+java -Draftlog.dataDir=/tmp/wal-demo -jar raftlog-demo/target/raftlog-demo-1.2.0.jar
 ```
 
 ## Documentation

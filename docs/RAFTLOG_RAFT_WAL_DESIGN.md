@@ -225,7 +225,7 @@ Anything beyond that is out of scope.
 
 For an Alpha release, a single file simplifies everything.
 
-**Trade-off:** File size grows unbounded until snapshots are implemented. For early testing and development, this is acceptable.
+**Trade-off:** File size grows until the caller compacts the journal. Since 1.2.0, `truncatePrefix(toIndex)` rewrites the single file without the entries at or below a snapshot index, atomically, so a caller that implements snapshots can bound the log without segmentation.
 
 **If you need this later:** Implement segment rotation when the current segment exceeds a size threshold (e.g., 64MB), seal the old segment, open a new one, and update recovery to scan all segments in order.
 
@@ -241,7 +241,7 @@ For an Alpha release, a single file simplifies everything.
 
 ### 13.4 No Snapshots (Initially)
 
-**What this means:** There's no mechanism to "checkpoint" the state machine and truncate old log entries. The log grows forever.
+**What this means:** The library does not capture state machine snapshots. Since 1.2.0 it does provide the storage half of the mechanism: `truncatePrefix(toIndex)` removes every entry at or below the snapshot index from disk, and replay resolves repeated APPEND records by index (a same-term repeat is ignored, a different-term record supersedes the tail from its index). Capturing the snapshot, tracking the last included index and term, and InstallSnapshot remain the caller's responsibility.
 
 **Why it's a non-goal (initially):** Snapshots are complex:
 - Must capture a consistent state machine image

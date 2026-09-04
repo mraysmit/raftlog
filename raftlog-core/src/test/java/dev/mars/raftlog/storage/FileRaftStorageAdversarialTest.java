@@ -831,7 +831,7 @@ class FileRaftStorageAdversarialTest {
         }
 
         @Test
-        @DisplayName("Repeated truncate-append cycles - accumulates entries with same index")
+        @DisplayName("Repeated truncate-append cycles - later terms supersede the same index")
         void repeatedTruncateAppendCycles() throws Exception {
             for (int cycle = 0; cycle < 10; cycle++) {
                 // Append 10 entries
@@ -848,16 +848,14 @@ class FileRaftStorageAdversarialTest {
             storage.sync().get(5, TimeUnit.SECONDS);
             List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
 
-            // After replaying all APPEND and TRUNCATE records:
-            // The replay appends entries to a list and truncate removes by index.
-            // Since indices 1-3 are added each cycle, they accumulate:
-            // Cycle 1: adds 1-10, truncate leaves 1-3
-            // Cycle 2: adds 1-10 again (now have two sets of 1-3), truncate from 4 only removes 4-10
-            // ... after 10 cycles, we have 10 copies of entries 1-3
-            // 
-            // This is correct WAL behavior - the storage layer faithfully records
-            // what happens. The Raft layer would use AppendPlan to avoid duplicates.
-            assertEquals(30, replayed.size()); // 10 cycles × 3 entries each
+            // Replay resolves records by index. Each cycle rewrites indices 1-3 with a higher
+            // term, so every cycle supersedes the previous one and only the last survives.
+            assertEquals(3, replayed.size());
+            for (int i = 1; i <= 3; i++) {
+                assertEquals(i, replayed.get(i - 1).index());
+                assertEquals(10, replayed.get(i - 1).term());
+                assertEquals("cycle-9-" + i, new String(replayed.get(i - 1).payload()));
+            }
         }
 
         @Test
@@ -881,18 +879,20 @@ class FileRaftStorageAdversarialTest {
         }
 
         @Test
-        @DisplayName("Duplicate indices in single append")
+        @DisplayName("Duplicate index with the same term replays as one entry")
         void duplicateIndicesInSingleAppend() throws Exception {
             storage.appendEntries(List.of(
                     new LogEntryData(1, 1, "first".getBytes()),
-                    new LogEntryData(1, 1, "second".getBytes())  // Same index!
+                    new LogEntryData(1, 1, "second".getBytes())  // Same index and term
             )).get(5, TimeUnit.SECONDS);
             storage.sync().get(5, TimeUnit.SECONDS);
 
             List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
 
-            // Both should be stored
-            assertEquals(2, replayed.size());
+            // Same index and term means the same entry under the Raft log matching property,
+            // so the repeated record is ignored and the first write is kept.
+            assertEquals(1, replayed.size());
+            assertEquals("first", new String(replayed.get(0).payload()));
         }
     }
 
