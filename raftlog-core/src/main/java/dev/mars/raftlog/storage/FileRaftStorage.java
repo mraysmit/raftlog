@@ -47,7 +47,8 @@ import java.util.zip.CRC32C;
  * <pre>
  * data/
  *  ├─ meta.dat     // currentTerm + votedFor (atomic replace)
- *  └─ raft.log     // append-only WAL: TRUNCATE and APPEND records
+ *  ├─ raft.log     // WAL: TRUNCATE and APPEND records; replaced on compaction
+ *  └─ raft.log.tmp // unpublished prefix-compaction output
  * </pre>
  * <p>
  * <b>Thread Safety:</b>
@@ -57,12 +58,12 @@ import java.util.zip.CRC32C;
  * <b>Durability:</b>
  * <ul>
  *   <li>meta.dat: Uses atomic rename (write temp → fsync → rename → fsync dir)</li>
- *   <li>raft.log: Append-only with explicit {@link #sync()} barrier</li>
+ *   <li>raft.log: Appends use {@link #sync()}; prefix compaction forces and atomically replaces it</li>
  * </ul>
  * <p>
  * <b>Protection Mechanisms:</b>
  * <ul>
- *   <li><b>File Locking:</b> Exclusive lock on raft.log prevents multiple processes
+ *   <li><b>File Locking:</b> Exclusive lock on raft.lock prevents multiple processes
  *       from writing simultaneously. Lock is held for the lifetime of the storage instance.</li>
  *   <li><b>Disk Space Checking:</b> Pre-flight check before writes to detect low disk space
  *       early and fail gracefully rather than mid-write.</li>
@@ -113,6 +114,7 @@ public final class FileRaftStorage implements RaftStorage {
 
     /** WAL file name */
     private static final String LOG_FILE = "raft.log";
+    private static final String LOG_TMP_FILE = "raft.log.tmp";
 
     // ========================================================================
     // State
@@ -136,12 +138,14 @@ public final class FileRaftStorage implements RaftStorage {
     private final boolean verifyWrites;
     private final int maxPayloadSize;
     private final long minFreeSpace;
+    private final CompactionIo compactionIo;
 
     private Path dataDir;
     private FileChannel logChannel;
     private FileChannel lockChannel;
     private FileLock exclusiveLock;
     private volatile boolean closed = false;
+    private volatile StorageException compactionFailure;
 
     // ========================================================================
     // Constructor
@@ -152,7 +156,7 @@ public final class FileRaftStorage implements RaftStorage {
      * system properties, environment variables, properties file, or defaults.
      * <p>
      * This is the recommended constructor for production use.
-     * 
+     *
      * @see RaftStorageConfig
      */
     public FileRaftStorage() {
@@ -165,12 +169,17 @@ public final class FileRaftStorage implements RaftStorage {
      * @param config the storage configuration
      */
     public FileRaftStorage(RaftStorageConfig config) {
+        this(config, new CompactionIo());
+    }
+
+    FileRaftStorage(RaftStorageConfig config, CompactionIo compactionIo) {
+        this.compactionIo = java.util.Objects.requireNonNull(compactionIo);
         this.config = config;
         this.syncEnabled = config.syncEnabled();
         this.verifyWrites = config.verifyWrites();
         this.maxPayloadSize = config.maxPayloadSizeBytes();
         this.minFreeSpace = config.minFreeSpaceBytes();
-        
+
         // Single-threaded executor ensures write serialization
         this.walExecutor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "wal-executor");
@@ -249,6 +258,13 @@ public final class FileRaftStorage implements RaftStorage {
                 // Acquire exclusive lock to prevent multiple processes
                 acquireExclusiveLock();
 
+                // Only the published WAL is authoritative. A process interrupted
+                // before atomic replacement may leave an incomplete rewrite.
+                if (Files.exists(dataDir.resolve(LOG_TMP_FILE)) && !Files.exists(dataDir.resolve(LOG_FILE))) {
+                    throw new IOException("Unpublished rewrite exists without raft.log; preserve directory for recovery");
+                }
+                Files.deleteIfExists(dataDir.resolve(LOG_TMP_FILE));
+
                 // Check available disk space
                 checkDiskSpace();
 
@@ -303,6 +319,7 @@ public final class FileRaftStorage implements RaftStorage {
     @Override
     public CompletableFuture<Void> updateMetadata(long currentTerm, Optional<String> votedFor) {
         return CompletableFuture.runAsync(() -> {
+            ensureHealthy();
             try {
                 LOG.debug("Updating metadata: term={}, votedFor={}", currentTerm, votedFor.orElse("(none)"));
                 Path tmpPath = dataDir.resolve(META_TMP_FILE);
@@ -361,6 +378,7 @@ public final class FileRaftStorage implements RaftStorage {
     @Override
     public CompletableFuture<PersistentMeta> loadMetadata() {
         return CompletableFuture.supplyAsync(() -> {
+            ensureHealthy();
             try {
                 Path metaPath = dataDir.resolve(META_FILE);
                 if (!Files.exists(metaPath)) {
@@ -390,7 +408,7 @@ public final class FileRaftStorage implements RaftStorage {
                 CRC32C crc = new CRC32C();
                 crc.update(all, 0, 8 + 4 + voteLen);
                 if ((int) crc.getValue() != expectedCrc) {
-                    LOG.error("Corrupt metadata: CRC mismatch (expected={}, computed={})", 
+                    LOG.error("Corrupt metadata: CRC mismatch (expected={}, computed={})",
                             expectedCrc, (int) crc.getValue());
                     throw new StorageException("Corrupt meta.dat: CRC mismatch");
                 }
@@ -415,6 +433,7 @@ public final class FileRaftStorage implements RaftStorage {
 
     @Override
     public CompletableFuture<Void> appendEntries(List<LogEntryData> entries) {
+        if (compactionFailure != null) return CompletableFuture.failedFuture(compactionFailure);
         if (entries == null || entries.isEmpty()) {
             LOG.trace("appendEntries called with empty list, no-op");
             return CompletableFuture.completedFuture(null);
@@ -430,25 +449,26 @@ public final class FileRaftStorage implements RaftStorage {
             }
         }
 
-        LOG.debug("Appending {} entries (indices {}-{})", 
-                entries.size(), 
-                entries.getFirst().index(), 
+        LOG.debug("Appending {} entries (indices {}-{})",
+                entries.size(),
+                entries.getFirst().index(),
                 entries.getLast().index());
 
         return CompletableFuture.runAsync(() -> {
+            ensureHealthy();
             try {
                 long totalBytes = 0;
                 for (LogEntryData entry : entries) {
                     writeRecord(TYPE_APPEND, entry.index(), entry.term(),
                             entry.payload() != null ? entry.payload() : new byte[0]);
                     totalBytes += HEADER_SIZE + (entry.payload() != null ? entry.payload().length : 0) + CRC_SIZE;
-                    LOG.trace("Appended entry: index={}, term={}, payloadSize={}", 
-                            entry.index(), entry.term(), 
+                    LOG.trace("Appended entry: index={}, term={}, payloadSize={}",
+                            entry.index(), entry.term(),
                             entry.payload() != null ? entry.payload().length : 0);
                 }
-                LOG.info("Appended {} entries to WAL: indices [{}-{}], terms [{}-{}], {} bytes", 
+                LOG.info("Appended {} entries to WAL: indices [{}-{}], terms [{}-{}], {} bytes",
                         entries.size(),
-                        entries.getFirst().index(), 
+                        entries.getFirst().index(),
                         entries.getLast().index(),
                         entries.getFirst().term(),
                         entries.getLast().term(),
@@ -464,6 +484,7 @@ public final class FileRaftStorage implements RaftStorage {
     public CompletableFuture<Void> truncateSuffix(long fromIndex) {
         LOG.debug("Truncating log suffix from index {}", fromIndex);
         return CompletableFuture.runAsync(() -> {
+            ensureHealthy();
             try {
                 // Write a TRUNCATE record (no payload needed)
                 writeRecord(TYPE_TRUNCATE, fromIndex, 0L, new byte[0]);
@@ -477,6 +498,7 @@ public final class FileRaftStorage implements RaftStorage {
 
     @Override
     public CompletableFuture<Void> sync() {
+        if (compactionFailure != null) return CompletableFuture.failedFuture(compactionFailure);
         if (!syncEnabled) {
             LOG.trace("sync() called but fsync is disabled");
             return CompletableFuture.completedFuture(null);
@@ -484,6 +506,7 @@ public final class FileRaftStorage implements RaftStorage {
 
         LOG.debug("Syncing WAL to disk");
         return CompletableFuture.runAsync(() -> {
+            ensureHealthy();
             try {
                 long startNanos = System.nanoTime();
                 logChannel.force(true);
@@ -497,141 +520,207 @@ public final class FileRaftStorage implements RaftStorage {
     }
 
     @Override
+    public CompletableFuture<Void> truncatePrefix(long toIndex) {
+        return CompletableFuture.runAsync(() -> {
+            ensureHealthy();
+            if (toIndex < 0) throw new IllegalArgumentException("Prefix boundary must not be negative");
+            if (toIndex == 0) return;
+            Path temporary = dataDir.resolve(LOG_TMP_FILE);
+            Path published = dataDir.resolve(LOG_FILE);
+            boolean publicationAttempted = false;
+            try {
+                // Do not turn source corruption into acknowledged prefix deletion.
+                // The caller must explicitly replay/repair a torn tail first.
+                List<LogEntryData> retained = readLog(false).stream().filter(e -> e.index() > toIndex).toList();
+                checkDiskSpace();
+                Files.deleteIfExists(temporary);
+                try (FileChannel output = FileChannel.open(temporary,
+                        StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
+                    for (LogEntryData entry : retained) {
+                        compactionIo.write(output, encodeRecord(TYPE_APPEND, entry.index(), entry.term(), entry.payload()));
+                    }
+                    // Compaction always forces the new WAL, even with append sync disabled.
+                    compactionIo.force(output);
+                }
+                // Windows requires closing the old handle before replacing the file.
+                // Once publication begins an exception may mean either generation is
+                // present: reject subsequent operations until a fresh open recovers it.
+                publicationAttempted = true;
+                logChannel.close();
+                compactionIo.replace(temporary, published);
+                compactionIo.forceDirectory(dataDir);
+                logChannel = compactionIo.reopen(published);
+                logChannel.position(logChannel.size());
+                LOG.info("Compacted WAL through index {}: {} entries retained", toIndex, retained.size());
+            } catch (IOException | RuntimeException e) {
+                StorageException failure = new StorageException("Prefix compaction failed", e);
+                if (publicationAttempted) {
+                    compactionFailure = failure;
+                    try { logChannel.close(); } catch (IOException closeFailure) { failure.addSuppressed(closeFailure); }
+                } else {
+                    try { Files.deleteIfExists(temporary); } catch (IOException cleanupFailure) { failure.addSuppressed(cleanupFailure); }
+                }
+                throw failure;
+            }
+        }, walExecutor);
+    }
+
+    private void ensureHealthy() {
+        if (compactionFailure != null) throw compactionFailure;
+    }
+
+    @Override
     public CompletableFuture<List<LogEntryData>> replayLog() {
         return CompletableFuture.supplyAsync(() -> {
+            ensureHealthy();
             try {
-                Path logPath = dataDir.resolve(LOG_FILE);
-                if (!Files.exists(logPath)) {
-                    LOG.debug("No WAL file found, returning empty log");
-                    return List.of();
-                }
-
-                LOG.info("Replaying WAL from: {}", logPath);
-                long startTime = System.currentTimeMillis();
-                List<LogEntryData> entries = new ArrayList<>();
-                int appendCount = 0;
-                int truncateCount = 0;
-
-                try (FileChannel ch = FileChannel.open(logPath,
-                        StandardOpenOption.READ,
-                        StandardOpenOption.WRITE)) {
-
-                    long fileSize = ch.size();
-                    LOG.debug("WAL file size: {} bytes", fileSize);
-
-                    long pos = 0;
-                    long lastGoodPos = 0;
-                    ByteBuffer headerBuf = ByteBuffer.allocate(HEADER_SIZE);
-
-                    while (true) {
-                        // Read header
-                        headerBuf.clear();
-                        int headerRead = ch.read(headerBuf, pos);
-                        if (headerRead < HEADER_SIZE) {
-                            if (headerRead > 0) {
-                                LOG.debug("Incomplete header at pos {}: read {} bytes, expected {}", 
-                                        pos, headerRead, HEADER_SIZE);
-                            }
-                            break; // Incomplete header
-                        }
-                        headerBuf.flip();
-
-                        int magic = headerBuf.getInt();
-                        short version = headerBuf.getShort();
-                        byte type = headerBuf.get();
-                        long index = headerBuf.getLong();
-                        long term = headerBuf.getLong();
-                        int payloadLen = headerBuf.getInt();
-
-                        // Validate header
-                        if (magic != MAGIC || version != VERSION) {
-                            LOG.warn("Invalid header at pos {}: magic=0x{}, version={}", 
-                                    pos, Integer.toHexString(magic), version);
-                            break; // Corrupt or torn header
-                        }
-                        if (payloadLen < 0 || payloadLen > maxPayloadSize) {
-                            LOG.warn("Invalid payload length at pos {}: {}", pos, payloadLen);
-                            break; // Invalid payload length
-                        }
-
-                        // Read payload
-                        ByteBuffer payloadBuf = ByteBuffer.allocate(payloadLen);
-                        int payloadRead = ch.read(payloadBuf, pos + HEADER_SIZE);
-                        if (payloadRead < payloadLen) {
-                            LOG.debug("Incomplete payload at pos {}: read {} bytes, expected {}", 
-                                    pos, payloadRead, payloadLen);
-                            break; // Incomplete payload
-                        }
-                        payloadBuf.flip();
-
-                        // Read CRC
-                        ByteBuffer crcBuf = ByteBuffer.allocate(CRC_SIZE);
-                        int crcRead = ch.read(crcBuf, pos + HEADER_SIZE + payloadLen);
-                        if (crcRead < CRC_SIZE) {
-                            LOG.debug("Incomplete CRC at pos {}", pos);
-                            break; // Incomplete CRC
-                        }
-                        crcBuf.flip();
-                        int expectedCrc = crcBuf.getInt();
-
-                        // Verify CRC over header + payload
-                        CRC32C crc = new CRC32C();
-                        headerBuf.rewind();
-                        crc.update(headerBuf);
-                        crc.update(payloadBuf.duplicate());
-                        if ((int) crc.getValue() != expectedCrc) {
-                            LOG.warn("CRC mismatch at pos {}: expected={}, computed={}", 
-                                    pos, expectedCrc, (int) crc.getValue());
-                            break; // CRC mismatch
-                        }
-
-                        // Process record
-                        if (type == TYPE_TRUNCATE) {
-                            // Remove entries with index >= truncate index
-                            long truncateFrom = index;
-                            int beforeSize = entries.size();
-                            entries.removeIf(e -> e.index() >= truncateFrom);
-                            int removed = beforeSize - entries.size();
-                            truncateCount++;
-                            LOG.trace("Replay TRUNCATE: fromIndex={}, removed {} entries", truncateFrom, removed);
-                        } else if (type == TYPE_APPEND) {
-                            byte[] payload = new byte[payloadLen];
-                            payloadBuf.get(payload);
-                            entries.add(new LogEntryData(index, term, payload));
-                            appendCount++;
-                            LOG.trace("Replay APPEND: index={}, term={}, payloadLen={}", index, term, payloadLen);
-                        } else {
-                            LOG.warn("Unknown record type at pos {}: {}", pos, type);
-                            break; // Unknown record type
-                        }
-
-                        // Advance to next record
-                        lastGoodPos = pos + HEADER_SIZE + payloadLen + CRC_SIZE;
-                        pos = lastGoodPos;
-                    }
-
-                    // Truncate file to last good position (remove torn tail)
-                    if (lastGoodPos < fileSize) {
-                        LOG.warn("Truncating torn tail: {} bytes removed (file was {} bytes, valid data {} bytes)",
-                                fileSize - lastGoodPos, fileSize, lastGoodPos);
-                        ch.truncate(lastGoodPos);
-                    }
-                }
-
-                // Update log channel position
-                logChannel.position(Files.size(logPath));
-
-                long elapsed = System.currentTimeMillis() - startTime;
-                LOG.info("WAL replay complete: {} entries recovered, {} appends, {} truncates, {} ms",
-                        entries.size(), appendCount, truncateCount, elapsed);
-
-                return entries;
-
+                return readLog(true);
             } catch (IOException e) {
-                LOG.error("Failed to replay log: {}", e.getMessage(), e);
                 throw new StorageException("Failed to replay log", e);
             }
         }, walExecutor);
+    }
+
+    /** Called only on the WAL executor, without submitting another executor task. */
+    private List<LogEntryData> readLog(boolean repairTail) throws IOException {
+        Path logPath = dataDir.resolve(LOG_FILE);
+        if (!Files.exists(logPath)) {
+            LOG.debug("No WAL file found, returning empty log");
+            return List.of();
+        }
+
+        LOG.info("Replaying WAL from: {}", logPath);
+        long startTime = System.currentTimeMillis();
+        List<LogEntryData> entries = new ArrayList<>();
+        int appendCount = 0;
+        int truncateCount = 0;
+
+        try (FileChannel ch = FileChannel.open(logPath,
+                StandardOpenOption.READ,
+                StandardOpenOption.WRITE)) {
+
+            long fileSize = ch.size();
+            LOG.debug("WAL file size: {} bytes", fileSize);
+
+            long pos = 0;
+            long lastGoodPos = 0;
+            ByteBuffer headerBuf = ByteBuffer.allocate(HEADER_SIZE);
+
+            while (true) {
+                // Read header
+                headerBuf.clear();
+                int headerRead = readFully(ch, headerBuf, pos);
+                if (headerRead < HEADER_SIZE) {
+                    if (headerRead > 0) {
+                        LOG.debug("Incomplete header at pos {}: read {} bytes, expected {}",
+                                pos, headerRead, HEADER_SIZE);
+                    }
+                    break; // Incomplete header
+                }
+                headerBuf.flip();
+
+                int magic = headerBuf.getInt();
+                short version = headerBuf.getShort();
+                byte type = headerBuf.get();
+                long index = headerBuf.getLong();
+                long term = headerBuf.getLong();
+                int payloadLen = headerBuf.getInt();
+
+                // Validate header
+                if (magic != MAGIC || version != VERSION) {
+                    LOG.warn("Invalid header at pos {}: magic=0x{}, version={}",
+                            pos, Integer.toHexString(magic), version);
+                    break; // Corrupt or torn header
+                }
+                if (payloadLen < 0 || payloadLen > maxPayloadSize) {
+                    LOG.warn("Invalid payload length at pos {}: {}", pos, payloadLen);
+                    break; // Invalid payload length
+                }
+
+                // Read payload
+                ByteBuffer payloadBuf = ByteBuffer.allocate(payloadLen);
+                int payloadRead = readFully(ch, payloadBuf, pos + HEADER_SIZE);
+                if (payloadRead < payloadLen) {
+                    LOG.debug("Incomplete payload at pos {}: read {} bytes, expected {}",
+                            pos, payloadRead, payloadLen);
+                    break; // Incomplete payload
+                }
+                payloadBuf.flip();
+
+                // Read CRC
+                ByteBuffer crcBuf = ByteBuffer.allocate(CRC_SIZE);
+                int crcRead = readFully(ch, crcBuf, pos + HEADER_SIZE + payloadLen);
+                if (crcRead < CRC_SIZE) {
+                    LOG.debug("Incomplete CRC at pos {}", pos);
+                    break; // Incomplete CRC
+                }
+                crcBuf.flip();
+                int expectedCrc = crcBuf.getInt();
+
+                // Verify CRC over header + payload
+                CRC32C crc = new CRC32C();
+                headerBuf.rewind();
+                crc.update(headerBuf);
+                crc.update(payloadBuf.duplicate());
+                if ((int) crc.getValue() != expectedCrc) {
+                    LOG.warn("CRC mismatch at pos {}: expected={}, computed={}",
+                            pos, expectedCrc, (int) crc.getValue());
+                    break; // CRC mismatch
+                }
+
+                // Process record
+                if (type == TYPE_TRUNCATE) {
+                    // Remove entries with index >= truncate index
+                    long truncateFrom = index;
+                    int beforeSize = entries.size();
+                    entries.removeIf(e -> e.index() >= truncateFrom);
+                    int removed = beforeSize - entries.size();
+                    truncateCount++;
+                    LOG.trace("Replay TRUNCATE: fromIndex={}, removed {} entries", truncateFrom, removed);
+                } else if (type == TYPE_APPEND) {
+                    byte[] payload = new byte[payloadLen];
+                    payloadBuf.get(payload);
+                    entries.add(new LogEntryData(index, term, payload));
+                    appendCount++;
+                    LOG.trace("Replay APPEND: index={}, term={}, payloadLen={}", index, term, payloadLen);
+                } else {
+                    LOG.warn("Unknown record type at pos {}: {}", pos, type);
+                    break; // Unknown record type
+                }
+
+                // Advance to next record
+                lastGoodPos = pos + HEADER_SIZE + payloadLen + CRC_SIZE;
+                pos = lastGoodPos;
+            }
+
+            // Truncate file to last good position (remove torn tail)
+            if (lastGoodPos < fileSize) {
+                if (!repairTail) throw new IOException("WAL contains corrupt or incomplete records; replay before compaction");
+                LOG.warn("Truncating torn tail: {} bytes removed (file was {} bytes, valid data {} bytes)",
+                        fileSize - lastGoodPos, fileSize, lastGoodPos);
+                ch.truncate(lastGoodPos);
+            }
+        }
+
+        // Update log channel position
+        logChannel.position(Files.size(logPath));
+
+        long elapsed = System.currentTimeMillis() - startTime;
+        LOG.info("WAL replay complete: {} entries recovered, {} appends, {} truncates, {} ms",
+                entries.size(), appendCount, truncateCount, elapsed);
+
+        return entries;
+    }
+
+    private static int readFully(FileChannel channel, ByteBuffer buffer, long position) throws IOException {
+        int total = 0;
+        while (buffer.hasRemaining()) {
+            int count = channel.read(buffer, position + total);
+            if (count < 0) break;
+            if (count == 0) throw new IOException("No progress reading WAL");
+            total += count;
+        }
+        return total;
     }
 
     // ========================================================================
@@ -645,16 +734,38 @@ public final class FileRaftStorage implements RaftStorage {
     private void writeRecord(byte type, long index, long term, byte[] payload) throws IOException {
         int payloadLen = payload.length;
         int recordSize = HEADER_SIZE + payloadLen + CRC_SIZE;
-        
-        LOG.trace("Writing record: type={}, index={}, term={}, payloadLen={}, recordSize={}", 
+
+        LOG.trace("Writing record: type={}, index={}, term={}, payloadLen={}, recordSize={}",
                 type == TYPE_APPEND ? "APPEND" : "TRUNCATE", index, term, payloadLen, recordSize);
-        
+
         // Pre-flight disk space check for large writes
         if (recordSize > 1024 * 1024) { // Check for writes > 1MB
             LOG.debug("Large write detected ({} bytes), checking disk space", recordSize);
             checkDiskSpace();
         }
 
+        ByteBuffer buf = encodeRecord(type, index, term, payload);
+        int crcValue = buf.getInt(recordSize - CRC_SIZE);
+
+        // Record position before write for verification
+        long writePosition = logChannel.position();
+        LOG.trace("Writing {} bytes at position {}", recordSize, writePosition);
+
+        // Write to channel
+        while (buf.hasRemaining()) {
+            logChannel.write(buf);
+        }
+
+        // Optional read-after-write verification
+        if (verifyWrites && syncEnabled) {
+            LOG.trace("Verifying written record at position {}", writePosition);
+            verifyWrittenRecord(writePosition, recordSize, crcValue);
+        }
+    }
+
+    private static ByteBuffer encodeRecord(byte type, long index, long term, byte[] payload) {
+        int payloadLen = payload.length;
+        int recordSize = HEADER_SIZE + payloadLen + CRC_SIZE;
         ByteBuffer buf = ByteBuffer.allocate(recordSize);
 
         // Write header
@@ -675,21 +786,8 @@ public final class FileRaftStorage implements RaftStorage {
         buf.putInt(crcValue);
 
         buf.flip();
+        return buf;
 
-        // Record position before write for verification
-        long writePosition = logChannel.position();
-        LOG.trace("Writing {} bytes at position {}", recordSize, writePosition);
-
-        // Write to channel
-        while (buf.hasRemaining()) {
-            logChannel.write(buf);
-        }
-
-        // Optional read-after-write verification
-        if (verifyWrites && syncEnabled) {
-            LOG.trace("Verifying written record at position {}", writePosition);
-            verifyWrittenRecord(writePosition, recordSize, crcValue);
-        }
     }
 
     /**
@@ -725,7 +823,7 @@ public final class FileRaftStorage implements RaftStorage {
     private void acquireExclusiveLock() throws IOException {
         Path lockPath = dataDir.resolve(LOCK_FILE);
         LOG.debug("Acquiring exclusive lock: {}", lockPath);
-        
+
         lockChannel = FileChannel.open(lockPath,
                 StandardOpenOption.CREATE,
                 StandardOpenOption.READ,
@@ -785,7 +883,7 @@ public final class FileRaftStorage implements RaftStorage {
         LOG.trace("Disk space check: {} MB available, {} MB required", usableSpaceMb, minFreeSpaceMb);
 
         if (usableSpace < minFreeSpace) {
-            LOG.error("Insufficient disk space: {} MB available, need at least {} MB", 
+            LOG.error("Insufficient disk space: {} MB available, need at least {} MB",
                     usableSpaceMb, minFreeSpaceMb);
             throw new StorageException(
                     "Insufficient disk space: " + usableSpaceMb + " MB available, " +
@@ -832,14 +930,14 @@ public final class FileRaftStorage implements RaftStorage {
         int storedCrc = readBuf.getInt();
 
         if (storedCrc != expectedCrc || actualCrc != expectedCrc) {
-            LOG.error("Write verification CRC mismatch: written={}, stored={}, computed={}", 
+            LOG.error("Write verification CRC mismatch: written={}, stored={}, computed={}",
                     expectedCrc, storedCrc, actualCrc);
             throw new StorageException(
                     "Write verification failed: CRC mismatch. Written=" + expectedCrc +
                     ", Stored=" + storedCrc + ", Computed=" + actualCrc +
                     ". Possible silent data corruption!");
         }
-        
+
         LOG.trace("Write verification passed at position {}", position);
     }
 

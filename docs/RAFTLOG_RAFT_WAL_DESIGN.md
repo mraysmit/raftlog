@@ -2,7 +2,9 @@
 **Design, Requirements, and Integration Strategy**
 
 ## Status
-**Proposed – Design Review**
+**Historical design with a current prefix-compaction extension**
+
+Version 1.2.0 implements explicit `truncatePrefix` after caller-owned durable snapshots. [Prefix compaction](RAFTLOG_PREFIX_COMPACTION.md) defines the current API, publication ordering, failure handling and compatibility. The original proposal below remains design history; future snapshot ownership and automatic compaction are not implied.
 
 ## Scope
 This document defines a **minimal, Raft-correct Write-Ahead Log (WAL)** design for a Java & Vert.x 5.x Raft implementation.
@@ -10,6 +12,7 @@ This document defines a **minimal, Raft-correct Write-Ahead Log (WAL)** design f
 The WAL is intentionally constrained to support **only**:
 - append
 - truncate (suffix deletion)
+- explicit prefix compaction after durable application snapshots
 - sequential replay on startup
 
 It is **not** a general-purpose storage engine.
@@ -61,7 +64,7 @@ This WAL is designed around the following assumptions:
   - crash recovery
   - restart replay
 - No random disk reads are required during steady state
-- No snapshots or compaction are required initially
+- Application snapshots remain caller-owned; explicit prefix compaction is available from 1.2.0
 - Correctness is prioritised over throughput
 
 These constraints significantly simplify the WAL design.
@@ -215,7 +218,7 @@ Anything beyond that is out of scope.
 
 ### 13.2 No Log Segments or Segment Rotation
 
-**What this means:** There is **one file** that grows unbounded: `raft.wal`. We don't split the log into multiple segment files (e.g., `segment-0001.wal`, `segment-0002.wal`).
+**What this means:** There is **one WAL file**, `raft.log`, which grows between explicit prefix compactions. We don't split the log into multiple segment files (e.g., `segment-0001.wal`, `segment-0002.wal`).
 
 **Why it's a non-goal (initially):** Segmentation adds significant complexity:
 - Deciding when to rotate (size-based? entry-count-based? time-based?)
@@ -225,7 +228,7 @@ Anything beyond that is out of scope.
 
 For an Alpha release, a single file simplifies everything.
 
-**Trade-off:** File size grows unbounded until snapshots are implemented. For early testing and development, this is acceptable.
+**Current behavior:** File size grows unless the caller durably snapshots and invokes `truncatePrefix`. The library does not schedule compaction automatically.
 
 **If you need this later:** Implement segment rotation when the current segment exceeds a size threshold (e.g., 64MB), seal the old segment, open a new one, and update recovery to scan all segments in order.
 
@@ -241,7 +244,7 @@ For an Alpha release, a single file simplifies everything.
 
 ### 13.4 No Snapshots (Initially)
 
-**What this means:** There's no mechanism to "checkpoint" the state machine and truncate old log entries. The log grows forever.
+**Current behavior:** The caller checkpoints its state machine durably, then invokes `truncatePrefix`. RaftLog does not own or create the application snapshot.
 
 **Why it's a non-goal (initially):** Snapshots are complex:
 - Must capture a consistent state machine image
@@ -251,9 +254,9 @@ For an Alpha release, a single file simplifies everything.
 
 This is significant implementation effort that can be deferred.
 
-**Trade-off:** Unbounded log growth. Acceptable for Alpha/Beta where logs stay small. Must be addressed before production deployment with long-running clusters.
+**Current integration requirement:** Publish a durable application snapshot before explicit prefix compaction; without it the WAL continues to grow.
 
-**If you need this later:** Implement a `createSnapshot(lastIncludedIndex, lastIncludedTerm, stateData)` method that writes a snapshot file and truncates all log entries ≤ `lastIncludedIndex`.
+**Current API:** The application persists its snapshot and boundary metadata, then calls `truncatePrefix(lastIncludedIndex)`. Snapshot creation is not a RaftLog API.
 
 ### 13.5 No Key/Value Semantics
 
@@ -1231,7 +1234,7 @@ This reduces context switches and improves throughput significantly.
 
 The replay logic is O(n) where n = total records ever written. This is acceptable for a "Minimal WAL."
 
-**Operational Note:** Since snapshots are an explicit non-goal (Section 13), `raft.log` will grow indefinitely. Node restart time scales linearly with total operations since inception. Teams should monitor log file size and plan for future snapshot support if restart times become problematic.
+**Operational Note:** Monitor `raft.log` size and coordinate durable application snapshots with explicit prefix compaction. Restart scans the remaining WAL. Compaction materializes the logical log and rewrites retained entries, so budget memory and temporary disk space.
 
 ---
 
@@ -1640,7 +1643,7 @@ This test validates the **Persist-before-Grant** invariant (Section 16.2).
 
 | Test Type | Recommended Tool | Why? |
 |-----------|------------------|------|
-| **Logic/Unit** | JUnit 5 + Mockito | Best for `AppendPlan` and `applyEntries()` loop logic |
+| **Logic/Unit** | JUnit 5 with real storage or purpose-built fakes | Best for `AppendPlan` and `applyEntries()` loop logic |
 | **I/O Corruption** | Java `RandomAccessFile` | Manually corrupt bytes at the end of the `raft.log` file |
 | **Hard Crash** | **TestContainers** | Use `docker kill --signal SIGKILL` to simulate power loss and verify `fsync` effectiveness |
 | **Filesystem Stress** | `strace` (Linux) | Verify that `fsync()` and `rename()` syscalls are actually happening in the correct order |
@@ -1844,7 +1847,7 @@ The `AppConfig` class automatically maps environment variables (with `_` replaci
 | Requirement | Action | Verification |
 |-------------|--------|--------------|
 | **User Permissions** | Ensure JVM user has `rwx` on `quorus.raft.storage.path` | `ls -la /var/lib/quorus/data` |
-| **Disk Space** | Monitor `raft.log` size (grows unbounded until snapshots) | `du -sh /var/lib/quorus/data/*` |
+| **Disk Space** | Monitor `raft.log` size (grows between explicit prefix compactions) | `du -sh /var/lib/quorus/data/*` |
 | **Mount Type** | Use local SSD, not network storage, for `fsync` performance | `mount | grep quorus` |
 | **Filesystem** | Use ext4 or xfs with `data=ordered` (default) | `cat /etc/fstab` |
 

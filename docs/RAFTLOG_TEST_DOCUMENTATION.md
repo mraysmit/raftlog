@@ -2,7 +2,15 @@
 
 This document provides a comprehensive overview of all test cases in the RaftLog project, organized by test class and category.
 
-## Test Summary
+## Prefix compaction and recovery contract tests
+
+- `FileRaftStoragePrefixCompactionTest`: 9 cases covering reclaiming bytes, inclusive boundaries, retained entries/metadata, repeated operations and restart.
+- `FileRaftStorageCompactionFailureTest`: 14 cases covering real filesystem failures, publication ordering, fencing, corruption, and four abruptly terminated child JVMs.
+- `FileRaftStorageRecoveryContractTest`: 22 cases covering append/truncate/replay semantics, including torn-tail fixtures.
+
+The 23 compaction cases were retained as behavioral failures before implementation and then passed. See [Prefix compaction](RAFTLOG_PREFIX_COMPACTION.md). The older class/count inventory below is historical, not the current reactor total.
+
+## Historical Test Summary
 
 | Test Class | Tests | Purpose |
 |------------|-------|---------|
