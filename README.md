@@ -14,6 +14,7 @@ RaftLog provides the durability core for Raft-based distributed systems. It impl
 - **Atomic metadata updates** using rename-based persistence
 - **Serialized writes** via single-threaded executor for thread safety
 - **Efficient replay** with corruption detection and recovery
+- **Prefix compaction** that reclaims WAL space after caller-owned durable snapshots
 
 ## Requirements
 
@@ -28,20 +29,20 @@ RaftLog provides the durability core for Raft-based distributed systems. It impl
 <dependency>
     <groupId>io.github.mraysmit</groupId>
     <artifactId>raftlog-core</artifactId>
-    <version>1.1.0</version>
+    <version>1.2.0</version>
 </dependency>
 ```
 
 ### Gradle (Groovy)
 
 ```groovy
-implementation 'io.github.mraysmit:raftlog-core:1.1.0'
+implementation 'io.github.mraysmit:raftlog-core:1.2.0'
 ```
 
 ### Gradle (Kotlin)
 
 ```kotlin
-implementation("io.github.mraysmit:raftlog-core:1.1.0")
+implementation("io.github.mraysmit:raftlog-core:1.2.0")
 ```
 
 ## Building
@@ -90,6 +91,17 @@ for (var entry : replayed) {
 // Close when done
 storage.close();
 ```
+
+## Prefix compaction
+
+After durably saving a covering application snapshot, call
+`storage.truncatePrefix(lastIncludedIndex).join()`. The inclusive prefix is removed
+and the retained WAL is forced and atomically replaced before completion. No extra
+`sync()` is needed for compaction. Application snapshots and their boundary metadata
+remain the caller's responsibility. Raw append/replay semantics are unchanged.
+
+See [Prefix compaction](docs/RAFTLOG_PREFIX_COMPACTION.md) for failure recovery,
+Windows directory-durability limits, compatibility and memory/disk costs.
 
 ## Configuration
 
@@ -185,10 +197,10 @@ raftlog/
 mvn clean package -DskipTests
 
 # Run with default config (~/.raftlog/data)
-java -jar raftlog-demo/target/raftlog-demo-1.1.0.jar
+java -jar raftlog-demo/target/raftlog-demo-1.2.0.jar
 
 # Run with custom data directory
-java -Draftlog.dataDir=/tmp/wal-demo -jar raftlog-demo/target/raftlog-demo-1.1.0.jar
+java -Draftlog.dataDir=/tmp/wal-demo -jar raftlog-demo/target/raftlog-demo-1.2.0.jar
 ```
 
 ## Documentation

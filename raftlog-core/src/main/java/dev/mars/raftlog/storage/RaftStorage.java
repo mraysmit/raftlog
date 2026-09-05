@@ -30,8 +30,9 @@ import java.util.concurrent.CompletableFuture;
  * <p>
  * The RaftNode depends solely on this interface, not on concrete implementations.
  * <p>
- * <b>Critical Contract:</b> All methods that modify state must ensure durability
- * (fsync) before the returned Future completes successfully.
+ * <b>Critical Contract:</b> Append and suffix-truncation operations require
+ * {@link #sync()} before acknowledgment. Metadata updates and prefix compaction
+ * provide their own durability barriers, subject to the configured filesystem.
  *
  * @see FileRaftStorage
  */
@@ -123,6 +124,27 @@ public interface RaftStorage extends Closeable {
      * @return a Future that completes when the truncation record is written (but NOT synced)
      */
     CompletableFuture<Void> truncateSuffix(long fromIndex);
+
+    /**
+     * Reclaims WAL records at indexes less than or equal to {@code toIndex}.
+     * The caller must durably publish a covering application snapshot first.
+     * Retained entries keep their indexes, terms, payloads and replay order.
+     * Successful completion is a durability barrier for the replacement WAL;
+     * no separate {@link #sync()} is required. Zero is a no-op; negatives fail.
+     * FileRaftStorage always forces the replacement file, even when append sync
+     * is disabled. Directory force is required on non-Windows providers; the
+     * Java Windows provider supports only file force and atomic replacement.
+     * A publication failure requires closing and opening a fresh storage instance.
+     * This operation does not remember the boundary or prevent later appends at
+     * removed indexes; the caller owns its snapshot index and term.
+     * Implementations without compaction fail explicitly for compatibility.
+     *
+     * @param toIndex inclusive last index to remove
+     * @return completion of durable compaction, subject to filesystem guarantees
+     */
+    default CompletableFuture<Void> truncatePrefix(long toIndex) {
+        return CompletableFuture.failedFuture(new UnsupportedOperationException("Prefix compaction is not supported"));
+    }
 
     /**
      * Universal Durability Barrier.
