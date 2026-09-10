@@ -1,5 +1,5 @@
-<p align="center">
-  <img src="docs/RaftLog%20logo%20design%20with%20tagline.png" alt="RaftLog Logo" width="400"/>
+<p align="left">
+  <img src="docs/RaftLog%20logo%20design%20with%20tagline.png" alt="RaftLog Logo" width="220"/>
 </p>
 
 # RaftLog
@@ -57,6 +57,27 @@ mvn clean install
 mvn test
 ```
 
+## Command style for captured test logs
+
+Use the qraft-style command format to capture Maven output to both console and a timestamped log file:
+
+```powershell
+mvn -B "-Dstyle.color=never" test 2>&1 | Tee-Object ".\logs\raftlog-tests-$(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss').log"
+```
+
+If you need a single-module targeted run:
+
+```powershell
+mvn -B "-Dstyle.color=never" test -pl raftlog-core -Dtest=ConfigResolverTest 2>&1 | Tee-Object ".\logs\raftlog-documents-test-$(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss').log"
+```
+
+Notes:
+- `-B` keeps Maven output machine-friendly.
+- `-Dstyle.color=never` avoids ANSI control codes in captured logs.
+- `2>&1` captures both stdout and stderr.
+- `Tee-Object` keeps logs visible in the terminal while also writing to a file.
+- Create `.\logs` first if it does not exist: `New-Item -ItemType Directory -Force .\logs`.
+
 ## Quick Start
 
 ```java
@@ -100,8 +121,7 @@ and the retained WAL is forced and atomically replaced before completion. No ext
 `sync()` is needed for compaction. Application snapshots and their boundary metadata
 remain the caller's responsibility. Raw append/replay semantics are unchanged.
 
-See [Prefix compaction](docs/RAFTLOG_PREFIX_COMPACTION.md) for failure recovery,
-Windows directory-durability limits, compatibility and memory/disk costs.
+See the main design document for failure recovery, Windows directory-durability limits, compatibility, and memory/disk costs.
 
 ## Configuration
 

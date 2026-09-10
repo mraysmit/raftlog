@@ -19,6 +19,8 @@ import dev.mars.raftlog.storage.FileRaftStorage;
 import dev.mars.raftlog.storage.RaftStorage;
 import dev.mars.raftlog.storage.RaftStorage.LogEntryData;
 import dev.mars.raftlog.storage.RaftStorage.PersistentMeta;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -37,31 +39,32 @@ import java.util.Optional;
  * </ul>
  */
 public class Main {
+    private static final Logger LOG = LoggerFactory.getLogger(Main.class);
 
     public static void main(String[] args) throws Exception {
-        System.out.println("Raft WAL Demo");
-        System.out.println("=============\n");
+        LOG.info("Raft WAL Demo");
+        LOG.info("=============");
 
         Path dataDir = Path.of("data/raft");
 
         try (RaftStorage storage = new FileRaftStorage()) {
             // Open storage
             storage.open(dataDir).join();
-            System.out.println("✓ Storage opened at: " + dataDir.toAbsolutePath());
+            LOG.info("Storage opened at: {}", dataDir.toAbsolutePath());
 
             // Load existing metadata
             PersistentMeta meta = storage.loadMetadata().join();
-            System.out.println("✓ Loaded metadata: term=" + meta.currentTerm() +
-                    ", votedFor=" + meta.votedFor().orElse("(none)"));
+            LOG.info("Loaded metadata: term={}, votedFor={}", meta.currentTerm(),
+                    meta.votedFor().orElse("(none)"));
 
             // Update metadata
             long newTerm = meta.currentTerm() + 1;
             storage.updateMetadata(newTerm, Optional.of("node-1")).join();
-            System.out.println("✓ Updated metadata: term=" + newTerm + ", votedFor=node-1");
+            LOG.info("Updated metadata: term={}, votedFor=node-1", newTerm);
 
             // Replay existing log
             List<LogEntryData> existingEntries = storage.replayLog().join();
-            System.out.println("✓ Replayed " + existingEntries.size() + " existing entries");
+            LOG.info("Replayed {} existing entries", existingEntries.size());
 
             // Append new entries
             long nextIndex = existingEntries.isEmpty() ? 1 : 
@@ -76,10 +79,9 @@ public class Main {
 
             storage.appendEntries(newEntries).join();
             storage.sync().join(); // Durability barrier
-            System.out.println("✓ Appended " + newEntries.size() + " entries (indices " + 
-                    nextIndex + "-" + (nextIndex + 1) + ")");
+            LOG.info("Appended {} entries (indices {}-{})", newEntries.size(), nextIndex, nextIndex + 1);
 
-            System.out.println("\n✓ WAL demo complete!");
+            LOG.info("WAL demo complete!");
         }
     }
 }

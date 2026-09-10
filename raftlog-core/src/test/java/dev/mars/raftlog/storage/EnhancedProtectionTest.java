@@ -22,6 +22,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
@@ -44,6 +46,7 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 @DisplayName("Enhanced Protection Tests")
 class EnhancedProtectionTest {
+    private static final Logger LOG = LoggerFactory.getLogger(EnhancedProtectionTest.class);
 
     @TempDir
     Path tempDir;
@@ -330,8 +333,8 @@ class EnhancedProtectionTest {
 
             // Verification should be slower (we just document this, not assert)
             // In practice it's about 2x slower due to read-back
-            System.out.println("Non-verified: " + nonVerifiedTime / 1_000_000 + " ms");
-            System.out.println("Verified: " + verifiedTime / 1_000_000 + " ms");
+            LOG.info("Non-verified: {} ms", nonVerifiedTime / 1_000_000);
+            LOG.info("Verified: {} ms", verifiedTime / 1_000_000);
         }
 
         @Test

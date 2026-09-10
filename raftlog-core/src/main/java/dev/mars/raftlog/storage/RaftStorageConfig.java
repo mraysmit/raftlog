@@ -15,6 +15,9 @@
  */
 package dev.mars.raftlog.storage;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
@@ -66,6 +69,7 @@ import java.util.Properties;
  * </pre>
  */
 public final class RaftStorageConfig {
+    private static final Logger LOG = LoggerFactory.getLogger(RaftStorageConfig.class);
 
     private static final String PROPERTIES_FILE = "raftlog.properties";
     
@@ -250,6 +254,9 @@ public final class RaftStorageConfig {
             if (maxPayloadSizeMb == null) {
                 maxPayloadSizeMb = resolveInt(PROP_MAX_PAYLOAD_SIZE_MB, ENV_MAX_PAYLOAD_SIZE_MB, DEFAULT_MAX_PAYLOAD_SIZE_MB);
             }
+
+            LOG.debug("Resolved RaftStorageConfig: dataDir={}, syncEnabled={}, verifyWrites={}, minFreeSpaceMb={}, maxPayloadSizeMb={}",
+                    dataDir, syncEnabled, verifyWrites, minFreeSpaceMb, maxPayloadSizeMb);
             
             return new RaftStorageConfig(this);
         }
@@ -258,22 +265,26 @@ public final class RaftStorageConfig {
             // 1. System property
             String value = System.getProperty(sysProp);
             if (value != null && !value.isBlank()) {
+                LOG.debug("Resolved {} from system property {}={}", sysProp, sysProp, value);
                 return Path.of(value);
             }
             
             // 2. Environment variable
             value = System.getenv(envVar);
             if (value != null && !value.isBlank()) {
+                LOG.debug("Resolved {} from env var {}={}", sysProp, envVar, value);
                 return Path.of(value);
             }
             
             // 3. Properties file
             value = fileProperties.getProperty(sysProp);
             if (value != null && !value.isBlank()) {
+                LOG.debug("Resolved {} from properties file {}={}", sysProp, PROPERTIES_FILE, value);
                 return Path.of(value);
             }
             
             // 4. Default
+            LOG.debug("Using default {} for {} (no system property/env/file value set)", defaultValue, sysProp);
             return defaultValue;
         }
 
@@ -281,22 +292,41 @@ public final class RaftStorageConfig {
             // 1. System property
             String value = System.getProperty(sysProp);
             if (value != null && !value.isBlank()) {
-                return Boolean.parseBoolean(value);
+                Boolean resolved = parseBooleanStrict(value);
+                if (resolved != null) {
+                    LOG.debug("Resolved {} from system property {}={}", sysProp, sysProp, value);
+                    return resolved;
+                }
+                LOG.warn("Invalid boolean for {} in system property {}: {}. Falling back to next source",
+                        sysProp, sysProp, value);
             }
             
             // 2. Environment variable
             value = System.getenv(envVar);
             if (value != null && !value.isBlank()) {
-                return Boolean.parseBoolean(value);
+                Boolean resolved = parseBooleanStrict(value);
+                if (resolved != null) {
+                    LOG.debug("Resolved {} from env var {}={}", sysProp, envVar, value);
+                    return resolved;
+                }
+                LOG.warn("Invalid boolean for {} in env var {}: {}. Falling back to next source",
+                        sysProp, envVar, value);
             }
             
             // 3. Properties file
             value = fileProperties.getProperty(sysProp);
             if (value != null && !value.isBlank()) {
-                return Boolean.parseBoolean(value);
+                Boolean resolved = parseBooleanStrict(value);
+                if (resolved != null) {
+                    LOG.debug("Resolved {} from properties file {}={}", sysProp, PROPERTIES_FILE, value);
+                    return resolved;
+                }
+                LOG.warn("Invalid boolean for {} in properties file {}: {}. Falling back to default",
+                        sysProp, PROPERTIES_FILE, value);
             }
             
             // 4. Default
+            LOG.debug("Using default {} for {} (no valid system/env/file value)", defaultValue, sysProp);
             return defaultValue;
         }
 
@@ -305,28 +335,50 @@ public final class RaftStorageConfig {
             String value = System.getProperty(sysProp);
             if (value != null && !value.isBlank()) {
                 try {
-                    return Integer.parseInt(value);
-                } catch (NumberFormatException ignored) {}
+                    int resolved = Integer.parseInt(value);
+                    LOG.debug("Resolved {} from system property {}={}", sysProp, sysProp, value);
+                    return resolved;
+                } catch (NumberFormatException e) {
+                    LOG.warn("Invalid integer for {} in system property {}: {}. Falling back to next source",
+                            sysProp, sysProp, value);
+                }
             }
             
             // 2. Environment variable
             value = System.getenv(envVar);
             if (value != null && !value.isBlank()) {
                 try {
-                    return Integer.parseInt(value);
-                } catch (NumberFormatException ignored) {}
+                    int resolved = Integer.parseInt(value);
+                    LOG.debug("Resolved {} from env var {}={}", sysProp, envVar, value);
+                    return resolved;
+                } catch (NumberFormatException e) {
+                    LOG.warn("Invalid integer for {} in env var {}: {}. Falling back to next source",
+                            sysProp, envVar, value);
+                }
             }
             
             // 3. Properties file
             value = fileProperties.getProperty(sysProp);
             if (value != null && !value.isBlank()) {
                 try {
-                    return Integer.parseInt(value);
-                } catch (NumberFormatException ignored) {}
+                    int resolved = Integer.parseInt(value);
+                    LOG.debug("Resolved {} from properties file {}={}", sysProp, PROPERTIES_FILE, value);
+                    return resolved;
+                } catch (NumberFormatException e) {
+                    LOG.warn("Invalid integer for {} in properties file {}: {}. Falling back to default",
+                            sysProp, PROPERTIES_FILE, value);
+                }
             }
             
             // 4. Default
+            LOG.debug("Using default {} for {} (no valid system/env/file value)", defaultValue, sysProp);
             return defaultValue;
+        }
+
+        private static Boolean parseBooleanStrict(String value) {
+            if ("true".equalsIgnoreCase(value)) return true;
+            if ("false".equalsIgnoreCase(value)) return false;
+            return null;
         }
 
         private static Properties loadPropertiesFile() {
@@ -337,16 +389,26 @@ public final class RaftStorageConfig {
                     .getResourceAsStream(PROPERTIES_FILE)) {
                 if (is != null) {
                     props.load(is);
+                    LOG.debug("Loaded properties file from classpath: {}", PROPERTIES_FILE);
                     return props;
                 }
-            } catch (IOException ignored) {}
+                LOG.debug("No {} found on classpath", PROPERTIES_FILE);
+            } catch (IOException e) {
+                LOG.warn("Failed to load {} from classpath: {}", PROPERTIES_FILE, e.getMessage(), e);
+            }
             
             // Try working directory
             Path localFile = Path.of(PROPERTIES_FILE);
             if (Files.exists(localFile)) {
                 try (InputStream is = Files.newInputStream(localFile)) {
                     props.load(is);
-                } catch (IOException ignored) {}
+                    LOG.debug("Loaded properties file from working directory: {}", localFile.toAbsolutePath());
+                } catch (IOException e) {
+                    LOG.warn("Failed to load {} from working directory: {}",
+                            localFile.toAbsolutePath(), e.getMessage(), e);
+                }
+            } else {
+                LOG.debug("No {} in working directory", localFile.toAbsolutePath());
             }
             
             return props;

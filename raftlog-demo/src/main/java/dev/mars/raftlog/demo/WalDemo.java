@@ -19,6 +19,8 @@ import dev.mars.raftlog.storage.FileRaftStorage;
 import dev.mars.raftlog.storage.RaftStorage.LogEntryData;
 import dev.mars.raftlog.storage.RaftStorage.PersistentMeta;
 import dev.mars.raftlog.storage.RaftStorageConfig;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -67,49 +69,50 @@ import java.util.Optional;
  * @see RaftStorageConfig
  */
 public class WalDemo {
+    private static final Logger LOG = LoggerFactory.getLogger(WalDemo.class);
 
     public static void main(String[] args) throws Exception {
-        System.out.println("+---------------------------------------+");
-        System.out.println("|           Raft WAL Demo               |");
-        System.out.println("+---------------------------------------+");
-        System.out.println();
+        LOG.info("+---------------------------------------+");
+        LOG.info("|           Raft WAL Demo               |");
+        LOG.info("+---------------------------------------+");
+        LOG.info("");
 
         // Build configuration with CLI override if provided
         RaftStorageConfig config = args.length > 0 && !args[0].isBlank()
                 ? RaftStorageConfig.builder().dataDir(args[0]).build()
                 : RaftStorageConfig.load();
 
-        System.out.println("Configuration: " + config);
-        System.out.println();
+        LOG.info("Configuration: {}", config);
+        LOG.info("");
 
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             // Open storage using config's data directory
             storage.open().join();
-            System.out.println("[OK] Storage opened at: " + config.dataDir().toAbsolutePath());
+            LOG.info("[OK] Storage opened at: {}", config.dataDir().toAbsolutePath());
 
             // Load existing metadata
             PersistentMeta meta = storage.loadMetadata().join();
-            System.out.println("[OK] Loaded metadata: term=" + meta.currentTerm() +
-                    ", votedFor=" + meta.votedFor().orElse("(none)"));
+            LOG.info("[OK] Loaded metadata: term={}, votedFor={}", meta.currentTerm(),
+                    meta.votedFor().orElse("(none)"));
 
             // Update metadata (simulate term increment)
             long newTerm = meta.currentTerm() + 1;
             storage.updateMetadata(newTerm, Optional.of("node-1")).join();
-            System.out.println("[OK] Updated metadata: term=" + newTerm + ", votedFor=node-1");
+            LOG.info("[OK] Updated metadata: term={}, votedFor=node-1", newTerm);
 
             // Replay existing log
             List<LogEntryData> existingEntries = storage.replayLog().join();
-            System.out.println("[OK] Replayed " + existingEntries.size() + " existing entries");
+            LOG.info("[OK] Replayed {} existing entries", existingEntries.size());
 
-            // Show last few entries if any exist
+                // Show last few entries if any exist
             if (!existingEntries.isEmpty()) {
-                System.out.println("\n  Last entries in log:");
+                LOG.info("");
+                LOG.info("  Last entries in log:");
                 int start = Math.max(0, existingEntries.size() - 3);
                 for (int i = start; i < existingEntries.size(); i++) {
                     LogEntryData entry = existingEntries.get(i);
                     String payload = new String(entry.payload(), StandardCharsets.UTF_8);
-                    System.out.printf("    [%d] term=%d: %s%n", 
-                            entry.index(), entry.term(), payload);
+                    LOG.info("    [{}] term={}: {}", entry.index(), entry.term(), payload);
                 }
             }
 
@@ -126,21 +129,22 @@ public class WalDemo {
 
             storage.appendEntries(newEntries).join();
             storage.sync().join(); // Durability barrier
-            System.out.println("\n[OK] Appended " + newEntries.size() + " entries (indices " + 
-                    nextIndex + "-" + (nextIndex + 1) + ")");
+            LOG.info("");
+            LOG.info("[OK] Appended {} entries (indices {}-{})", newEntries.size(), nextIndex, nextIndex + 1);
 
             // Show what was appended
-            System.out.println("\n  New entries appended:");
+            LOG.info("");
+            LOG.info("  New entries appended:");
             for (LogEntryData entry : newEntries) {
                 String payload = new String(entry.payload(), StandardCharsets.UTF_8);
-                System.out.printf("    [%d] term=%d: %s%n", 
-                        entry.index(), entry.term(), payload);
+                LOG.info("    [{}] term={}: {}", entry.index(), entry.term(), payload);
             }
 
-            System.out.println("\n+---------------------------------------+");
-            System.out.println("|  WAL demo complete!                   |");
-            System.out.println("|  Run again to see entries replayed.   |");
-            System.out.println("+---------------------------------------+");
+            LOG.info("");
+            LOG.info("+---------------------------------------+");
+            LOG.info("|  WAL demo complete!                   |");
+            LOG.info("|  Run again to see entries replayed.   |");
+            LOG.info("+---------------------------------------+");
         }
     }
 }

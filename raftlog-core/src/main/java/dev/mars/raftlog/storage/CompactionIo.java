@@ -22,6 +22,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Package-private filesystem seam for the durability-critical calls made by
@@ -34,30 +36,48 @@ import java.nio.file.StandardOpenOption;
  * one path without failing the other.
  */
 class CompactionIo {
+    private static final Logger LOG = LoggerFactory.getLogger(CompactionIo.class);
+
     void write(FileChannel channel, ByteBuffer bytes) throws IOException {
+        LOG.trace("Writing WAL bytes: remaining={}", bytes.remaining());
         while (bytes.hasRemaining()) channel.write(bytes);
+        LOG.trace("Completed write to channel {}", channel);
     }
 
     /** Forces the compaction output file. */
-    void force(FileChannel channel) throws IOException { channel.force(true); }
+    void force(FileChannel channel) throws IOException {
+        LOG.trace("Forcing compaction output channel {}", channel);
+        channel.force(true);
+    }
 
     /** Forces the live WAL or the metadata staging file. */
-    void forceChannel(FileChannel channel) throws IOException { channel.force(true); }
+    void forceChannel(FileChannel channel) throws IOException {
+        LOG.trace("Forcing channel {}", channel);
+        channel.force(true);
+    }
 
     void replace(Path source, Path target) throws IOException {
+        LOG.trace("Atomically replacing {} with {}", source, target);
         Files.move(source, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        LOG.trace("Replace completed: {} -> {}", source, target);
     }
 
     void forceDirectory(Path directory) throws IOException {
         // Java's Windows provider cannot open directories for force. File force and
         // atomic replacement still apply; Linux requires directory force to succeed.
-        if (System.getProperty("os.name").startsWith("Windows")) return;
+        if (System.getProperty("os.name").startsWith("Windows")) {
+            LOG.trace("Skipping directory force on Windows for {}", directory);
+            return;
+        }
+        LOG.trace("Forcing directory {}", directory);
         try (var channel = FileChannel.open(directory, StandardOpenOption.READ)) {
             channel.force(true);
+            LOG.trace("Directory force complete for {}", directory);
         }
     }
 
     FileChannel reopen(Path path) throws IOException {
+        LOG.trace("Reopening channel for {}", path);
         return FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE);
     }
 }
