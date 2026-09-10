@@ -19,6 +19,8 @@ import dev.mars.raftlog.storage.FileRaftStorage;
 import dev.mars.raftlog.storage.RaftStorage.LogEntryData;
 import dev.mars.raftlog.storage.RaftStorage.PersistentMeta;
 import dev.mars.raftlog.storage.RaftStorageConfig;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.RandomAccessFile;
@@ -75,6 +77,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * @see FileRaftStorage
  */
 public class WalChaos {
+    private static final Logger LOG = LoggerFactory.getLogger(WalChaos.class);
 
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
     private static final int MAGIC = 0x52414654; // 'RAFT'
@@ -88,15 +91,15 @@ public class WalChaos {
     }
 
     public static void main(String[] args) throws Exception {
-        System.out.println("╔═══════════════════════════════════════════════════════════════╗");
-        System.out.println("║              WAL CHAOS TESTING SUITE                          ║");
-        System.out.println("║  \"If it survives this, it survives anything\"                  ║");
-        System.out.println("╚═══════════════════════════════════════════════════════════════╝");
-        System.out.println();
+        LOG.info("╔═══════════════════════════════════════════════════════════════╗");
+        LOG.info("║              WAL CHAOS TESTING SUITE                          ║");
+        LOG.info("║  \"If it survives this, it survives anything\"                  ║");
+        LOG.info("╚═══════════════════════════════════════════════════════════════╝");
+        LOG.info("");
 
         Path chaosDir = Files.createTempDirectory("wal-chaos-");
-        System.out.println("Chaos directory: " + chaosDir.toAbsolutePath());
-        System.out.println();
+        LOG.info("Chaos directory: {}", chaosDir.toAbsolutePath());
+        LOG.info("");
 
         WalChaos chaos = new WalChaos(chaosDir);
 
@@ -116,17 +119,17 @@ public class WalChaos {
                     chaos.runNastyEdgeCases();
                 }
                 default -> {
-                    System.err.println("Unknown test filter: " + testFilter);
-                    System.err.println("Available: concurrent, corruption, boundary, stress, all");
+                    LOG.error("Unknown test filter: {}", testFilter);
+                    LOG.error("Available: concurrent, corruption, boundary, stress, all");
                     System.exit(1);
                 }
             }
         } finally {
-            System.out.println();
-            System.out.println("╔═══════════════════════════════════════════════════════════════╗");
-            System.out.printf("║  RESULTS: %d passed, %d failed                                 ║%n",
+            LOG.info("");
+            LOG.info("╔═══════════════════════════════════════════════════════════════╗");
+            LOG.info("║  RESULTS: {} passed, {} failed                                 ║",
                     chaos.testsPassed.get(), chaos.testsFailed.get());
-            System.out.println("╚═══════════════════════════════════════════════════════════════╝");
+            LOG.info("╚═══════════════════════════════════════════════════════════════╝");
 
             // Cleanup
             deleteRecursively(chaosDir);
@@ -322,7 +325,7 @@ public class WalChaos {
 
             // Must be able to replay without crash
             List<LogEntryData> entries = storage.replayLog().join();
-            System.out.printf("    Replayed %d entries after chaos%n", entries.size());
+            LOG.info("    Replayed {} entries after chaos", entries.size());
         }
     }
 
@@ -409,7 +412,7 @@ public class WalChaos {
             writer.join(5000);
             replayer.join(5000);
 
-            System.out.printf("    Completed %d replays during writes%n", replayCount.get());
+            LOG.info("    Completed {} replays during writes", replayCount.get());
         }
     }
 
@@ -461,7 +464,7 @@ public class WalChaos {
 
             // Must still be able to replay
             List<LogEntryData> entries = storage.replayLog().join();
-            System.out.printf("    Survived with %d entries after interrupt storm%n", entries.size());
+            LOG.info("    Survived with {} entries after interrupt storm", entries.size());
         }
     }
 
@@ -522,10 +525,10 @@ public class WalChaos {
     private static void replayExpectingRepairOrReport(FileRaftStorage storage, String what) {
         try {
             List<LogEntryData> entries = storage.replayLog().join();
-            System.out.printf("    Torn tail repaired: %d entries recovered after %s%n", entries.size(), what);
+            LOG.info("    Torn tail repaired: {} entries recovered after {}", entries.size(), what);
         } catch (java.util.concurrent.CompletionException e) {
             if (!(e.getCause() instanceof FileRaftStorage.CorruptLogException corrupt)) throw e;
-            System.out.printf("    Corruption reported at byte %d after %s: %d entries precede it, file untouched%n",
+            LOG.info("    Corruption reported at byte {} after {}: {} entries precede it, file untouched",
                     corrupt.corruptOffset(), what, corrupt.entriesBeforeCorruption());
         }
     }
@@ -693,9 +696,9 @@ public class WalChaos {
             try {
                 storage.loadMetadata().join();
                 // Some implementations may return defaults on corruption
-                System.out.println("    Metadata returned (possibly defaults)");
+                LOG.info("    Metadata returned (possibly defaults)");
             } catch (Exception e) {
-                System.out.println("    Corruption correctly detected: " + e.getMessage());
+                LOG.info("    Corruption correctly detected: {}", e.getMessage());
             }
         }
     }
@@ -1178,7 +1181,7 @@ public class WalChaos {
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
-            System.out.printf("    Final log size after %d truncate cycles: %d entries%n", cycles, entries.size());
+            LOG.info("    Final log size after {} truncate cycles: {} entries", cycles, entries.size());
         }
     }
 
@@ -1280,9 +1283,9 @@ public class WalChaos {
                 try {
                     storage2.open().join();
                     // If locking is enabled, this should fail
-                    System.out.println("    Second instance opened (no locking?)");
+                    LOG.info("    Second instance opened (no locking?)");
                 } catch (Exception e) {
-                    System.out.println("    Second instance blocked: " + e.getMessage());
+                    LOG.info("    Second instance blocked: {}", e.getMessage());
                 }
             }
         }
@@ -1316,7 +1319,7 @@ public class WalChaos {
             )).join();
             throw new AssertionError("Should have thrown on closed storage");
         } catch (Exception e) {
-            System.out.println("    Correctly rejected: " + e.getMessage());
+                LOG.info("    Correctly rejected: {}", e.getMessage());
         }
     }
 
@@ -1512,22 +1515,21 @@ public class WalChaos {
     // =========================================================================
 
     private void printSection(String name) {
-        System.out.println();
-        System.out.println("┌───────────────────────────────────────────────────────────────┐");
-        System.out.printf("│  %-61s │%n", name);
-        System.out.println("└───────────────────────────────────────────────────────────────┘");
+        LOG.info("");
+        LOG.info("┌───────────────────────────────────────────────────────────────┐");
+        LOG.info("│  {} │", String.format("%-61s", name));
+        LOG.info("└───────────────────────────────────────────────────────────────┘");
     }
 
     private void chaosTest(String name, ChaosTestRunnable test) {
-        System.out.printf("  %-50s ", name);
+        LOG.info("  {} ", String.format("%-50s", name));
         try {
             test.run();
-            System.out.println("[PASS]");
+            LOG.info("[PASS]");
             testsPassed.incrementAndGet();
         } catch (Throwable e) {
-            System.out.println("[FAIL]");
-            System.err.println("    Error: " + e.getMessage());
-            e.printStackTrace(System.err);
+            LOG.info("[FAIL]");
+            LOG.error("    Error: {}", e.getMessage(), e);
             testsFailed.incrementAndGet();
         }
     }

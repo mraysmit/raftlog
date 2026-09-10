@@ -16,6 +16,8 @@
 package dev.mars.raftlog.storage;
 
 import dev.mars.raftlog.storage.RaftStorage.LogEntryData;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -55,6 +57,7 @@ public record AppendPlan(
         Long truncateFromIndex,
         List<LogEntryData> entriesToAppend
 ) {
+    private static final Logger LOG = LoggerFactory.getLogger(AppendPlan.class);
 
     /**
      * Creates an AppendPlan with defensive copy of entries.
@@ -69,6 +72,7 @@ public record AppendPlan(
      * Creates an empty plan (no truncation, no appends).
      */
     public static AppendPlan empty() {
+        LOG.debug("No-op append plan requested");
         return new AppendPlan(null, Collections.emptyList());
     }
 
@@ -92,8 +96,12 @@ public record AppendPlan(
                                    List<LogEntryData> incomingEntries,
                                    List<LogEntryData> currentLog) {
         if (incomingEntries == null || incomingEntries.isEmpty()) {
+            LOG.debug("from() called with empty incoming entries: returning empty plan");
             return empty();
         }
+
+        LOG.debug("Calculating append plan: startIndex={}, incomingEntries={}, currentLog={}",
+                startIndex, incomingEntries.size(), currentLog.size());
 
         Long truncateAt = null;
         int firstNewEntryIdx = 0;
@@ -106,6 +114,7 @@ public record AppendPlan(
             if (logPos < 0) {
                 // Invalid index, treat everything as new
                 firstNewEntryIdx = i;
+                LOG.debug("Incoming entry [{}] has negative log position {}; marking all entries as new", i, logPos);
                 break;
             }
 
@@ -118,6 +127,8 @@ public record AppendPlan(
                     // Conflict! Truncate from here and append the rest
                     truncateAt = logIndex;
                     firstNewEntryIdx = i;
+                    LOG.debug("Conflict detected at index {}: existingTerm={}, incomingTerm={}; truncating from {}",
+                            logIndex, existing.term(), incoming.term(), truncateAt);
                     break;
                 }
                 // Terms match - this entry already exists, skip it
@@ -125,6 +136,8 @@ public record AppendPlan(
             } else {
                 // We don't have this entry - everything from here is new
                 firstNewEntryIdx = i;
+                LOG.debug("Reached existing-log boundary at incoming position {} (logPos={}); entries from here are new",
+                        i, logPos);
                 break;
             }
         }
@@ -138,6 +151,8 @@ public record AppendPlan(
             toAppend = new ArrayList<>(incomingEntries.subList(firstNewEntryIdx, incomingEntries.size()));
         }
 
+        LOG.debug("Append plan resolved: truncateFromIndex={}, entriesToAppend={}",
+                truncateAt, toAppend.size());
         return new AppendPlan(truncateAt, toAppend);
     }
 
@@ -159,11 +174,21 @@ public record AppendPlan(
         if (truncateFromIndex != null) {
             int fromPos = (int) (truncateFromIndex - 1); // Convert to 0-based
             if (fromPos >= 0 && fromPos < memoryLog.size()) {
+                LOG.debug("Applying append plan: truncating in-memory log from position {} (index {})",
+                        fromPos, truncateFromIndex);
                 memoryLog.subList(fromPos, memoryLog.size()).clear();
+            } else {
+                LOG.debug("Skipping truncate in applyTo because fromPos {} is out of bounds for logSize {}",
+                        fromPos, memoryLog.size());
             }
         }
 
         // Step 2: Append new entries
+        if (!entriesToAppend.isEmpty()) {
+            LOG.debug("Applying append plan: appending {} entries", entriesToAppend.size());
+        } else {
+            LOG.debug("Applying append plan: no entries to append");
+        }
         memoryLog.addAll(entriesToAppend);
     }
 
