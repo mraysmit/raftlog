@@ -83,8 +83,8 @@ class NastyEdgeCaseTest {
     class ZeroFillFailureTests {
 
         @Test
-        @DisplayName("Zero-filled 4KB file treated as empty log (not parsed as record)")
-        void zeroFilledFileIsEmptyLog() throws Exception {
+        @DisplayName("Zero-filled 4KB file is reported as ambiguous corruption")
+        void zeroFilledFileIsReported() throws Exception {
             storage.close();
 
             // Create a file that's all zeros (simulates SSD/VM crash with zero-fill)
@@ -95,19 +95,15 @@ class NastyEdgeCaseTest {
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
-            // Should treat as empty - magic 0x00000000 != 0x52414654
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-            assertEquals(0, replayed.size(), 
-                    "Zero-filled file should be treated as empty log");
-
-            // File should be truncated to 0 (garbage removed)
-            assertEquals(0, Files.size(logPath), 
-                    "Zero-filled garbage should be truncated");
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> storage.replayLog().get(5, TimeUnit.SECONDS));
+            assertInstanceOf(FileRaftStorage.CorruptLogException.class, failure.getCause());
+            assertEquals(4096, Files.size(logPath), "Ambiguous zero-filled data must be preserved");
         }
 
         @Test
-        @DisplayName("Zero-filled region after valid entries is truncated")
-        void zeroFilledTailTruncated() throws Exception {
+        @DisplayName("Zero-filled region after valid entries is reported and preserved")
+        void zeroFilledTailIsReported() throws Exception {
             // Write valid entries
             storage.appendEntries(List.of(
                     new LogEntryData(1, 1, "valid-1".getBytes()),
@@ -127,11 +123,10 @@ class NastyEdgeCaseTest {
 
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-
-            assertEquals(2, replayed.size(), "Valid entries should survive");
-            assertEquals(validSize, Files.size(logPath), 
-                    "Zero-filled tail should be truncated");
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> storage.replayLog().get(5, TimeUnit.SECONDS));
+            assertInstanceOf(FileRaftStorage.CorruptLogException.class, failure.getCause());
+            assertEquals(validSize + 4096, Files.size(logPath), "Ambiguous tail must be preserved");
         }
 
         @Test
@@ -161,10 +156,9 @@ class NastyEdgeCaseTest {
 
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-
-            assertEquals(0, replayed.size(), 
-                    "Record with zero magic should be rejected");
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> storage.replayLog().get(5, TimeUnit.SECONDS));
+            assertInstanceOf(FileRaftStorage.CorruptLogException.class, failure.getCause());
         }
     }
 
@@ -316,10 +310,9 @@ class NastyEdgeCaseTest {
 
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-
-            assertEquals(0, replayed.size(), 
-                    "Negative payload length should be rejected");
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> storage.replayLog().get(5, TimeUnit.SECONDS));
+            assertInstanceOf(FileRaftStorage.CorruptLogException.class, failure.getCause());
         }
 
         @Test
@@ -463,8 +456,8 @@ class NastyEdgeCaseTest {
         }
 
         @Test
-        @DisplayName("Corruption in the last record is a torn tail and is truncated")
-        void corruptionInLastRecordIsTornTail() throws Exception {
+        @DisplayName("Corruption in the last record is reported and preserved")
+        void corruptionInLastRecordIsReported() throws Exception {
             writeEntries(3, "entry-");
             storage.close();
 
@@ -474,10 +467,9 @@ class NastyEdgeCaseTest {
 
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-
-            assertEquals(2, replayed.size());
-            assertEquals(entry3Start, Files.size(logPath), "Torn tail truncated at last good record");
+            FileRaftStorage.CorruptLogException corrupt = replayFails();
+            assertEquals(entry3Start, corrupt.corruptOffset());
+            assertTrue(Files.size(logPath) > entry3Start, "Corrupt final record must be preserved");
         }
     }
 

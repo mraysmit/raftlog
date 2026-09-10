@@ -12,7 +12,7 @@
 # Environment: RAFTLOG_DATA_DIR=/path
 #raftlog.dataDir=/var/lib/raftlog/data
 
-# Enable fsync after writes (should be true in production)
+# Fsync is mandatory; false is rejected by public configuration
 # Default: true
 # System property: -Draftlog.syncEnabled=true
 # Environment: RAFTLOG_SYNC_ENABLED=true

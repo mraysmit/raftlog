@@ -4,7 +4,7 @@ This document provides the exact, repo-specific process for publishing RaftLog t
 
 ## 1.2.0 capability release
 
-This release introduces [prefix compaction](RAFTLOG_PREFIX_COMPACTION.md), with unchanged raw append/replay semantics and WAL format. It is a new implementation on base `872a8c0`, not the previously unverified `db59859` artifact. Parent, core and demo must all use 1.2.0. The Windows reactor, Linux/JDK 21 reactor and focused downstream integration tests have passed; preserve their local TDD/release evidence under Git-ignored `test-output/prefix-compaction/`.
+This release introduces [prefix compaction](RAFTLOG_RAFT_WAL_DESIGN.md#139-prefix-compaction-implementation-notes), with unchanged raw append/replay semantics and WAL format. It is a new implementation on base `872a8c0`, not the previously unverified `db59859` artifact. Parent, core and demo must all use 1.2.0. The Windows reactor, Linux/JDK 21 reactor and focused downstream integration tests have passed; preserve their local TDD/release evidence under Git-ignored `test-output/prefix-compaction/`.
 
 Prepare signatures and source/Javadoc artifacts with `mvn -B -Prelease -DskipTests verify` after the test runs. Publish the same reviewed source with `mvn -B -Prelease -DskipTests deploy`. The configured plugin automatically publishes and waits for `published`; an upload or local install alone is not success. Confirm the parent/core/demo POMs and JARs from Central and compare hashes, then publish the release Git tag and source revision. Follow the [Central Portal Maven documentation](https://central.sonatype.org/publish/publish-portal-maven/).
 

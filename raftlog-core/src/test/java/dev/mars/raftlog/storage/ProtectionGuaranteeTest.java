@@ -40,6 +40,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -94,6 +95,12 @@ class ProtectionGuaranteeTest {
     Path tempDir;
 
     private FileRaftStorage storage;
+
+    private static FileRaftStorage.CorruptLogException assertCorruptReplay(FileRaftStorage storage) {
+        ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> storage.replayLog().get(5, TimeUnit.SECONDS));
+        return assertInstanceOf(FileRaftStorage.CorruptLogException.class, failure.getCause());
+    }
 
     @BeforeEach
     void setUp() throws Exception {
@@ -385,10 +392,7 @@ class ProtectionGuaranteeTest {
 
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-
-            // Entry should be rejected due to CRC mismatch
-            assertEquals(0, replayed.size(), "Corrupted entry should be rejected");
+            assertCorruptReplay(storage);
         }
 
         @Test
@@ -406,9 +410,7 @@ class ProtectionGuaranteeTest {
 
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-
-            assertEquals(0, replayed.size(), "Corrupted entry should be rejected");
+            assertCorruptReplay(storage);
         }
 
         @Test
@@ -427,9 +429,7 @@ class ProtectionGuaranteeTest {
 
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-
-            assertEquals(0, replayed.size());
+            assertCorruptReplay(storage);
         }
 
         @Test
@@ -486,8 +486,8 @@ class ProtectionGuaranteeTest {
         }
 
         @Test
-        @DisplayName("G11: WAL file truncation on recovery removes torn tail")
-        void walTruncationOnRecovery() throws Exception {
+        @DisplayName("G11: Ambiguous WAL garbage is reported and preserved")
+        void ambiguousWalGarbageIsReported() throws Exception {
             for (int i = 1; i <= 5; i++) {
                 storage.appendEntries(List.of(
                         new LogEntryData(i, 1, ("entry-" + i).getBytes())
@@ -509,13 +509,12 @@ class ProtectionGuaranteeTest {
             long corruptedSize = Files.size(logPath);
             assertTrue(corruptedSize > validSize);
 
-            // Recovery should truncate
+            // Arbitrary garbage may be acknowledged data damaged later, so recovery
+            // reports it rather than guessing that it is an unacknowledged write.
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
-            storage.replayLog().get(5, TimeUnit.SECONDS);
-
-            long recoveredSize = Files.size(logPath);
-            assertEquals(validSize, recoveredSize, "File should be truncated to valid size");
+            assertCorruptReplay(storage);
+            assertEquals(corruptedSize, Files.size(logPath), "Ambiguous tail must be preserved");
         }
 
         @Test
@@ -536,9 +535,7 @@ class ProtectionGuaranteeTest {
 
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-
-            assertEquals(0, replayed.size());
+            assertCorruptReplay(storage);
         }
     }
 

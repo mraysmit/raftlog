@@ -174,13 +174,13 @@ public interface RaftStorage extends Closeable {
      * For FileRaftStorage: Scans the append-only file sequentially.
      * For RocksDB: Scans keys {@code log:1} to {@code log:N}.
      * <p>
-     * Replay is destructive for a torn tail only. An incomplete or invalid record
-     * with no valid record after it belongs to a batch that was never acknowledged
-     * and is physically truncated. An invalid record that is followed by a valid
-     * record lies inside data that may have been acknowledged; FileRaftStorage
-     * fails with {@link FileRaftStorage.CorruptLogException}, leaves the file
-     * unchanged and fences the instance. Such a node must be restored from its
-     * peers rather than repaired by truncation.
+     * Replay is destructive only for a structurally incomplete EOF fragment, which
+     * is treated as a torn write and physically truncated. A complete record with a
+     * bad CRC, malformed header, arbitrary garbage, or an invalid record followed by
+     * a valid record may be acknowledged data damaged later; FileRaftStorage fails
+     * with {@link FileRaftStorage.CorruptLogException}, leaves the file unchanged and
+     * fences the instance. Such a node must be restored from its peers rather than
+     * repaired by truncation.
      *
      * @return a Future containing all valid log entries in order
      */

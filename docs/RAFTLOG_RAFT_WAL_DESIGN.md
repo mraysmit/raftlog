@@ -36,7 +36,7 @@ RaftLog exists to get each of these right once, in one place, with tests that ex
 - A `RaftStorage` interface with six operations: `open`, `updateMetadata`, `loadMetadata`, `appendEntries`, `truncateSuffix`, `sync`, plus `replayLog` for startup and `truncatePrefix` for compaction.
 - `FileRaftStorage`, which implements it with an append-only `raft.log` of CRC32C-checksummed records and an atomically replaced `meta.dat`.
 - A single-writer discipline enforced by an executor the storage owns, so callers cannot accidentally interleave writes.
-- Startup replay that reconstructs the logical log from the physical record sequence, resolving truncation markers in order and repairing a torn tail.
+- Startup replay that reconstructs the logical log from the physical record sequence, resolving truncation markers in order and repairing structurally incomplete EOF writes.
 - `AppendPlan`, a pure calculator that turns an incoming `AppendEntries` batch into the exact truncate-and-append sequence the WAL needs, so the "persist first, then mutate memory" rule is easy to follow and hard to get wrong.
 - Explicit prefix compaction that rewrites the WAL to drop entries covered by an application snapshot the caller has already made durable.
 - A lock file, a free-space check and an optional read-after-write verification mode.
@@ -379,8 +379,8 @@ Failure and recovery semantics:
 - If publication does not complete, the previous `raft.log` remains authoritative.
 - Once publication enters uncertainty (failed force/rename/reopen), the instance is fenced and must be replaced with a fresh open instance.
 - On open, stale temp files are handled safely; a temp without authoritative `raft.log` causes open to fail rather than invent an empty log.
-- Incomplete source log tails must be repaired with `replayLog()` before compaction.
-- Corruption that is proven inside the committed region reports `CorruptLogException` and is not silently truncated.
+- Structurally incomplete source log tails must be repaired with `replayLog()` before compaction.
+- Complete malformed records, bad CRCs, arbitrary garbage and corruption followed by valid records report `CorruptLogException` and are not silently truncated.
 
 Platform caveat:
 - Windows file-provider behavior does not support directory fsync in this implementation; compaction forces file content and relies on atomic replace, but cannot claim full power-loss durability guarantees for the same durability level as non-Windows providers.
@@ -1070,7 +1070,7 @@ Before considering the WAL "done":
 - ✅ **Durability Barrier:** `AppendEntries` response is sent ONLY after `wal.sync()`
 - ✅ **Application Order:** Entries are applied to the State Machine strictly in-order
 - ✅ **Leader Consistency:** Leader only advances `commitIndex` after a majority `sync()` is confirmed
-- ✅ **Replay Safety:** Replay truncates corrupt/partial tail safely
+- ✅ **Replay Safety:** Replay truncates structurally incomplete EOF writes and preserves ambiguous corruption
 - ✅ **Crash Test (Append):** Kill during append → restart yields prefix-safe log
 - ✅ **Crash Test (Truncate+Append):** Kill during truncate+append sequence → replay yields last durable state
 
@@ -1127,10 +1127,10 @@ This is exactly how "real" systems do it.
 #### ✅ Replay Semantics Are Correct
 
 The replay loop:
-- Stops on first torn / corrupt record
+- Stops on the first incomplete or corrupt record
 - Applies truncates in sequence
 - Rebuilds in-memory log deterministically
-- Truncates the file tail
+- Truncates only a structurally incomplete EOF fragment; ambiguous corruption is preserved and fenced
 
 This is textbook WAL recovery logic.
 
@@ -1360,7 +1360,7 @@ The replay logic is O(n) where n = total records ever written. This is acceptabl
 
 Beyond the tests in Section 10, add:
 
-1. **Zero-Fill/Corruption Test:** Manually append random garbage bytes to a valid `raft.log` to simulate partial disk writes. Verify WAL recovers the "last good" state.
+1. **Zero-Fill/Corruption Test:** Manually append random garbage bytes to a valid `raft.log`. Verify replay reports ambiguous corruption, preserves the file and fences the instance; use a genuinely incomplete header/payload/CRC fixture to verify torn-write truncation.
 
 2. **Directory Fsync Verification:** On Linux, use `strace` or similar to confirm `fsync()` is called on both the file and directory during `updateMetadata`.
 
@@ -1626,9 +1626,11 @@ The goal of these tests is to prove that **no matter when the process dies**, th
 1. Call `replayLog()`.
 
 **Expectation:**
-- The WAL must detect the MAGIC mismatch or CRC failure at the tail
-- Truncate the file back to the last *completely* valid record
+- The WAL must detect that the record ends before its header, payload or CRC is complete
+- Truncate the structurally incomplete fragment back to the last *completely* valid record
 - Start normally with the prefix-safe log
+
+A complete record with a bad CRC or malformed header is not classified as a torn write: it is preserved, reported and fenced because it may have been acknowledged before later corruption.
 
 #### B.1.1 Implementation
 
@@ -1670,7 +1672,7 @@ class FileRaftStorageRecoveryTest {
         wal.sync().get();
         wal.close();
 
-        // 2. Simulate a "Torn Write" by manually appending a partial/corrupt record
+        // 2. Simulate a torn write by manually appending an incomplete record
         Path logPath = tempDir.resolve("raft.log");
         try (FileChannel fc = FileChannel.open(logPath, StandardOpenOption.WRITE, StandardOpenOption.APPEND)) {
             ByteBuffer partialHdr = ByteBuffer.allocate(10);
@@ -1717,7 +1719,7 @@ Key assertions:
 |-----------|-------------|
 | **Checksum Integrity** | The replay loop calculates the CRC for the 2 valid entries and compares it to the stored CRC |
 | **Boundary Check** | The `if (r < hdr.capacity()) break;` logic handles the case where the file ends abruptly before a full header is read |
-| **Physical Correction** | The `ch.truncate(lastGood)` call ensures that when the node starts up again, it isn't trying to append data *after* the garbage bytes, which would lead to a permanently unreadable log |
+| **Physical Correction** | The `ch.truncate(lastGood)` call removes only the structurally incomplete EOF fragment; arbitrary garbage and complete corrupt records are preserved and fenced |
 
 ---
 
@@ -1726,7 +1728,7 @@ Key assertions:
 **Scenario:** Does a follower ever acknowledge an entry it didn't actually save?
 
 **Setup:**
-1. Use a Mock `RaftStorage` that fails the `sync()` call.
+1. Use a lightweight purpose-built `RaftStorage` fake that fails the `sync()` call.
 
 **Action:**
 1. Send an `AppendEntriesRequest` to the `RaftNode`.
@@ -1849,7 +1851,7 @@ Why this guard matters:
 
 | Test | Validates | Critical For |
 |------|-----------|--------------|
-| **Torn Write** | CRC validation, prefix-safe truncation | Crash during append |
+| **Torn Write** | Structural EOF validation and prefix-safe truncation | Crash during append |
 | **Ghost ACK** | Durability Barrier | Raft safety |
 | **State Machine Rebuild** | `lastApplied` reconstruction | Recovery correctness |
 | **Double Vote** | Persist-before-Grant | Election safety |
@@ -1873,11 +1875,7 @@ This section describes how to connect the `FileRaftStorage` implementation with 
 public Path dataDir();
 
 /**
- * Returns whether to fsync on every sync() call.
- * Default: true (required for production durability)
- *
- * WARNING: Setting to false disables durability guarantees.
- * Only use for high-throughput non-production testing.
+ * Returns whether fsync is enabled. Always true for public configurations.
  */
 public boolean syncEnabled();
 ```
@@ -1896,8 +1894,7 @@ Add these entries to `raftlog.properties`:
 # On Windows development: data/raft (relative to working directory)
 raftlog.dataDir=/var/lib/raftlog/data
 
-# Enable fsync on sync() (required for durability)
-# WARNING: Only disable for testing - breaks Raft safety guarantees!
+# Fsync is mandatory; false is rejected by public configuration
 raftlog.syncEnabled=true
 ```
 
@@ -1912,23 +1909,15 @@ public final class FileRaftStorage implements RaftStorage {
 
     private final ExecutorService walExecutor;
     private final RaftStorageConfig config;
-    private final boolean syncEnabled;
-
     private Path dataDir;
     private FileChannel logCh;
 
     public FileRaftStorage(RaftStorageConfig config) {
         this.config = config;
-        this.syncEnabled = config.syncEnabled();
         this.walExecutor = Executors.newSingleThreadExecutor(r -> new Thread(r, "wal-executor"));
 
-        LOG.info("FileRaftStorage configured: dataDir={}, syncEnabled={}",
-                 config.dataDir().toAbsolutePath(), syncEnabled);
-
-        if (!syncEnabled) {
-            LOG.warn("⚠️ FSYNC DISABLED - Durability guarantees are OFF. " +
-                     "Do NOT use in production!");
-        }
+        LOG.info("FileRaftStorage configured: dataDir={}",
+                 config.dataDir().toAbsolutePath());
     }
 
     /** Opens using the data directory from the configuration. */
@@ -1962,9 +1951,6 @@ public final class FileRaftStorage implements RaftStorage {
 
     @Override
     public CompletableFuture<Void> sync() {
-        if (!syncEnabled) {
-            return CompletableFuture.completedFuture(null); // Skip fsync in test mode
-        }
         return CompletableFuture.runAsync(() -> {
             try {
                 logCh.force(true);  // true = sync metadata too
@@ -2004,7 +1990,7 @@ export RAFTLOG_SYNC_ENABLED=true
 | Setting | Development (Windows) | Production (Linux) |
 |---------|----------------------|-------------------|
 | `raftlog.dataDir` | `data/raft` | `/var/lib/raftlog/data` |
-| `raftlog.syncEnabled` | `true` (or `false` for speed) | `true` (mandatory) |
+| `raftlog.syncEnabled` | `true` (mandatory) | `true` (mandatory) |
 | Directory fsync | Skipped (OS limitation) | Enforced |
 | Performance testing | Not representative | Use for benchmarks |
 
@@ -2034,10 +2020,6 @@ public class RaftNodeBootstrap {
             throw new IllegalStateException("Data directory not writable: " + dataPath);
         }
 
-        if (!config.syncEnabled()) {
-            LOG.warn("⚠️ Running with fsync DISABLED - NOT SAFE FOR PRODUCTION");
-        }
-
         // Continue with WAL initialization...
     }
 }
@@ -2052,7 +2034,7 @@ The WAL design is now fully integrated with the `RaftStorageConfig` configuratio
 | Component | Status |
 |-----------|--------|
 | **Externalized Paths** | ✅ Via `raftlog.dataDir` property |
-| **Configurable Durability** | ✅ Via `raftlog.syncEnabled` property |
+| **Mandatory Durability** | ✅ Public configuration rejects `syncEnabled=false` |
 | **Environment Override** | ✅ Via `RAFTLOG_*` env vars |
 | **Windows Development** | ✅ Relative paths, graceful directory fsync skip |
 | **Linux Production** | ✅ Absolute paths, enforced fsync |

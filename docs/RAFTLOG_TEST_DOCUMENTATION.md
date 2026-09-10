@@ -9,9 +9,9 @@ This document provides a comprehensive overview of all test cases in the RaftLog
 - `FileRaftStorageRecoveryContractTest`: 22 cases covering append/truncate/replay semantics, including torn-tail fixtures.
 - `FileRaftStorageFencingTest`: 13 cases covering fencing after a failed WAL, metadata or directory force, and the replay classification of torn tails versus corruption inside the committed region.
 
-Replay policy since this change: an invalid record with no valid record after it is a torn tail and is truncated; an invalid record followed by a valid record is reported as `CorruptLogException`, the file is left untouched and the instance is fenced. Tests below that mention truncation at a mid-log corruption point now assert the report instead.
+Replay policy since this change: only a structurally incomplete EOF fragment is treated as a torn write and truncated. A complete record with a bad CRC, a malformed header, arbitrary garbage, or an invalid record followed by a valid record is reported as `CorruptLogException`; the file is left untouched and the instance is fenced.
 
-The 23 compaction cases were retained as behavioral failures before implementation and then passed. See [Prefix compaction](RAFTLOG_PREFIX_COMPACTION.md). The older class/count inventory below is historical, not the current reactor total.
+The 23 compaction cases were retained as behavioral failures before implementation and then passed. See [Prefix compaction](RAFTLOG_RAFT_WAL_DESIGN.md#139-prefix-compaction-implementation-notes). The older class/count inventory below is historical, not the current reactor total.
 
 ## Historical Test Summary
 
@@ -96,7 +96,7 @@ Tests core WAL functionality including append, replay, metadata, and basic recov
 |------|-------------|
 | `testReplay_SurvivesRestart` | Log survives close and reopen |
 | `testRecovery_TornWrite_PartialHeader` | Partial header at end is ignored |
-| `testRecovery_CorruptCRC` | Corrupt CRC on the last record is a torn tail and is truncated |
+| `testRecovery_CorruptCRC` | Corrupt CRC on the last record is reported and preserved |
 
 ### Edge Cases
 
@@ -118,15 +118,15 @@ Adversarial tests that attempt to break the storage implementation through corru
 | Test | Description |
 |------|-------------|
 | `corruptMagicNumber` | Bad magic with a valid record after it is reported, file untouched |
-| `corruptMagicNumberAtTail` | Bad magic on the last record is truncated |
-| `corruptVersionNumber` | Invalid version on the last record is truncated |
-| `unknownRecordType` | Unknown type byte causes truncation |
-| `negativePayloadLength` | Negative length causes truncation |
-| `payloadLengthExceedsMax` | Length > 16 MB causes truncation |
+| `corruptMagicNumberAtTail` | Bad magic on the last record is reported and preserved |
+| `corruptVersionNumber` | Invalid version on the last record is reported and preserved |
+| `unknownRecordType` | Unknown type byte is reported and preserved |
+| `negativePayloadLength` | Negative length is reported and preserved |
+| `payloadLengthExceedsMax` | Length > 16 MB is reported and preserved |
 | `truncatedPayload` | Incomplete payload causes truncation |
 | `truncatedCrc` | Missing CRC bytes causes truncation |
-| `zeroFilledGarbage` | Zeros at end ignored (no valid magic) |
-| `randomGarbageAtEnd` | Random bytes at end truncated |
+| `zeroFilledGarbage` | Zeros at the end are reported as ambiguous corruption |
+| `randomGarbageAtEnd` | Random bytes at the end are reported as ambiguous corruption |
 | `bitFlipInPayload` | Single bit flip detected by CRC |
 | `emptyWalFile` | Empty file returns empty log |
 | `partialFirstHeader` | Partial first record returns empty |
@@ -263,12 +263,12 @@ Tests for resilience against file-level corruption scenarios.
 | Test | Description | Validation |
 |------|-------------|------------|
 | `Random Byte Corruption in WAL` | Flip random byte in second half of WAL file | Torn tail repaired, or corruption reported with file untouched |
-| `Zero-Fill Corruption` | Append 4KB of zeros (SSD block failure simulation) | All 5 valid entries recovered, zeros ignored |
+| `Zero-Fill Corruption` | Append 4KB of zeros (SSD block failure simulation) | Corruption reported and file preserved |
 | `Magic Number Corruption` | Corrupt magic number of 3rd entry to `0xDEADBEEF` | Corruption reported; entries 4-5 not discarded |
 | `CRC Bit Flip` | Single bit flip in payload of first entry | CRC mismatch reported; file untouched, instance fenced |
 | `Partial Record (Torn Write)` | Append partial 10-byte header (no index/term/payload/CRC) | All 5 valid entries recovered, partial record ignored |
 | `Metadata File Corruption` | Flip first byte of `meta.dat` file | Corruption detected on metadata load |
-| `Garbage Append After Valid Data` | Append 256 bytes of random garbage after valid entries | All 5 valid entries recovered |
+| `Garbage Append After Valid Data` | Append 256 bytes of random garbage after valid entries | Corruption reported and file preserved |
 | `Truncation Point Corruption` | Write 10 entries, truncate at 5, write 3 more | Correct 7 entries with proper terms after recovery |
 
 **What these tests catch:**
@@ -455,7 +455,7 @@ Tests for SSD/VM crash scenarios that leave zero-filled blocks.
 | Test | Description |
 |------|-------------|
 | `zeroFilledFileIsEmptyLog` | 4KB zero-filled file treated as empty (not parsed as records) |
-| `zeroFilledTailTruncated` | Zero-filled region after valid entries is truncated |
+| `zeroFilledTailIsReported` | Zero-filled region after valid entries is reported and preserved |
 | `zeroMagicRejected` | Record with magic=0x00000000 correctly rejected |
 
 ### Directory Metadata Loss (3 tests)
@@ -489,7 +489,7 @@ Tests for integer overflow in batch size calculations.
 | `corruptInstanceIsFenced` | After the report, appends, sync and replay all fail and nothing is written |
 | `operatorTruncationAtReportedOffsetRecovers` | Truncating at the reported offset, once the tail is known to be unacknowledged, recovers entries 1-4 |
 | `corruptionAtFirstEntryIsReported` | Corruption at entry 1 with a valid entry 2 is reported, not truncated to empty |
-| `corruptionInLastRecordIsTornTail` | Corruption in the last record is a torn tail and is truncated |
+| `corruptionInLastRecordIsReported` | Corruption in the last record is reported and preserved |
 
 ### Clock Skew and File Timestamps (3 tests)
 
@@ -511,14 +511,14 @@ Tests that verify we never rely on file timestamps.
 |--------|---------------------|---------------|
 | **Concurrent writes (same process)** | Single-threaded executor | G1-G5, WalChaos Concurrency |
 | **Concurrent writes (different processes)** | Exclusive file lock | File Locking Tests, WalChaos Double Open |
-| **Torn writes / power loss** | CRC32C + recovery truncation | G6-G12, F1-F5, WalChaos Corruption |
+| **Torn writes / power loss** | Structurally incomplete EOF recovery; ambiguous corruption is fenced | G6-G12, F1-F5, WalChaos Corruption |
 | **Bit rot / bit flips** | CRC32C checksums | G6-G8, F4, WalChaos CRC Bit Flip |
 | **Process crashes** | WAL replay on restart | Recovery Tests, WalChaos Open/Close Cycles |
 | **Partial metadata updates** | Atomic rename | G10, WalChaos Metadata Corruption |
 | **Disk full** | Pre-flight space check | Disk Space Tests |
 | **Silent filesystem corruption** | Read-after-write verification | Verification Tests |
 | **Zero-fill persistence trap** | MAGIC != 0x00000000 | NastyEdgeCaseTest, WalChaos Zero-Fill |
-| **Middle-of-log corruption** | Truncate at corruption point | NastyEdgeCaseTest, WalChaos Random Corruption |
+| **WAL corruption** | Report, preserve the file, and fence the instance | NastyEdgeCaseTest, FileRaftStorageFencingTest, WalChaos Random Corruption |
 | **Integer overflow in batches** | Payload size limits | NastyEdgeCaseTest, WalChaos Boundary |
 | **Clock skew / timestamp attacks** | Atomic rename only | NastyEdgeCaseTest |
 | **Thread interrupts during I/O** | Graceful handling | WalChaos Thread Interrupt Storm |

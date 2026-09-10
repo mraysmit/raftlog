@@ -76,15 +76,16 @@ import java.util.zip.CRC32C;
  * Once a durability call has failed the state of the page cache is undefined, so a
  * later retry can succeed while the data is gone. After a failed force of the WAL, the
  * metadata staging file or the data directory, after a compaction publication failure,
- * and after replay detects corruption inside the committed region, this instance
+ * and after replay detects corruption that is not a structurally incomplete EOF
+ * fragment, this instance
  * rejects every further operation with the original failure. Close it and open a fresh
  * instance; if the failure was corruption, restore the node from its peers.
  * <p>
  * <b>Replay policy:</b>
- * An incomplete or invalid record at the tail of {@code raft.log} with no valid record
- * after it is a torn write of an unacknowledged batch and is truncated. An invalid record
- * that is followed by a valid record lies inside data that may have been acknowledged and
- * is reported as {@link CorruptLogException} without modifying the file.
+ * A structurally incomplete EOF fragment is treated as a torn write and truncated. A
+ * complete record with a bad CRC, a malformed header, arbitrary garbage, or an invalid
+ * record followed by a valid record may be acknowledged data damaged later; it is reported
+ * as {@link CorruptLogException} without modifying the file.
  *
  * @see RaftStorage
  */
@@ -193,9 +194,14 @@ public final class FileRaftStorage implements RaftStorage {
     }
 
     FileRaftStorage(RaftStorageConfig config, CompactionIo compactionIo) {
+        this(config, compactionIo, false);
+    }
+
+    private FileRaftStorage(RaftStorageConfig config, CompactionIo compactionIo,
+                            boolean disableFsyncForTesting) {
         this.compactionIo = java.util.Objects.requireNonNull(compactionIo);
-        this.config = config;
-        this.syncEnabled = config.syncEnabled();
+        this.config = java.util.Objects.requireNonNull(config);
+        this.syncEnabled = !disableFsyncForTesting;
         this.verifyWrites = config.verifyWrites();
         this.maxPayloadSize = config.maxPayloadSizeBytes();
         this.minFreeSpace = config.minFreeSpaceBytes();
@@ -218,13 +224,28 @@ public final class FileRaftStorage implements RaftStorage {
         }
     }
 
+    /** Package-private seam for tests that need to observe behavior without fsync. */
+    static FileRaftStorage unsafeWithoutFsyncForTesting(boolean verifyWrites) {
+        RaftStorageConfig config = RaftStorageConfig.builder()
+                .verifyWrites(verifyWrites)
+                .build();
+        return new FileRaftStorage(config, new CompactionIo(), true);
+    }
+
+    /** Package-private seam for deterministic I/O tests that need fsync disabled. */
+    static FileRaftStorage unsafeWithoutFsyncForTesting(RaftStorageConfig config, CompactionIo compactionIo) {
+        return new FileRaftStorage(config, compactionIo, true);
+    }
+
     /**
      * Creates a new FileRaftStorage with specified sync setting.
      * <p>
      * <b>Deprecated:</b> Use {@link #FileRaftStorage(RaftStorageConfig)} instead.
      *
-     * @param syncEnabled if false, fsync is skipped (ONLY for testing!)
+     * @param syncEnabled must be true; false is rejected
+     * @throws IllegalArgumentException if {@code syncEnabled} is false
      */
+    @Deprecated(since = "1.3.0", forRemoval = true)
     public FileRaftStorage(boolean syncEnabled) {
         this(RaftStorageConfig.builder().syncEnabled(syncEnabled).build());
     }
@@ -234,9 +255,11 @@ public final class FileRaftStorage implements RaftStorage {
      * <p>
      * <b>Deprecated:</b> Use {@link #FileRaftStorage(RaftStorageConfig)} instead.
      *
-     * @param syncEnabled   if false, fsync is skipped (ONLY for testing!)
+     * @param syncEnabled   must be true; false is rejected
      * @param verifyWrites  if true, perform read-after-write verification
+     * @throws IllegalArgumentException if {@code syncEnabled} is false
      */
+    @Deprecated(since = "1.3.0", forRemoval = true)
     public FileRaftStorage(boolean syncEnabled, boolean verifyWrites) {
         this(RaftStorageConfig.builder()
                 .syncEnabled(syncEnabled)
@@ -638,7 +661,8 @@ public final class FileRaftStorage implements RaftStorage {
      * Decodes the record at {@code pos}, or returns {@code null} if the bytes there
      * are not a complete, well-formed record with a matching CRC. The reason for a
      * {@code null} is logged at the given level so the main loop can warn while the
-     * forward scan stays quiet.
+     * forward scan stays quiet. Replay separately classifies whether the bytes are a
+     * structurally incomplete EOF fragment or ambiguous corruption.
      */
     private DecodedRecord decodeRecord(FileChannel ch, long pos, boolean warn) throws IOException {
         ByteBuffer headerBuf = ByteBuffer.allocate(HEADER_SIZE);
@@ -704,11 +728,10 @@ public final class FileRaftStorage implements RaftStorage {
 
     /**
      * Scans forward from {@code from} for any position holding a complete, valid record.
-     * A torn write of an unacknowledged batch leaves only garbage, zeros or a partial
-     * record after the last good record. Corruption inside the committed region leaves
-     * the following records intact, so finding one means the bad record was not a
-     * torn tail. The scan is byte-granular so a record whose length field was damaged
-     * cannot hide the records after it.
+     * Finding a valid record after the first invalid byte proves that the damage is not
+     * an EOF fragment. Absence of a later record is not proof of a torn write; the
+     * structural EOF check makes that decision separately. The scan is byte-granular
+     * so a damaged length field cannot hide valid records after it.
      */
     private boolean validRecordExistsAfter(FileChannel ch, long from, long fileSize) throws IOException {
         final int window = 64 * 1024;
@@ -730,6 +753,35 @@ public final class FileRaftStorage implements RaftStorage {
             if (read < window) break;
         }
         return false;
+    }
+
+    /**
+     * Returns true only when the bytes at {@code pos} end before the minimum record
+     * header, or when a valid header declares a payload/CRC that reaches beyond EOF.
+     * Complete records with a bad CRC and malformed headers are ambiguous: they may
+     * be acknowledged data damaged after the write, so replay must not erase them.
+     */
+    private boolean isStructurallyIncompleteEofFragment(FileChannel ch, long pos, long fileSize) throws IOException {
+        long remaining = fileSize - pos;
+        if (remaining < HEADER_SIZE) return true;
+
+        ByteBuffer header = ByteBuffer.allocate(HEADER_SIZE);
+        if (readFully(ch, header, pos) < HEADER_SIZE) return true;
+        header.flip();
+
+        int magic = header.getInt();
+        short version = header.getShort();
+        byte type = header.get();
+        header.getLong(); // index
+        header.getLong(); // term
+        int payloadLen = header.getInt();
+
+        if (magic != MAGIC || version != VERSION) return false;
+        if (type != TYPE_TRUNCATE && type != TYPE_APPEND) return false;
+        if (payloadLen < 0 || payloadLen > maxPayloadSize) return false;
+
+        long completeSize = (long) HEADER_SIZE + payloadLen + CRC_SIZE;
+        return remaining < completeSize;
     }
 
     /** Called only on the WAL executor, without submitting another executor task. */
@@ -775,10 +827,11 @@ public final class FileRaftStorage implements RaftStorage {
             long lastGoodPos = pos;
 
             if (lastGoodPos < fileSize) {
-                // A bad record with a valid record somewhere after it is not a torn
-                // tail: the data after it may have been acknowledged and must not be
-                // discarded by this node alone. Report it and leave the file as it is.
-                if (validRecordExistsAfter(ch, lastGoodPos + 1, fileSize)) {
+                // Only a structurally incomplete EOF fragment is repaired. A complete
+                // bad record or malformed header at the tail may be acknowledged data
+                // damaged later and therefore must be reported without modifying it.
+                boolean incompleteEof = isStructurallyIncompleteEofFragment(ch, lastGoodPos, fileSize);
+                if (!incompleteEof || validRecordExistsAfter(ch, lastGoodPos + 1, fileSize)) {
                     throw new CorruptLogException(logPath, lastGoodPos, fileSize, entries.size());
                 }
                 if (!repairTail) throw new IOException("WAL contains an incomplete tail; replay before compaction");
@@ -1029,9 +1082,9 @@ public final class FileRaftStorage implements RaftStorage {
     }
 
     /**
-     * Replay found an invalid record that is followed by a valid record, so the damage
-     * lies inside data that may already have been acknowledged to the cluster. The WAL
-     * has not been modified and the storage instance is fenced.
+     * Replay found an invalid record that cannot be safely classified as an incomplete
+     * EOF write. It may be followed by a valid record or may be a complete final record
+     * damaged after acknowledgment. The WAL is not modified and the instance is fenced.
      * <p>
      * A node in this state must not repair itself by truncation: if it then formed a
      * majority with lagging peers, acknowledged entries could be lost cluster-wide.
@@ -1047,7 +1100,7 @@ public final class FileRaftStorage implements RaftStorage {
 
         CorruptLogException(Path logPath, long corruptOffset, long fileSize, int entriesBeforeCorruption) {
             super("WAL " + logPath + " is corrupt at byte " + corruptOffset + " of " + fileSize
-                    + " with valid records after it; " + entriesBeforeCorruption
+                    + "; " + entriesBeforeCorruption
                     + " entries precede the damage. Not repaired: restore this node from its peers.");
             this.logPath = logPath;
             this.corruptOffset = corruptOffset;

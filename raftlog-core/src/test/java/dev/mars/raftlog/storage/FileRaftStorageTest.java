@@ -30,6 +30,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -64,6 +65,12 @@ class FileRaftStorageTest {
         if (storage != null) {
             storage.close();
         }
+    }
+
+    private static FileRaftStorage.CorruptLogException assertCorruptReplay(FileRaftStorage storage) {
+        ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> storage.replayLog().get(5, TimeUnit.SECONDS));
+        return assertInstanceOf(FileRaftStorage.CorruptLogException.class, failure.getCause());
     }
 
     // ========================================================================
@@ -368,11 +375,10 @@ class FileRaftStorageTest {
         storage = new FileRaftStorage(true);
         storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
-        List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-
-        // Should only recover the first entry
-        assertEquals(1, replayed.size());
-        assertEquals(1, replayed.get(0).index());
+        byte[] before = Files.readAllBytes(logPath);
+        FileRaftStorage.CorruptLogException corrupt = assertCorruptReplay(storage);
+        assertEquals(1, corrupt.entriesBeforeCorruption());
+        assertArrayEquals(before, Files.readAllBytes(logPath));
     }
 
     // ========================================================================
