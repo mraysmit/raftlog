@@ -449,14 +449,17 @@ class ProtectionGuaranteeTest {
             long entry7Start = findRecordStart(logPath, 6); // 0-indexed
             flipBitAt(logPath, entry7Start + 20, 0);
 
+            byte[] before = Files.readAllBytes(logPath);
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-
-            assertEquals(6, replayed.size(), "Entries 1-6 should survive");
-            for (int i = 0; i < 6; i++) {
-                assertEquals(i + 1, replayed.get(i).index());
-            }
+            // Entries 8-10 after the damage may have been acknowledged: replay must not
+            // discard them unilaterally. It reports the damage and leaves the file intact.
+            var failure = assertThrows(java.util.concurrent.ExecutionException.class,
+                    () -> storage.replayLog().get(5, TimeUnit.SECONDS));
+            var corrupt = assertInstanceOf(FileRaftStorage.CorruptLogException.class, failure.getCause());
+            assertEquals(6, corrupt.entriesBeforeCorruption(), "Entries 1-6 decoded before the damage");
+            assertEquals(entry7Start, corrupt.corruptOffset());
+            assertArrayEquals(before, Files.readAllBytes(logPath));
         }
 
         @Test
@@ -683,11 +686,13 @@ class ProtectionGuaranteeTest {
 
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
 
-            // Only entry 1 should survive (replay stops at first corruption)
-            assertEquals(1, replayed.size());
-            assertEquals(1, replayed.get(0).index());
+            // Entry 3 after the damage is valid, so this is corruption, not a torn tail
+            var failure = assertThrows(java.util.concurrent.ExecutionException.class,
+                    () -> storage.replayLog().get(5, TimeUnit.SECONDS));
+            var corrupt = assertInstanceOf(FileRaftStorage.CorruptLogException.class, failure.getCause());
+            assertEquals(1, corrupt.entriesBeforeCorruption());
+            assertEquals(entry2Start, corrupt.corruptOffset());
         }
     }
 

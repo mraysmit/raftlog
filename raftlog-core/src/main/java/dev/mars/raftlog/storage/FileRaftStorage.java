@@ -67,9 +67,24 @@ import java.util.zip.CRC32C;
  *       from writing simultaneously. Lock is held for the lifetime of the storage instance.</li>
  *   <li><b>Disk Space Checking:</b> Pre-flight check before writes to detect low disk space
  *       early and fail gracefully rather than mid-write.</li>
- *   <li><b>Read-After-Write Verification:</b> Optional verification that written data
- *       can be read back correctly, detecting silent filesystem corruption.</li>
+ *   <li><b>Read-After-Write Verification:</b> Optional check that each record can be read
+ *       back with a matching CRC. The read goes through the page cache, so this detects
+ *       in-process encoding bugs and some filesystem faults, not media or controller faults.</li>
  * </ul>
+ * <p>
+ * <b>Fencing:</b>
+ * Once a durability call has failed the state of the page cache is undefined, so a
+ * later retry can succeed while the data is gone. After a failed force of the WAL, the
+ * metadata staging file or the data directory, after a compaction publication failure,
+ * and after replay detects corruption inside the committed region, this instance
+ * rejects every further operation with the original failure. Close it and open a fresh
+ * instance; if the failure was corruption, restore the node from its peers.
+ * <p>
+ * <b>Replay policy:</b>
+ * An incomplete or invalid record at the tail of {@code raft.log} with no valid record
+ * after it is a torn write of an unacknowledged batch and is truncated. An invalid record
+ * that is followed by a valid record lies inside data that may have been acknowledged and
+ * is reported as {@link CorruptLogException} without modifying the file.
  *
  * @see RaftStorage
  */
@@ -145,7 +160,12 @@ public final class FileRaftStorage implements RaftStorage {
     private FileChannel lockChannel;
     private FileLock exclusiveLock;
     private volatile boolean closed = false;
-    private volatile StorageException compactionFailure;
+
+    /**
+     * Set once a durability call has failed or replay has found corruption inside
+     * the committed region. Every subsequent operation fails with this exception.
+     */
+    private volatile StorageException fatalFailure;
 
     // ========================================================================
     // Constructor
@@ -194,7 +214,7 @@ public final class FileRaftStorage implements RaftStorage {
             LOG.warn("FileRaftStorage created with fsync DISABLED. Do NOT use in production!");
         }
         if (verifyWrites) {
-            LOG.info("Write verification enabled (slower but safer)");
+            LOG.info("Write verification enabled: forces and re-reads every record through the page cache");
         }
     }
 
@@ -350,7 +370,11 @@ public final class FileRaftStorage implements RaftStorage {
                         ch.write(buf);
                     }
                     if (syncEnabled) {
-                        ch.force(true);
+                        try {
+                            compactionIo.forceChannel(ch);
+                        } catch (IOException e) {
+                            throw fence("Failed to force metadata staging file", e);
+                        }
                         LOG.trace("Synced temp metadata file");
                     }
                 }
@@ -361,9 +385,14 @@ public final class FileRaftStorage implements RaftStorage {
                         StandardCopyOption.ATOMIC_MOVE);
                 LOG.trace("Atomic rename: {} -> {}", tmpPath, metaPath);
 
-                // Fsync directory (critical on Linux)
+                // The rename is not durable across power loss until the directory is
+                // forced. A failure here is a durability failure and fences the instance.
                 if (syncEnabled) {
-                    syncDirectory(dataDir);
+                    try {
+                        compactionIo.forceDirectory(dataDir);
+                    } catch (IOException e) {
+                        throw fence("Failed to force data directory after metadata rename", e);
+                    }
                 }
 
                 LOG.info("Metadata updated: term={}, votedFor={}", currentTerm, votedFor.orElse("(none)"));
@@ -433,7 +462,7 @@ public final class FileRaftStorage implements RaftStorage {
 
     @Override
     public CompletableFuture<Void> appendEntries(List<LogEntryData> entries) {
-        if (compactionFailure != null) return CompletableFuture.failedFuture(compactionFailure);
+        if (fatalFailure != null) return CompletableFuture.failedFuture(fatalFailure);
         if (entries == null || entries.isEmpty()) {
             LOG.trace("appendEntries called with empty list, no-op");
             return CompletableFuture.completedFuture(null);
@@ -498,7 +527,7 @@ public final class FileRaftStorage implements RaftStorage {
 
     @Override
     public CompletableFuture<Void> sync() {
-        if (compactionFailure != null) return CompletableFuture.failedFuture(compactionFailure);
+        if (fatalFailure != null) return CompletableFuture.failedFuture(fatalFailure);
         if (!syncEnabled) {
             LOG.trace("sync() called but fsync is disabled");
             return CompletableFuture.completedFuture(null);
@@ -509,12 +538,13 @@ public final class FileRaftStorage implements RaftStorage {
             ensureHealthy();
             try {
                 long startNanos = System.nanoTime();
-                logChannel.force(true);
+                compactionIo.forceChannel(logChannel);
                 long elapsedMicros = (System.nanoTime() - startNanos) / 1000;
                 LOG.debug("WAL synced to disk in {} us", elapsedMicros);
             } catch (IOException e) {
-                LOG.error("Failed to sync WAL: {}", e.getMessage(), e);
-                throw new StorageException("Failed to sync WAL", e);
+                // After a failed fsync the kernel may have discarded the dirty pages;
+                // a retry could report success for data that never reached the disk.
+                throw fence("Failed to sync WAL", e);
             }
         }, walExecutor);
     }
@@ -552,10 +582,13 @@ public final class FileRaftStorage implements RaftStorage {
                 logChannel = compactionIo.reopen(published);
                 logChannel.position(logChannel.size());
                 LOG.info("Compacted WAL through index {}: {} entries retained", toIndex, retained.size());
+            } catch (CorruptLogException e) {
+                // Nothing was written, but the source cannot be trusted for any later write.
+                throw fence("WAL is corrupt inside the committed region", e);
             } catch (IOException | RuntimeException e) {
                 StorageException failure = new StorageException("Prefix compaction failed", e);
                 if (publicationAttempted) {
-                    compactionFailure = failure;
+                    fatalFailure = failure;
                     try { logChannel.close(); } catch (IOException closeFailure) { failure.addSuppressed(closeFailure); }
                 } else {
                     try { Files.deleteIfExists(temporary); } catch (IOException cleanupFailure) { failure.addSuppressed(cleanupFailure); }
@@ -566,7 +599,19 @@ public final class FileRaftStorage implements RaftStorage {
     }
 
     private void ensureHealthy() {
-        if (compactionFailure != null) throw compactionFailure;
+        if (fatalFailure != null) throw fatalFailure;
+    }
+
+    /**
+     * Records a fatal failure so that every later operation fails with it, and
+     * returns the exception for the caller to throw. Called only on the WAL executor.
+     */
+    private StorageException fence(String message, Throwable cause) {
+        LOG.error("{}: {}. Storage instance is now fenced; close it and open a fresh instance",
+                message, cause.getMessage(), cause);
+        StorageException failure = cause instanceof StorageException se ? se : new StorageException(message, cause);
+        if (fatalFailure == null) fatalFailure = failure;
+        return failure;
     }
 
     @Override
@@ -575,10 +620,116 @@ public final class FileRaftStorage implements RaftStorage {
             ensureHealthy();
             try {
                 return readLog(true);
+            } catch (CorruptLogException e) {
+                // The channel is positioned after the corrupt region. Appending there would
+                // splice new records onto data that cannot be trusted.
+                throw fence("WAL is corrupt inside the committed region", e);
             } catch (IOException e) {
                 throw new StorageException("Failed to replay log", e);
             }
         }, walExecutor);
+    }
+
+    /** Result of decoding one record at a file position. */
+    private record DecodedRecord(byte type, long index, long term, byte[] payload, long end) {
+    }
+
+    /**
+     * Decodes the record at {@code pos}, or returns {@code null} if the bytes there
+     * are not a complete, well-formed record with a matching CRC. The reason for a
+     * {@code null} is logged at the given level so the main loop can warn while the
+     * forward scan stays quiet.
+     */
+    private DecodedRecord decodeRecord(FileChannel ch, long pos, boolean warn) throws IOException {
+        ByteBuffer headerBuf = ByteBuffer.allocate(HEADER_SIZE);
+        int headerRead = readFully(ch, headerBuf, pos);
+        if (headerRead < HEADER_SIZE) {
+            if (warn && headerRead > 0) {
+                LOG.debug("Incomplete header at pos {}: read {} bytes, expected {}", pos, headerRead, HEADER_SIZE);
+            }
+            return null;
+        }
+        headerBuf.flip();
+
+        int magic = headerBuf.getInt();
+        short version = headerBuf.getShort();
+        byte type = headerBuf.get();
+        long index = headerBuf.getLong();
+        long term = headerBuf.getLong();
+        int payloadLen = headerBuf.getInt();
+
+        if (magic != MAGIC || version != VERSION) {
+            if (warn) LOG.warn("Invalid header at pos {}: magic=0x{}, version={}", pos, Integer.toHexString(magic), version);
+            return null;
+        }
+        if (payloadLen < 0 || payloadLen > maxPayloadSize) {
+            if (warn) LOG.warn("Invalid payload length at pos {}: {}", pos, payloadLen);
+            return null;
+        }
+        if (type != TYPE_TRUNCATE && type != TYPE_APPEND) {
+            if (warn) LOG.warn("Unknown record type at pos {}: {}", pos, type);
+            return null;
+        }
+
+        ByteBuffer payloadBuf = ByteBuffer.allocate(payloadLen);
+        int payloadRead = readFully(ch, payloadBuf, pos + HEADER_SIZE);
+        if (payloadRead < payloadLen) {
+            if (warn) LOG.debug("Incomplete payload at pos {}: read {} bytes, expected {}", pos, payloadRead, payloadLen);
+            return null;
+        }
+        payloadBuf.flip();
+
+        ByteBuffer crcBuf = ByteBuffer.allocate(CRC_SIZE);
+        int crcRead = readFully(ch, crcBuf, pos + HEADER_SIZE + payloadLen);
+        if (crcRead < CRC_SIZE) {
+            if (warn) LOG.debug("Incomplete CRC at pos {}", pos);
+            return null;
+        }
+        crcBuf.flip();
+        int expectedCrc = crcBuf.getInt();
+
+        CRC32C crc = new CRC32C();
+        headerBuf.rewind();
+        crc.update(headerBuf);
+        crc.update(payloadBuf.duplicate());
+        if ((int) crc.getValue() != expectedCrc) {
+            if (warn) LOG.warn("CRC mismatch at pos {}: expected={}, computed={}", pos, expectedCrc, (int) crc.getValue());
+            return null;
+        }
+
+        byte[] payload = new byte[payloadLen];
+        payloadBuf.get(payload);
+        return new DecodedRecord(type, index, term, payload, pos + HEADER_SIZE + payloadLen + CRC_SIZE);
+    }
+
+    /**
+     * Scans forward from {@code from} for any position holding a complete, valid record.
+     * A torn write of an unacknowledged batch leaves only garbage, zeros or a partial
+     * record after the last good record. Corruption inside the committed region leaves
+     * the following records intact, so finding one means the bad record was not a
+     * torn tail. The scan is byte-granular so a record whose length field was damaged
+     * cannot hide the records after it.
+     */
+    private boolean validRecordExistsAfter(FileChannel ch, long from, long fileSize) throws IOException {
+        final int window = 64 * 1024;
+        byte[] magicBytes = {(byte) (MAGIC >>> 24), (byte) (MAGIC >>> 16), (byte) (MAGIC >>> 8), (byte) MAGIC};
+        ByteBuffer buf = ByteBuffer.allocate(window);
+        long scanPos = from;
+        while (scanPos + HEADER_SIZE + CRC_SIZE <= fileSize) {
+            buf.clear();
+            int read = readFully(ch, buf, scanPos);
+            if (read < magicBytes.length) break;
+            byte[] bytes = buf.array();
+            for (int i = 0; i + magicBytes.length <= read; i++) {
+                if (bytes[i] != magicBytes[0] || bytes[i + 1] != magicBytes[1]
+                        || bytes[i + 2] != magicBytes[2] || bytes[i + 3] != magicBytes[3]) continue;
+                if (decodeRecord(ch, scanPos + i, false) != null) return true;
+            }
+            // Overlap by three bytes so a magic straddling the window edge is still seen.
+            scanPos += read - (magicBytes.length - 1);
+            if (read < window) break;
+        }
+        return false;
     }
 
     /** Called only on the WAL executor, without submitting another executor task. */
@@ -603,99 +754,34 @@ public final class FileRaftStorage implements RaftStorage {
             LOG.debug("WAL file size: {} bytes", fileSize);
 
             long pos = 0;
-            long lastGoodPos = 0;
-            ByteBuffer headerBuf = ByteBuffer.allocate(HEADER_SIZE);
+            while (pos < fileSize) {
+                DecodedRecord record = decodeRecord(ch, pos, true);
+                if (record == null) break;
 
-            while (true) {
-                // Read header
-                headerBuf.clear();
-                int headerRead = readFully(ch, headerBuf, pos);
-                if (headerRead < HEADER_SIZE) {
-                    if (headerRead > 0) {
-                        LOG.debug("Incomplete header at pos {}: read {} bytes, expected {}",
-                                pos, headerRead, HEADER_SIZE);
-                    }
-                    break; // Incomplete header
-                }
-                headerBuf.flip();
-
-                int magic = headerBuf.getInt();
-                short version = headerBuf.getShort();
-                byte type = headerBuf.get();
-                long index = headerBuf.getLong();
-                long term = headerBuf.getLong();
-                int payloadLen = headerBuf.getInt();
-
-                // Validate header
-                if (magic != MAGIC || version != VERSION) {
-                    LOG.warn("Invalid header at pos {}: magic=0x{}, version={}",
-                            pos, Integer.toHexString(magic), version);
-                    break; // Corrupt or torn header
-                }
-                if (payloadLen < 0 || payloadLen > maxPayloadSize) {
-                    LOG.warn("Invalid payload length at pos {}: {}", pos, payloadLen);
-                    break; // Invalid payload length
-                }
-
-                // Read payload
-                ByteBuffer payloadBuf = ByteBuffer.allocate(payloadLen);
-                int payloadRead = readFully(ch, payloadBuf, pos + HEADER_SIZE);
-                if (payloadRead < payloadLen) {
-                    LOG.debug("Incomplete payload at pos {}: read {} bytes, expected {}",
-                            pos, payloadRead, payloadLen);
-                    break; // Incomplete payload
-                }
-                payloadBuf.flip();
-
-                // Read CRC
-                ByteBuffer crcBuf = ByteBuffer.allocate(CRC_SIZE);
-                int crcRead = readFully(ch, crcBuf, pos + HEADER_SIZE + payloadLen);
-                if (crcRead < CRC_SIZE) {
-                    LOG.debug("Incomplete CRC at pos {}", pos);
-                    break; // Incomplete CRC
-                }
-                crcBuf.flip();
-                int expectedCrc = crcBuf.getInt();
-
-                // Verify CRC over header + payload
-                CRC32C crc = new CRC32C();
-                headerBuf.rewind();
-                crc.update(headerBuf);
-                crc.update(payloadBuf.duplicate());
-                if ((int) crc.getValue() != expectedCrc) {
-                    LOG.warn("CRC mismatch at pos {}: expected={}, computed={}",
-                            pos, expectedCrc, (int) crc.getValue());
-                    break; // CRC mismatch
-                }
-
-                // Process record
-                if (type == TYPE_TRUNCATE) {
-                    // Remove entries with index >= truncate index
-                    long truncateFrom = index;
+                if (record.type() == TYPE_TRUNCATE) {
+                    long truncateFrom = record.index();
                     int beforeSize = entries.size();
                     entries.removeIf(e -> e.index() >= truncateFrom);
-                    int removed = beforeSize - entries.size();
                     truncateCount++;
-                    LOG.trace("Replay TRUNCATE: fromIndex={}, removed {} entries", truncateFrom, removed);
-                } else if (type == TYPE_APPEND) {
-                    byte[] payload = new byte[payloadLen];
-                    payloadBuf.get(payload);
-                    entries.add(new LogEntryData(index, term, payload));
-                    appendCount++;
-                    LOG.trace("Replay APPEND: index={}, term={}, payloadLen={}", index, term, payloadLen);
+                    LOG.trace("Replay TRUNCATE: fromIndex={}, removed {} entries", truncateFrom, beforeSize - entries.size());
                 } else {
-                    LOG.warn("Unknown record type at pos {}: {}", pos, type);
-                    break; // Unknown record type
+                    entries.add(new LogEntryData(record.index(), record.term(), record.payload()));
+                    appendCount++;
+                    LOG.trace("Replay APPEND: index={}, term={}, payloadLen={}",
+                            record.index(), record.term(), record.payload().length);
                 }
-
-                // Advance to next record
-                lastGoodPos = pos + HEADER_SIZE + payloadLen + CRC_SIZE;
-                pos = lastGoodPos;
+                pos = record.end();
             }
+            long lastGoodPos = pos;
 
-            // Truncate file to last good position (remove torn tail)
             if (lastGoodPos < fileSize) {
-                if (!repairTail) throw new IOException("WAL contains corrupt or incomplete records; replay before compaction");
+                // A bad record with a valid record somewhere after it is not a torn
+                // tail: the data after it may have been acknowledged and must not be
+                // discarded by this node alone. Report it and leave the file as it is.
+                if (validRecordExistsAfter(ch, lastGoodPos + 1, fileSize)) {
+                    throw new CorruptLogException(logPath, lastGoodPos, fileSize, entries.size());
+                }
+                if (!repairTail) throw new IOException("WAL contains an incomplete tail; replay before compaction");
                 LOG.warn("Truncating torn tail: {} bytes removed (file was {} bytes, valid data {} bytes)",
                         fileSize - lastGoodPos, fileSize, lastGoodPos);
                 ch.truncate(lastGoodPos);
@@ -791,28 +877,6 @@ public final class FileRaftStorage implements RaftStorage {
     }
 
     /**
-     * Fsyncs a directory to ensure metadata changes (renames) are durable.
-     * <p>
-     * On Windows, this may fail or be a no-op. That's acceptable for development.
-     * On Linux (ext4/xfs), this is critical for durability.
-     */
-    private void syncDirectory(Path dir) throws IOException {
-        // Skip on Windows - directory sync isn't supported the same way
-        if (System.getProperty("os.name").toLowerCase().contains("win")) {
-            LOG.trace("Skipping directory sync on Windows");
-            return;
-        }
-
-        try (FileChannel fc = FileChannel.open(dir, StandardOpenOption.READ)) {
-            fc.force(true);
-            LOG.trace("Directory synced: {}", dir);
-        } catch (IOException e) {
-            // Some systems don't support directory fsync - log but continue
-            LOG.warn("Could not fsync directory {}: {}", dir, e.getMessage());
-        }
-    }
-
-    /**
      * Acquires an exclusive lock on the WAL directory to prevent multiple processes.
      * <p>
      * Uses a separate lock file to avoid holding a lock on the WAL file itself,
@@ -893,10 +957,13 @@ public final class FileRaftStorage implements RaftStorage {
     }
 
     /**
-     * Verifies a written record by reading it back and checking the CRC.
+     * Verifies a written record by forcing it and reading it back through the same
+     * channel, then checking the CRC.
      * <p>
-     * This detects silent filesystem corruption where writes appear to succeed
-     * but data is not correctly persisted (e.g., faulty disk controller, bad RAM).
+     * The read is served from the page cache on every mainstream operating system, so
+     * this detects in-process encoding faults and filesystem-level write failures that
+     * surface on read. It does not detect faults in the disk controller or the media;
+     * those require reading through a separate path or comparing against peers.
      *
      * @param position    the file position where the record was written
      * @param recordSize  the total size of the record
@@ -904,8 +971,11 @@ public final class FileRaftStorage implements RaftStorage {
      * @throws StorageException if verification fails
      */
     private void verifyWrittenRecord(long position, int recordSize, int expectedCrc) throws IOException {
-        // Flush to disk first
-        logChannel.force(true);
+        try {
+            compactionIo.forceChannel(logChannel);
+        } catch (IOException e) {
+            throw fence("Failed to force WAL before write verification", e);
+        }
 
         // Read back the record
         ByteBuffer readBuf = ByteBuffer.allocate(recordSize);
@@ -956,5 +1026,45 @@ public final class FileRaftStorage implements RaftStorage {
         public StorageException(String message, Throwable cause) {
             super(message, cause);
         }
+    }
+
+    /**
+     * Replay found an invalid record that is followed by a valid record, so the damage
+     * lies inside data that may already have been acknowledged to the cluster. The WAL
+     * has not been modified and the storage instance is fenced.
+     * <p>
+     * A node in this state must not repair itself by truncation: if it then formed a
+     * majority with lagging peers, acknowledged entries could be lost cluster-wide.
+     * Restore the node from its peers or from a whole-node backup. An operator who has
+     * established that everything from {@link #corruptOffset()} onward was never
+     * acknowledged may truncate {@code raft.log} to that offset and restart.
+     */
+    public static final class CorruptLogException extends StorageException {
+        private final Path logPath;
+        private final long corruptOffset;
+        private final long fileSize;
+        private final int entriesBeforeCorruption;
+
+        CorruptLogException(Path logPath, long corruptOffset, long fileSize, int entriesBeforeCorruption) {
+            super("WAL " + logPath + " is corrupt at byte " + corruptOffset + " of " + fileSize
+                    + " with valid records after it; " + entriesBeforeCorruption
+                    + " entries precede the damage. Not repaired: restore this node from its peers.");
+            this.logPath = logPath;
+            this.corruptOffset = corruptOffset;
+            this.fileSize = fileSize;
+            this.entriesBeforeCorruption = entriesBeforeCorruption;
+        }
+
+        /** The WAL file that is corrupt. */
+        public Path logPath() { return logPath; }
+
+        /** Byte offset of the first invalid record; every byte before it decoded cleanly. */
+        public long corruptOffset() { return corruptOffset; }
+
+        /** Size of the WAL file when the corruption was found. */
+        public long fileSize() { return fileSize; }
+
+        /** Number of logical entries that replay had reconstructed before the damage. */
+        public int entriesBeforeCorruption() { return entriesBeforeCorruption; }
     }
 }

@@ -33,6 +33,7 @@ import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.CRC32C;
 
@@ -347,124 +348,100 @@ class NastyEdgeCaseTest {
     @DisplayName("4. Middle-of-the-Log Corruption")
     class MiddleOfLogCorruptionTests {
 
-        @Test
-        @DisplayName("Corruption in entry #5 of 10 returns only entries 1-4")
-        void corruptionInMiddleReturnsOnlyPriorEntries() throws Exception {
-            // Write 10 valid entries
-            for (int i = 1; i <= 10; i++) {
+        private void writeEntries(int count, String prefix) throws Exception {
+            for (int i = 1; i <= count; i++) {
                 storage.appendEntries(List.of(
-                        new LogEntryData(i, 1, ("entry-" + i).getBytes())
+                        new LogEntryData(i, 1, (prefix + i).getBytes())
                 )).get(5, TimeUnit.SECONDS);
             }
             storage.sync().get(5, TimeUnit.SECONDS);
-            storage.close();
+        }
 
-            // Corrupt entry #5 by flipping a bit in its payload
-            // Record layout: HEADER(27) + PAYLOAD(7 for "entry-5") + CRC(4)
-            Path logPath = tempDir.resolve("raft.log");
-            long entry5Start = findRecordStart(logPath, 4); // 0-indexed
-            // Corrupt inside the payload area (after header)
-            long payloadOffset = entry5Start + 27 + 2; // into the payload
-            
-            corruptByteAt(logPath, payloadOffset, (byte) 0xFF);
-
-            storage = new FileRaftStorage(true);
-            storage.open(tempDir).get(5, TimeUnit.SECONDS);
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-
-            // CRITICAL: Must return ONLY entries 1-4
-            assertEquals(4, replayed.size(), 
-                    "Corruption at entry 5 should return only entries 1-4");
-            
-            for (int i = 0; i < 4; i++) {
-                assertEquals(i + 1, replayed.get(i).index(),
-                        "Entry " + (i + 1) + " should be intact");
-            }
+        private FileRaftStorage.CorruptLogException replayFails() {
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> storage.replayLog().get(5, TimeUnit.SECONDS));
+            return assertInstanceOf(FileRaftStorage.CorruptLogException.class, failure.getCause());
         }
 
         @Test
-        @DisplayName("File truncated at corruption point (no Frankenstein log)")
-        void fileTruncatedAtCorruptionPoint() throws Exception {
-            // Write 10 entries
-            for (int i = 1; i <= 10; i++) {
-                storage.appendEntries(List.of(
-                        new LogEntryData(i, 1, ("entry-" + i).getBytes())
-                )).get(5, TimeUnit.SECONDS);
-            }
-            storage.sync().get(5, TimeUnit.SECONDS);
-            
-            // Get size with entries 1-4 (we'll corrupt #5)
-            long fullSize = Files.size(tempDir.resolve("raft.log"));
+        @DisplayName("Corruption in entry #5 of 10 is reported, not truncated")
+        void corruptionInMiddleIsReported() throws Exception {
+            writeEntries(10, "entry-");
             storage.close();
 
-            // Find where entry 5 starts
+            Path logPath = tempDir.resolve("raft.log");
+            long entry5Start = findRecordStart(logPath, 4); // 0-indexed
+            corruptByteAt(logPath, entry5Start + 27 + 2, (byte) 0xFF); // into the payload
+            byte[] before = Files.readAllBytes(logPath);
+
+            storage = new FileRaftStorage(true);
+            storage.open(tempDir).get(5, TimeUnit.SECONDS);
+            FileRaftStorage.CorruptLogException corrupt = replayFails();
+
+            // CRITICAL: entries 6-10 may have been acknowledged. This node must not
+            // discard them on its own; the operator restores it from peers.
+            assertEquals(entry5Start, corrupt.corruptOffset());
+            assertEquals(4, corrupt.entriesBeforeCorruption());
+            assertEquals(before.length, corrupt.fileSize());
+            assertArrayEquals(before, Files.readAllBytes(logPath), "WAL must be left untouched");
+        }
+
+        @Test
+        @DisplayName("Corrupt instance is fenced: no appends after detected damage")
+        void corruptInstanceIsFenced() throws Exception {
+            writeEntries(10, "old-");
+            storage.close();
+
             Path logPath = tempDir.resolve("raft.log");
             long entry5Start = findRecordStart(logPath, 4);
+            corruptByteAt(logPath, entry5Start + 20, (byte) 0xFF);
+            byte[] before = Files.readAllBytes(logPath);
 
-            // Corrupt entry 5
+            storage = new FileRaftStorage(true);
+            storage.open(tempDir).get(5, TimeUnit.SECONDS);
+            replayFails();
+
+            // Every later operation fails with the corruption; nothing is written.
+            ExecutionException appendFailure = assertThrows(ExecutionException.class, () ->
+                    storage.appendEntries(List.of(new LogEntryData(5, 2, "new-5".getBytes()))).get(5, TimeUnit.SECONDS));
+            assertInstanceOf(FileRaftStorage.CorruptLogException.class, appendFailure.getCause());
+            assertThrows(ExecutionException.class, () -> storage.sync().get(5, TimeUnit.SECONDS));
+            assertThrows(ExecutionException.class, () -> storage.replayLog().get(5, TimeUnit.SECONDS));
+            assertArrayEquals(before, Files.readAllBytes(logPath));
+        }
+
+        @Test
+        @DisplayName("Operator truncation at the reported offset recovers the prefix")
+        void operatorTruncationAtReportedOffsetRecovers() throws Exception {
+            writeEntries(10, "entry-");
+            storage.close();
+
+            Path logPath = tempDir.resolve("raft.log");
+            long entry5Start = findRecordStart(logPath, 4);
             corruptByteAt(logPath, entry5Start + 15, (byte) 0xFF);
 
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
-            storage.replayLog().get(5, TimeUnit.SECONDS);
-
-            // CRITICAL: File must be truncated at entry 5 start
-            long truncatedSize = Files.size(logPath);
-            assertEquals(entry5Start, truncatedSize,
-                    "File should be truncated at corruption point, not contain orphaned entries 6-10");
-            
-            assertTrue(truncatedSize < fullSize,
-                    "File must be smaller after truncation");
-        }
-
-        @Test
-        @DisplayName("New append after middle corruption continues correctly")
-        void appendAfterMiddleCorruptionWorks() throws Exception {
-            // Write 10 entries
-            for (int i = 1; i <= 10; i++) {
-                storage.appendEntries(List.of(
-                        new LogEntryData(i, 1, ("old-" + i).getBytes())
-                )).get(5, TimeUnit.SECONDS);
-            }
-            storage.sync().get(5, TimeUnit.SECONDS);
+            FileRaftStorage.CorruptLogException corrupt = replayFails();
             storage.close();
 
-            // Corrupt entry 5
-            Path logPath = tempDir.resolve("raft.log");
-            long entry5Start = findRecordStart(logPath, 4);
-            corruptByteAt(logPath, entry5Start + 20, (byte) 0xFF);
+            // The operator has established that entries 5-10 were never acknowledged.
+            try (FileChannel fc = FileChannel.open(logPath, StandardOpenOption.WRITE)) {
+                fc.truncate(corrupt.corruptOffset());
+            }
 
-            // Reopen, replay (truncates at corruption), then append new entries
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
-            storage.replayLog().get(5, TimeUnit.SECONDS); // Triggers truncation
-
-            // Append new entries starting from index 5
-            storage.appendEntries(List.of(
-                    new LogEntryData(5, 2, "new-5".getBytes()),
-                    new LogEntryData(6, 2, "new-6".getBytes())
-            )).get(5, TimeUnit.SECONDS);
-            storage.sync().get(5, TimeUnit.SECONDS);
-
-            // Verify final state
             List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-            
-            assertEquals(6, replayed.size(), "Should have entries 1-6");
-            
-            // Entries 1-4 from old term
+            assertEquals(4, replayed.size());
             for (int i = 0; i < 4; i++) {
-                assertEquals(1, replayed.get(i).term(), "Entry " + (i+1) + " should be term 1");
+                assertEquals(i + 1, replayed.get(i).index());
             }
-            
-            // Entries 5-6 from new term
-            assertEquals(2, replayed.get(4).term(), "Entry 5 should be term 2 (new)");
-            assertEquals(2, replayed.get(5).term(), "Entry 6 should be term 2 (new)");
         }
 
         @Test
-        @DisplayName("Corruption at first entry returns empty log")
-        void corruptionAtFirstEntryReturnsEmpty() throws Exception {
-            // Write entries
+        @DisplayName("Corruption at first entry with a valid second entry is reported")
+        void corruptionAtFirstEntryIsReported() throws Exception {
             storage.appendEntries(List.of(
                     new LogEntryData(1, 1, "first".getBytes()),
                     new LogEntryData(2, 1, "second".getBytes())
@@ -472,18 +449,35 @@ class NastyEdgeCaseTest {
             storage.sync().get(5, TimeUnit.SECONDS);
             storage.close();
 
-            // Corrupt first entry
             Path logPath = tempDir.resolve("raft.log");
             corruptByteAt(logPath, 10, (byte) 0xFF);
+            long sizeBefore = Files.size(logPath);
+
+            storage = new FileRaftStorage(true);
+            storage.open(tempDir).get(5, TimeUnit.SECONDS);
+            FileRaftStorage.CorruptLogException corrupt = replayFails();
+
+            assertEquals(0, corrupt.corruptOffset());
+            assertEquals(0, corrupt.entriesBeforeCorruption());
+            assertEquals(sizeBefore, Files.size(logPath), "File must not be truncated");
+        }
+
+        @Test
+        @DisplayName("Corruption in the last record is a torn tail and is truncated")
+        void corruptionInLastRecordIsTornTail() throws Exception {
+            writeEntries(3, "entry-");
+            storage.close();
+
+            Path logPath = tempDir.resolve("raft.log");
+            long entry3Start = findRecordStart(logPath, 2);
+            corruptByteAt(logPath, entry3Start + 27 + 1, (byte) 0xFF);
 
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
 
-            assertEquals(0, replayed.size(), 
-                    "Corruption at first entry should return empty log");
-            assertEquals(0, Files.size(logPath),
-                    "File should be truncated to 0");
+            assertEquals(2, replayed.size());
+            assertEquals(entry3Start, Files.size(logPath), "Torn tail truncated at last good record");
         }
     }
 
