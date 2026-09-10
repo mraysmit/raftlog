@@ -132,6 +132,9 @@ public final class FileRaftStorage implements RaftStorage {
     private static final String LOG_FILE = "raft.log";
     private static final String LOG_TMP_FILE = "raft.log.tmp";
 
+    /** Maximum source characters retained when a node identifier is written to a log. */
+    private static final int MAX_LOGGED_VOTED_FOR_CHARS = 64;
+
     // ========================================================================
     // State
     // ========================================================================
@@ -163,8 +166,8 @@ public final class FileRaftStorage implements RaftStorage {
     private volatile boolean closed = false;
 
     /**
-     * Set once a durability call has failed or replay has found corruption inside
-     * the committed region. Every subsequent operation fails with this exception.
+     * Set once a durability call has failed or replay has found corruption that it
+     * cannot safely repair. Every subsequent operation fails with this exception.
      */
     private volatile StorageException fatalFailure;
 
@@ -364,7 +367,7 @@ public final class FileRaftStorage implements RaftStorage {
         return CompletableFuture.runAsync(() -> {
             ensureHealthy();
             try {
-                LOG.debug("Updating metadata: term={}, votedFor={}", currentTerm, votedFor.orElse("(none)"));
+                LOG.debug("Updating metadata: term={}, votedFor={}", currentTerm, votedForForLog(votedFor));
                 Path tmpPath = dataDir.resolve(META_TMP_FILE);
                 Path metaPath = dataDir.resolve(META_FILE);
 
@@ -418,7 +421,7 @@ public final class FileRaftStorage implements RaftStorage {
                     }
                 }
 
-                LOG.info("Metadata updated: term={}, votedFor={}", currentTerm, votedFor.orElse("(none)"));
+                LOG.info("Metadata updated: term={}, votedFor={}", currentTerm, votedForForLog(votedFor));
 
             } catch (IOException e) {
                 LOG.error("Failed to update metadata: {}", e.getMessage(), e);
@@ -469,7 +472,7 @@ public final class FileRaftStorage implements RaftStorage {
                         ? Optional.empty()
                         : Optional.of(new String(voteBytes, StandardCharsets.UTF_8));
 
-                LOG.info("Metadata loaded: term={}, votedFor={}", term, votedFor.orElse("(none)"));
+                LOG.info("Metadata loaded: term={}, votedFor={}", term, votedForForLog(votedFor));
                 return new PersistentMeta(term, votedFor);
 
             } catch (IOException e) {
@@ -607,7 +610,7 @@ public final class FileRaftStorage implements RaftStorage {
                 LOG.info("Compacted WAL through index {}: {} entries retained", toIndex, retained.size());
             } catch (CorruptLogException e) {
                 // Nothing was written, but the source cannot be trusted for any later write.
-                throw fence("WAL is corrupt inside the committed region", e);
+                throw fence("WAL contains ambiguous corruption", e);
             } catch (IOException | RuntimeException e) {
                 StorageException failure = new StorageException("Prefix compaction failed", e);
                 if (publicationAttempted) {
@@ -630,8 +633,9 @@ public final class FileRaftStorage implements RaftStorage {
      * returns the exception for the caller to throw. Called only on the WAL executor.
      */
     private StorageException fence(String message, Throwable cause) {
+        String detail = String.valueOf(cause.getMessage()).replaceFirst("\\.+$", "");
         LOG.error("{}: {}. Storage instance is now fenced; close it and open a fresh instance",
-                message, cause.getMessage(), cause);
+                message, detail, cause);
         StorageException failure = cause instanceof StorageException se ? se : new StorageException(message, cause);
         if (fatalFailure == null) fatalFailure = failure;
         return failure;
@@ -646,7 +650,7 @@ public final class FileRaftStorage implements RaftStorage {
             } catch (CorruptLogException e) {
                 // The channel is positioned after the corrupt region. Appending there would
                 // splice new records onto data that cannot be trusted.
-                throw fence("WAL is corrupt inside the committed region", e);
+                throw fence("WAL contains ambiguous corruption", e);
             } catch (IOException e) {
                 throw new StorageException("Failed to replay log", e);
             }
@@ -655,6 +659,35 @@ public final class FileRaftStorage implements RaftStorage {
 
     /** Result of decoding one record at a file position. */
     private record DecodedRecord(byte type, long index, long term, byte[] payload, long end) {
+    }
+
+    /** Produces a bounded, single-line representation of a potentially untrusted node identifier. */
+    private static String votedForForLog(Optional<String> votedFor) {
+        if (votedFor.isEmpty()) return "(none)";
+
+        String value = votedFor.get();
+        int end = Math.min(value.length(), MAX_LOGGED_VOTED_FOR_CHARS);
+        if (end < value.length() && end > 0 && Character.isHighSurrogate(value.charAt(end - 1))) end--;
+
+        StringBuilder safe = new StringBuilder(128);
+        for (int i = 0; i < end; i++) {
+            char c = value.charAt(i);
+            switch (c) {
+                case '\r' -> safe.append("\\r");
+                case '\n' -> safe.append("\\n");
+                case '\t' -> safe.append("\\t");
+                default -> {
+                    if (Character.isISOControl(c) || c == '\u2028' || c == '\u2029') {
+                        String hex = Integer.toHexString(c);
+                        safe.append("\\u").append("0".repeat(4 - hex.length())).append(hex);
+                    } else {
+                        safe.append(c);
+                    }
+                }
+            }
+        }
+        if (end < value.length()) safe.append("…[").append(value.length()).append(" chars]");
+        return safe.toString();
     }
 
     /**
