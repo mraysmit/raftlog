@@ -47,7 +47,7 @@ import static org.junit.jupiter.api.Assumptions.assumeFalse;
  *   <li>FileRaftStorage.config() method</li>
  *   <li>FileRaftStorage.open() no-arg method</li>
  *   <li>FileRaftStorage.verifyWrittenRecord error paths</li>
- *   <li>FileRaftStorage sync with disabled sync</li>
+ *   <li>FileRaftStorage package-private test seam without fsync</li>
  *   <li>FileRaftStorage error handling paths</li>
  * </ul>
  */
@@ -55,6 +55,12 @@ class HighCoverageTest {
 
     @TempDir
     Path tempDir;
+
+    private static FileRaftStorage.CorruptLogException assertCorruptReplay(FileRaftStorage storage) {
+        ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> storage.replayLog().get(5, TimeUnit.SECONDS));
+        return assertInstanceOf(FileRaftStorage.CorruptLogException.class, failure.getCause());
+    }
 
     // ========================================================================
     // RaftStorageConfig Tests
@@ -69,14 +75,14 @@ class HighCoverageTest {
         void testBuilderAllProgrammaticValues() {
             RaftStorageConfig config = RaftStorageConfig.builder()
                     .dataDir(tempDir)
-                    .syncEnabled(false)
+                    .syncEnabled(true)
                     .verifyWrites(true)
                     .minFreeSpaceMb(128)
                     .maxPayloadSizeMb(32)
                     .build();
 
             assertEquals(tempDir, config.dataDir());
-            assertFalse(config.syncEnabled());
+            assertTrue(config.syncEnabled());
             assertTrue(config.verifyWrites());
             assertEquals(128, config.minFreeSpaceMb());
             assertEquals(32, config.maxPayloadSizeMb());
@@ -132,7 +138,7 @@ class HighCoverageTest {
 
             try {
                 System.setProperty("raftlog.dataDir", tempDir.resolve("sysprop").toString());
-                System.setProperty("raftlog.syncEnabled", "false");
+                System.setProperty("raftlog.syncEnabled", "true");
                 System.setProperty("raftlog.verifyWrites", "true");
                 System.setProperty("raftlog.minFreeSpaceMb", "256");
                 System.setProperty("raftlog.maxPayloadSizeMb", "64");
@@ -140,7 +146,7 @@ class HighCoverageTest {
                 RaftStorageConfig config = RaftStorageConfig.builder().build();
 
                 assertEquals(tempDir.resolve("sysprop"), config.dataDir());
-                assertFalse(config.syncEnabled());
+                assertTrue(config.syncEnabled());
                 assertTrue(config.verifyWrites());
                 assertEquals(256, config.minFreeSpaceMb());
                 assertEquals(64, config.maxPayloadSizeMb());
@@ -240,10 +246,9 @@ class HighCoverageTest {
         void testSyncDisabled() throws Exception {
             RaftStorageConfig config = RaftStorageConfig.builder()
                     .dataDir(tempDir)
-                    .syncEnabled(false)
                     .build();
 
-            FileRaftStorage storage = new FileRaftStorage(config);
+            FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(config, new CompactionIo());
             storage.open().get(5, TimeUnit.SECONDS);
 
             // Append some data
@@ -449,8 +454,7 @@ class HighCoverageTest {
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
-            List<LogEntryData> entries = storage.replayLog().get(5, TimeUnit.SECONDS);
-            assertTrue(entries.isEmpty()); // Should stop at corruption
+            assertCorruptReplay(storage);
 
             storage.close();
         }
@@ -477,8 +481,7 @@ class HighCoverageTest {
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
-            List<LogEntryData> entries = storage.replayLog().get(5, TimeUnit.SECONDS);
-            assertTrue(entries.isEmpty());
+            assertCorruptReplay(storage);
 
             storage.close();
         }
@@ -505,8 +508,7 @@ class HighCoverageTest {
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
-            List<LogEntryData> entries = storage.replayLog().get(5, TimeUnit.SECONDS);
-            assertTrue(entries.isEmpty());
+            assertCorruptReplay(storage);
 
             storage.close();
         }
@@ -535,8 +537,7 @@ class HighCoverageTest {
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
-            List<LogEntryData> entries = storage.replayLog().get(5, TimeUnit.SECONDS);
-            assertTrue(entries.isEmpty());
+            assertCorruptReplay(storage);
 
             storage.close();
         }
@@ -669,8 +670,8 @@ class HighCoverageTest {
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
-            List<LogEntryData> entries = storage.replayLog().get(5, TimeUnit.SECONDS);
-            assertEquals(2, entries.size()); // Only first 2 entries recovered
+            FileRaftStorage.CorruptLogException corrupt = assertCorruptReplay(storage);
+            assertEquals(2, corrupt.entriesBeforeCorruption());
 
             storage.close();
         }

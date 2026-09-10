@@ -578,7 +578,7 @@ class CoverageBoostTest {
 
             try {
                 System.setProperty("raftlog.dataDir", tempDir.toString());
-                System.setProperty("raftlog.syncEnabled", "false");
+                System.setProperty("raftlog.syncEnabled", "true");
                 System.setProperty("raftlog.verifyWrites", "true");
                 System.setProperty("raftlog.minFreeSpaceMb", "256");
                 System.setProperty("raftlog.maxPayloadSizeMb", "64");
@@ -586,7 +586,7 @@ class CoverageBoostTest {
                 RaftStorageConfig config = RaftStorageConfig.builder().build();
 
                 assertEquals(tempDir, config.dataDir());
-                assertFalse(config.syncEnabled());
+                assertTrue(config.syncEnabled());
                 assertTrue(config.verifyWrites());
                 assertEquals(256, config.minFreeSpaceMb());
                 assertEquals(64, config.maxPayloadSizeMb());
@@ -750,7 +750,7 @@ class CoverageBoostTest {
         @Test
         @DisplayName("Operations work with sync disabled")
         void testSyncDisabledOperations() throws Exception {
-            FileRaftStorage storage = new FileRaftStorage(false); // sync disabled
+            FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(false);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             storage.appendEntries(List.of(
@@ -769,7 +769,7 @@ class CoverageBoostTest {
         @Test
         @DisplayName("Metadata works with sync disabled")
         void testMetadataSyncDisabled() throws Exception {
-            FileRaftStorage storage = new FileRaftStorage(false);
+            FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(false);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             storage.updateMetadata(5, Optional.of("no-sync-node")).get(5, TimeUnit.SECONDS);
@@ -894,14 +894,9 @@ class CoverageBoostTest {
         }
 
         @Test
-        @DisplayName("Boolean constructor - sync disabled")
-        void testBooleanConstructorSyncDisabled() throws Exception {
-            FileRaftStorage storage = new FileRaftStorage(false);
-            storage.open(tempDir).get(5, TimeUnit.SECONDS);
-            
-            assertFalse(storage.config().syncEnabled());
-            
-            storage.close();
+        @DisplayName("Boolean constructor rejects sync disabled")
+        void testBooleanConstructorRejectsSyncDisabled() {
+            assertThrows(IllegalArgumentException.class, () -> new FileRaftStorage(false));
         }
 
         @Test
@@ -921,7 +916,7 @@ class CoverageBoostTest {
         void testConfigConstructor() throws Exception {
             RaftStorageConfig config = RaftStorageConfig.builder()
                     .dataDir(tempDir)
-                    .syncEnabled(false)
+                    .syncEnabled(true)
                     .verifyWrites(true)
                     .minFreeSpaceMb(32)
                     .maxPayloadSizeMb(8)
@@ -932,7 +927,7 @@ class CoverageBoostTest {
 
             RaftStorageConfig actual = storage.config();
             assertEquals(tempDir, actual.dataDir());
-            assertFalse(actual.syncEnabled());
+            assertTrue(actual.syncEnabled());
             assertTrue(actual.verifyWrites());
             assertEquals(32, actual.minFreeSpaceMb());
             assertEquals(8, actual.maxPayloadSizeMb());

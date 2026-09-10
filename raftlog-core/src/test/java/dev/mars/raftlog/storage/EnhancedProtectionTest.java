@@ -342,7 +342,7 @@ class EnhancedProtectionTest {
         void verificationSkippedWhenFsyncDisabled() throws Exception {
             // When fsync is disabled (test mode), verification is also skipped
             // because there's nothing meaningful to verify
-            storage = new FileRaftStorage(false, true);
+            storage = FileRaftStorage.unsafeWithoutFsyncForTesting(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             // Should succeed (verification skipped)

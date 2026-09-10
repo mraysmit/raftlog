@@ -81,6 +81,12 @@ class FileRaftStorageAdversarialTest {
         }
     }
 
+    private static FileRaftStorage.CorruptLogException assertCorruptReplay(FileRaftStorage storage) {
+        ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> storage.replayLog().get(5, TimeUnit.SECONDS));
+        return assertInstanceOf(FileRaftStorage.CorruptLogException.class, failure.getCause());
+    }
+
     // ========================================================================
     // WAL File Corruption Tests
     // ========================================================================
@@ -109,18 +115,17 @@ class FileRaftStorageAdversarialTest {
         }
 
         @Test
-        @DisplayName("Corrupt magic number in the last record - torn tail truncated")
+        @DisplayName("Corrupt magic number in the last record - reported, not truncated")
         void corruptMagicNumberAtTail() throws Exception {
             writeValidEntries(2);
             corruptByteAt(getRecordStartPosition(1), (byte) 0xFF);
 
             reopenStorage();
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-            assertEquals(1, replayed.size());
+            assertCorruptReplay(storage);
         }
 
         @Test
-        @DisplayName("Corrupt version number in the last record - torn tail truncated")
+        @DisplayName("Corrupt version number in the last record - reported, not truncated")
         void corruptVersionNumber() throws Exception {
             writeValidEntries(2);
 
@@ -136,12 +141,11 @@ class FileRaftStorageAdversarialTest {
             }
 
             reopenStorage();
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-            assertEquals(1, replayed.size());
+            assertCorruptReplay(storage);
         }
 
         @Test
-        @DisplayName("Unknown record type - should truncate at unknown type")
+        @DisplayName("Unknown record type at tail - should report corruption")
         void unknownRecordType() throws Exception {
             writeValidEntries(2);
 
@@ -157,12 +161,11 @@ class FileRaftStorageAdversarialTest {
             }
 
             reopenStorage();
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-            assertEquals(1, replayed.size());
+            assertCorruptReplay(storage);
         }
 
         @Test
-        @DisplayName("Negative payload length - should truncate")
+        @DisplayName("Negative payload length - should report corruption")
         void negativePayloadLength() throws Exception {
             writeValidEntries(2);
 
@@ -178,12 +181,11 @@ class FileRaftStorageAdversarialTest {
             }
 
             reopenStorage();
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-            assertEquals(1, replayed.size());
+            assertCorruptReplay(storage);
         }
 
         @Test
-        @DisplayName("Payload length exceeds max - should truncate")
+        @DisplayName("Payload length exceeds max - should report corruption")
         void payloadLengthExceedsMax() throws Exception {
             writeValidEntries(2);
 
@@ -199,8 +201,7 @@ class FileRaftStorageAdversarialTest {
             }
 
             reopenStorage();
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-            assertEquals(1, replayed.size());
+            assertCorruptReplay(storage);
         }
 
         @Test
@@ -238,7 +239,7 @@ class FileRaftStorageAdversarialTest {
         }
 
         @Test
-        @DisplayName("Zero-filled garbage at end - should ignore")
+        @DisplayName("Zero-filled garbage at end - should report ambiguous corruption")
         void zeroFilledGarbage() throws Exception {
             writeValidEntries(2);
 
@@ -250,12 +251,11 @@ class FileRaftStorageAdversarialTest {
             }
 
             reopenStorage();
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-            assertEquals(2, replayed.size());
+            assertCorruptReplay(storage);
         }
 
         @Test
-        @DisplayName("Random garbage at end - should truncate garbage")
+        @DisplayName("Random garbage at end - should report ambiguous corruption")
         void randomGarbageAtEnd() throws Exception {
             writeValidEntries(2);
 
@@ -268,8 +268,7 @@ class FileRaftStorageAdversarialTest {
             }
 
             reopenStorage();
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-            assertEquals(2, replayed.size());
+            assertCorruptReplay(storage);
         }
 
         @Test
@@ -294,8 +293,7 @@ class FileRaftStorageAdversarialTest {
             }
 
             reopenStorage();
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-            assertEquals(1, replayed.size());
+            assertCorruptReplay(storage);
         }
 
         @Test
@@ -358,8 +356,7 @@ class FileRaftStorageAdversarialTest {
 
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-            assertEquals(0, replayed.size());
+            assertCorruptReplay(storage);
         }
     }
 
@@ -1123,7 +1120,7 @@ class FileRaftStorageAdversarialTest {
         }
 
         @Test
-        @DisplayName("Multiple consecutive torn writes")
+        @DisplayName("Multiple concatenated partial writes are ambiguous corruption")
         void multipleTornWrites() throws Exception {
             writeValidEntries(2);
             storage.close();
@@ -1144,10 +1141,7 @@ class FileRaftStorageAdversarialTest {
 
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-
-            // Should recover original 2 entries
-            assertEquals(2, replayed.size());
+            assertCorruptReplay(storage);
         }
 
         @Test

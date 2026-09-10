@@ -95,7 +95,8 @@ class FileRaftStorageCompactionFailureTest {
             }
             @Override FileChannel reopen(Path path) throws IOException { events.add("reopen"); return super.reopen(path); }
         };
-        FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().syncEnabled(false).build(), io);
+        FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(
+                RaftStorageConfig.builder().build(), io);
         await(storage.open(dir));
         try {
             var compact = storage.truncatePrefix(2);

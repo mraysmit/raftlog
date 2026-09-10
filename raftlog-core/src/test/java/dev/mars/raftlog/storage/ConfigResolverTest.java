@@ -59,12 +59,12 @@ class ConfigResolverTest {
         }
 
         @Test
-        @DisplayName("System property syncEnabled=false is respected")
+        @DisplayName("System property syncEnabled=false is rejected")
         void testSyncEnabledSystemPropertyFalse() {
             System.setProperty("raftlog.syncEnabled", "false");
-            
-            RaftStorageConfig config = RaftStorageConfig.builder().build();
-            assertFalse(config.syncEnabled());
+
+            assertThrows(IllegalArgumentException.class,
+                    () -> RaftStorageConfig.builder().build());
         }
 
         @Test
@@ -171,15 +171,12 @@ class ConfigResolverTest {
         }
 
         @Test
-        @DisplayName("Programmatic syncEnabled overrides system property")
-        void testProgrammaticSyncEnabledOverride() {
+        @DisplayName("Programmatic syncEnabled=false is rejected")
+        void testProgrammaticSyncDisabledRejected() {
             System.setProperty("raftlog.syncEnabled", "true");
-            
-            RaftStorageConfig config = RaftStorageConfig.builder()
-                    .syncEnabled(false)
-                    .build();
-            
-            assertFalse(config.syncEnabled());
+
+            assertThrows(IllegalArgumentException.class,
+                    () -> RaftStorageConfig.builder().syncEnabled(false));
         }
 
         @Test
@@ -271,14 +268,14 @@ class ConfigResolverTest {
             
             RaftStorageConfig config = RaftStorageConfig.builder()
                     .dataDir(customDir)
-                    .syncEnabled(false)
+                    .syncEnabled(true)
                     .verifyWrites(true)
                     .minFreeSpaceMb(128)
                     .maxPayloadSizeMb(32)
                     .build();
             
             assertEquals(customDir, config.dataDir());
-            assertFalse(config.syncEnabled());
+            assertTrue(config.syncEnabled());
             assertTrue(config.verifyWrites());
             assertEquals(128, config.minFreeSpaceMb());
             assertEquals(32, config.maxPayloadSizeMb());
@@ -469,27 +466,10 @@ class ConfigResolverTest {
         }
 
         @Test
-        @DisplayName("FileRaftStorage respects config syncEnabled=false")
-        void testStorageWithSyncDisabled() throws Exception {
-            RaftStorageConfig config = RaftStorageConfig.builder()
-                    .dataDir(tempDir)
-                    .syncEnabled(false)
-                    .build();
-            
-            FileRaftStorage storage = new FileRaftStorage(config);
-            storage.open(tempDir).get(5, java.util.concurrent.TimeUnit.SECONDS);
-            
-            try {
-                // Append should work
-                storage.appendEntries(java.util.List.of(
-                        new RaftStorage.LogEntryData(1, 1, "test".getBytes())
-                )).get(5, java.util.concurrent.TimeUnit.SECONDS);
-                
-                // Sync should be no-op
-                storage.sync().get(5, java.util.concurrent.TimeUnit.SECONDS);
-            } finally {
-                storage.close();
-            }
+        @DisplayName("Config rejects syncEnabled=false before storage construction")
+        void testConfigRejectsSyncDisabled() {
+            assertThrows(IllegalArgumentException.class,
+                    () -> RaftStorageConfig.builder().dataDir(tempDir).syncEnabled(false));
         }
 
         @Test

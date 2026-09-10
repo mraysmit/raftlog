@@ -157,7 +157,7 @@ public class WalChaos {
         Path testDir = createTestDir("concurrent-storm");
         RaftStorageConfig config = RaftStorageConfig.builder()
                 .dataDir(testDir.toString())
-                .syncEnabled(false) // Speed up test
+                .syncEnabled(true)
                 .build();
 
         int numThreads = 20;
@@ -220,7 +220,7 @@ public class WalChaos {
         Path testDir = createTestDir("metadata-thrash");
         RaftStorageConfig config = RaftStorageConfig.builder()
                 .dataDir(testDir.toString())
-                .syncEnabled(false)
+                .syncEnabled(true)
                 .build();
 
         int numThreads = 50;
@@ -268,7 +268,7 @@ public class WalChaos {
         Path testDir = createTestDir("mixed-ops");
         RaftStorageConfig config = RaftStorageConfig.builder()
                 .dataDir(testDir.toString())
-                .syncEnabled(false)
+                .syncEnabled(true)
                 .build();
 
         int numThreads = 10;
@@ -366,7 +366,7 @@ public class WalChaos {
         Path testDir = createTestDir("replay-during-write");
         RaftStorageConfig config = RaftStorageConfig.builder()
                 .dataDir(testDir.toString())
-                .syncEnabled(false)
+                .syncEnabled(true)
                 .build();
 
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
@@ -420,7 +420,7 @@ public class WalChaos {
         Path testDir = createTestDir("interrupt-storm");
         RaftStorageConfig config = RaftStorageConfig.builder()
                 .dataDir(testDir.toString())
-                .syncEnabled(false)
+                .syncEnabled(true)
                 .build();
 
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
@@ -1098,7 +1098,7 @@ public class WalChaos {
         Path testDir = createTestDir("many-small");
         RaftStorageConfig config = RaftStorageConfig.builder()
                 .dataDir(testDir.toString())
-                .syncEnabled(false)
+                .syncEnabled(true)
                 .build();
 
         int count = 10000;
@@ -1127,7 +1127,7 @@ public class WalChaos {
         Path testDir = createTestDir("meta-toggle");
         RaftStorageConfig config = RaftStorageConfig.builder()
                 .dataDir(testDir.toString())
-                .syncEnabled(false)
+                .syncEnabled(true)
                 .build();
 
         int toggles = 1000;
@@ -1155,7 +1155,7 @@ public class WalChaos {
         Path testDir = createTestDir("truncate-cycles");
         RaftStorageConfig config = RaftStorageConfig.builder()
                 .dataDir(testDir.toString())
-                .syncEnabled(false)
+                .syncEnabled(true)
                 .build();
 
         int cycles = 100;
@@ -1189,7 +1189,7 @@ public class WalChaos {
         Path testDir = createTestDir("memory-pressure");
         RaftStorageConfig config = RaftStorageConfig.builder()
                 .dataDir(testDir.toString())
-                .syncEnabled(false)
+                .syncEnabled(true)
                 .build();
 
         // Large batches to stress memory

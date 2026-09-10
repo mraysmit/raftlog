@@ -193,10 +193,11 @@ class FileRaftStorageFencingTest {
         } finally { close(storage, dir); }
     }
 
-    @Test void syncDisabledSkipsForceAndNeverFences() throws Exception {
+    @Test void testOnlyFsyncBypassSkipsForceAndNeverFences() throws Exception {
         seed();
         FailingForce io = new FailingForce(1);
-        FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().syncEnabled(false).build(), io);
+        FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(
+                RaftStorageConfig.builder().build(), io);
         await(storage.open(dir));
         try {
             await(storage.appendEntries(List.of(entry(4, 2))));
@@ -272,20 +273,22 @@ class FileRaftStorageFencingTest {
         assertArrayEquals(before, Files.readAllBytes(dir.resolve("raft.log")), "WAL must be unchanged");
     }
 
-    @Test void damageInLastRecordIsATornTailAndIsRepaired() throws Exception {
+    @Test void damageInLastRecordIsReportedFencedAndLeftIntact() throws Exception {
         seed();
         long third = recordStart(2);
         flip(third + 27 + 1);
+        byte[] before = Files.readAllBytes(dir.resolve("raft.log"));
 
         FileRaftStorage storage = new FileRaftStorage(true);
         await(storage.open(dir));
         try {
-            assertEntries(SEED.subList(0, 2), await(storage.replayLog()));
-            assertEquals(third, Files.size(dir.resolve("raft.log")));
-            await(storage.appendEntries(List.of(entry(3, 2))));
-            await(storage.sync());
-            assertEntries(List.of(entry(1, 1), entry(2, 1), entry(3, 2)), await(storage.replayLog()));
+            var corrupt = assertInstanceOf(FileRaftStorage.CorruptLogException.class,
+                    failureOf(storage.replayLog()));
+            assertEquals(third, corrupt.corruptOffset());
+            assertEquals(2, corrupt.entriesBeforeCorruption());
+            assertFenced(storage, FileRaftStorage.CorruptLogException.class);
         } finally { close(storage, dir); }
+        assertArrayEquals(before, Files.readAllBytes(dir.resolve("raft.log")));
     }
 
     @Test void damagedLengthFieldCannotHideValidRecordsAfterIt() throws Exception {
@@ -309,7 +312,7 @@ class FileRaftStorageFencingTest {
         assertArrayEquals(before, Files.readAllBytes(log));
     }
 
-    @Test void garbageAndZeroTailsWithoutValidRecordsAreTornTails() throws Exception {
+    @Test void garbageAndZeroTailsWithoutValidRecordsAreReportedAsAmbiguousCorruption() throws Exception {
         seed();
         long validSize = Files.size(dir.resolve("raft.log"));
         byte[] garbage = new byte[70 * 1024]; // longer than the forward-scan window
@@ -320,9 +323,11 @@ class FileRaftStorageFencingTest {
         FileRaftStorage storage = new FileRaftStorage(true);
         await(storage.open(dir));
         try {
-            assertEntries(SEED, await(storage.replayLog()));
-            assertEquals(validSize, Files.size(dir.resolve("raft.log")));
+            var corrupt = assertInstanceOf(FileRaftStorage.CorruptLogException.class,
+                    failureOf(storage.replayLog()));
+            assertEquals(validSize, corrupt.corruptOffset());
         } finally { close(storage, dir); }
+        assertEquals(validSize + garbage.length, Files.size(dir.resolve("raft.log")));
     }
 
     @Test void validRecordBeyondScanWindowIsStillFound() throws Exception {

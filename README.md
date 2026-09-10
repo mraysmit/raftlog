@@ -13,7 +13,7 @@ RaftLog provides the durability core for Raft-based distributed systems. It impl
 - **CRC32C checksums** for data integrity validation
 - **Atomic metadata updates** using rename-based persistence
 - **Serialized writes** via single-threaded executor for thread safety
-- **Efficient replay** that repairs torn tails and reports, rather than truncates, corruption inside committed data
+- **Efficient replay** that repairs structurally incomplete EOF writes and reports all ambiguous corruption without truncating it
 - **Prefix compaction** that reclaims WAL space after caller-owned durable snapshots
 
 ## Requirements
@@ -29,20 +29,20 @@ RaftLog provides the durability core for Raft-based distributed systems. It impl
 <dependency>
     <groupId>io.github.mraysmit</groupId>
     <artifactId>raftlog-core</artifactId>
-    <version>1.2.0</version>
+    <version>1.3.0</version>
 </dependency>
 ```
 
 ### Gradle (Groovy)
 
 ```groovy
-implementation 'io.github.mraysmit:raftlog-core:1.2.0'
+implementation 'io.github.mraysmit:raftlog-core:1.3.0'
 ```
 
 ### Gradle (Kotlin)
 
 ```kotlin
-implementation("io.github.mraysmit:raftlog-core:1.2.0")
+implementation("io.github.mraysmit:raftlog-core:1.3.0")
 ```
 
 ## Building
@@ -138,7 +138,7 @@ RaftLog uses `RaftStorageConfig` for configuration with the following resolution
 | Property | System Property | Env Variable | Default | Description |
 |----------|-----------------|--------------|---------|-------------|
 | `dataDir` | `raftlog.dataDir` | `RAFTLOG_DATA_DIR` | `~/.raftlog/data` | Storage directory |
-| `syncEnabled` | `raftlog.syncEnabled` | `RAFTLOG_SYNC_ENABLED` | `true` | Enable fsync (disable only for testing) |
+| `syncEnabled` | `raftlog.syncEnabled` | `RAFTLOG_SYNC_ENABLED` | `true` | Must remain `true`; public configuration rejects `false` |
 | `verifyWrites` | `raftlog.verifyWrites` | `RAFTLOG_VERIFY_WRITES` | `false` | Read-after-write verification |
 | `minFreeSpaceMb` | `raftlog.minFreeSpaceMb` | `RAFTLOG_MIN_FREE_SPACE_MB` | `64` | Minimum free disk space (MB) |
 | `maxPayloadSizeMb` | `raftlog.maxPayloadSizeMb` | `RAFTLOG_MAX_PAYLOAD_SIZE_MB` | `16` | Maximum payload size (MB) |
@@ -217,10 +217,10 @@ raftlog/
 mvn clean package -DskipTests
 
 # Run with default config (~/.raftlog/data)
-java -jar raftlog-demo/target/raftlog-demo-1.2.0.jar
+java -jar raftlog-demo/target/raftlog-demo-1.3.0.jar
 
 # Run with custom data directory
-java -Draftlog.dataDir=/tmp/wal-demo -jar raftlog-demo/target/raftlog-demo-1.2.0.jar
+java -Draftlog.dataDir=/tmp/wal-demo -jar raftlog-demo/target/raftlog-demo-1.3.0.jar
 ```
 
 ## Documentation

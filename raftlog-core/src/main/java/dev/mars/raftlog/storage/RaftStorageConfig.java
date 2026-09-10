@@ -113,7 +113,7 @@ public final class RaftStorageConfig {
         return dataDir;
     }
 
-    /** Whether fsync is enabled (should be true in production). */
+    /** Whether fsync is enabled. Always true for public configurations. */
     public boolean syncEnabled() {
         return syncEnabled;
     }
@@ -206,8 +206,17 @@ public final class RaftStorageConfig {
             return this;
         }
 
-        /** Enables or disables fsync (default: true). */
+        /**
+         * Retained for source compatibility. Fsync is mandatory, so only
+         * {@code true} is accepted.
+         *
+         * @throws IllegalArgumentException if {@code syncEnabled} is {@code false}
+         */
         public Builder syncEnabled(boolean syncEnabled) {
+            if (!syncEnabled) {
+                throw new IllegalArgumentException(
+                        "syncEnabled=false is unsafe and is not supported by public configuration");
+            }
             this.syncEnabled = syncEnabled;
             return this;
         }
@@ -244,6 +253,10 @@ public final class RaftStorageConfig {
             }
             if (syncEnabled == null) {
                 syncEnabled = resolveBoolean(PROP_SYNC_ENABLED, ENV_SYNC_ENABLED, DEFAULT_SYNC_ENABLED);
+            }
+            if (!syncEnabled) {
+                throw new IllegalArgumentException(
+                        "syncEnabled=false is unsafe and is not supported by public configuration");
             }
             if (verifyWrites == null) {
                 verifyWrites = resolveBoolean(PROP_VERIFY_WRITES, ENV_VERIFY_WRITES, DEFAULT_VERIFY_WRITES);
