@@ -13,7 +13,7 @@ RaftLog provides the durability core for Raft-based distributed systems. It impl
 - **CRC32C checksums** for data integrity validation
 - **Atomic metadata updates** using rename-based persistence
 - **Serialized writes** via single-threaded executor for thread safety
-- **Efficient replay** with corruption detection and recovery
+- **Efficient replay** that repairs torn tails and reports, rather than truncates, corruption inside committed data
 - **Prefix compaction** that reclaims WAL space after caller-owned durable snapshots
 
 ## Requirements
@@ -205,7 +205,7 @@ java -Draftlog.dataDir=/tmp/wal-demo -jar raftlog-demo/target/raftlog-demo-1.2.0
 
 ## Documentation
 
-See [QUORUS_RAFT_WAL_DESIGN-v2.md](docs/QUORUS_RAFT_WAL_DESIGN-v2.md) for the complete design specification.
+See [RAFTLOG_RAFT_WAL_DESIGN.md](docs/RAFTLOG_RAFT_WAL_DESIGN.md) for the complete design specification.
 
 ## License
 

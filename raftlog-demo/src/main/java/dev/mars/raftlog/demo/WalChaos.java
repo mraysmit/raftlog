@@ -506,15 +506,27 @@ public class WalChaos {
         data[corruptionPoint] = (byte) (data[corruptionPoint] ^ 0xFF);
         Files.write(walFile, data);
 
-        // Reopen and verify recovery
+        // Reopen and verify recovery. Damage in the last record is a torn tail and is
+        // truncated; damage with valid records after it is reported and left in place.
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
+            replayExpectingRepairOrReport(storage, "random corruption");
+        }
+    }
+
+    /**
+     * Replays a deliberately damaged WAL and accepts either outcome the replay
+     * policy allows: a repaired torn tail, or a corruption report that leaves the
+     * file untouched and fences the instance.
+     */
+    private static void replayExpectingRepairOrReport(FileRaftStorage storage, String what) {
+        try {
             List<LogEntryData> entries = storage.replayLog().join();
-            // Should recover at least some entries (before corruption)
-            if (entries.isEmpty()) {
-                throw new AssertionError("No entries recovered after corruption");
-            }
-            System.out.printf("    Recovered %d entries after random corruption%n", entries.size());
+            System.out.printf("    Torn tail repaired: %d entries recovered after %s%n", entries.size(), what);
+        } catch (java.util.concurrent.CompletionException e) {
+            if (!(e.getCause() instanceof FileRaftStorage.CorruptLogException corrupt)) throw e;
+            System.out.printf("    Corruption reported at byte %d after %s: %d entries precede it, file untouched%n",
+                    corrupt.corruptOffset(), what, corrupt.entriesBeforeCorruption());
         }
     }
 
@@ -580,12 +592,10 @@ public class WalChaos {
             raf.writeInt(0xDEADBEEF); // Corrupt magic
         }
 
-        // Should recover entries 1-2 only
+        // Entries 4-5 remain valid after the damage, so this is reported, not truncated
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
-            List<LogEntryData> entries = storage.replayLog().join();
-            // Should have recovered some entries before corruption
-            System.out.printf("    Recovered %d entries after magic corruption%n", entries.size());
+            replayExpectingRepairOrReport(storage, "magic corruption");
         }
     }
 
@@ -613,11 +623,10 @@ public class WalChaos {
         data[payloadOffset] = (byte) (data[payloadOffset] ^ 0x01); // Single bit flip
         Files.write(walFile, data);
 
-        // CRC should detect and truncate
+        // The CRC detects the flip; entries 2-5 remain valid, so it is reported, not truncated
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
-            List<LogEntryData> entries = storage.replayLog().join();
-            System.out.printf("    Recovered %d entries after CRC bit flip%n", entries.size());
+            replayExpectingRepairOrReport(storage, "CRC bit flip");
         }
     }
 

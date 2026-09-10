@@ -185,9 +185,28 @@ class FileRaftStorageRecoveryContractTest {
         byte[] bytes = Files.readAllBytes(tempDir.resolve("raft.log"));
         bytes[(corruptTruncate ? truncateStart + 27 : appendStart + 28) + crcByte] ^= 1;
         Files.write(tempDir.resolve("raft.log"), bytes);
+        int corruptOffset = corruptTruncate ? truncateStart : appendStart;
+        // Valid records follow the damaged one, so this is not a torn tail. Replay must
+        // neither apply the unverifiable truncation nor resurrect the discarded tail,
+        // and it must not delete the possibly-acknowledged records after the damage.
+        FileRaftStorage damaged = open(tempDir);
+        try {
+            var failure = assertThrows(java.util.concurrent.ExecutionException.class, () -> await(damaged.replayLog()));
+            var corrupt = assertInstanceOf(FileRaftStorage.CorruptLogException.class, failure.getCause());
+            assertEquals(corruptOffset, corrupt.corruptOffset());
+            assertEquals(corruptTruncate ? 3 : 1, corrupt.entriesBeforeCorruption());
+            assertArrayEquals(bytes, Files.readAllBytes(tempDir.resolve("raft.log")));
+            // Fenced: the damaged log cannot be appended to by this instance.
+            assertThrows(java.util.concurrent.ExecutionException.class,
+                    () -> await(damaged.appendEntries(List.of(entry(9, 9)))));
+        } finally { close(damaged, tempDir); }
+        assertArrayEquals(bytes, Files.readAllBytes(tempDir.resolve("raft.log")));
+        // An operator who knows the tail was unacknowledged truncates at the reported offset.
+        try (FileChannel channel = FileChannel.open(tempDir.resolve("raft.log"), StandardOpenOption.WRITE)) {
+            channel.truncate(corruptOffset);
+        }
         List<LogEntryData> expected = new ArrayList<>(corruptTruncate ? original : List.of(entry(1, 1)));
         assertEntries(expected, recover(tempDir));
-        assertEquals(corruptTruncate ? truncateStart : appendStart, Files.size(tempDir.resolve("raft.log")));
         storage = open(tempDir);
         try {
             LogEntryData next = entry(expected.size() + 1L, 4);

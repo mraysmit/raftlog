@@ -55,6 +55,10 @@ public interface RaftStorage extends Closeable {
      * <p>
      * Implementation MUST ensure durability (fsync) before returning.
      * This is critical for preventing double-voting after crash/restart.
+     * <p>
+     * A failure to force the staging file or, on non-Windows providers, the data
+     * directory is a durability failure: the instance is fenced and every later
+     * operation fails until it is closed and a fresh instance is opened.
      *
      * @param currentTerm the current Raft term
      * @param votedFor    the candidate ID voted for (empty if no vote cast)
@@ -154,6 +158,11 @@ public interface RaftStorage extends Closeable {
      * <p>
      * This is the critical "persist-before-response" barrier that ensures
      * Raft safety.
+     * <p>
+     * A failed force must not be retried: the operating system may already have
+     * discarded the dirty pages, so a retry can succeed for data that is gone.
+     * FileRaftStorage therefore fences the instance on failure; close it and open
+     * a fresh instance, which replays from the last state known to be on disk.
      *
      * @return a Future that completes when all data is durable
      */
@@ -165,7 +174,13 @@ public interface RaftStorage extends Closeable {
      * For FileRaftStorage: Scans the append-only file sequentially.
      * For RocksDB: Scans keys {@code log:1} to {@code log:N}.
      * <p>
-     * This method also truncates any corrupt/partial records at the tail.
+     * Replay is destructive for a torn tail only. An incomplete or invalid record
+     * with no valid record after it belongs to a batch that was never acknowledged
+     * and is physically truncated. An invalid record that is followed by a valid
+     * record lies inside data that may have been acknowledged; FileRaftStorage
+     * fails with {@link FileRaftStorage.CorruptLogException}, leaves the file
+     * unchanged and fences the instance. Such a node must be restored from its
+     * peers rather than repaired by truncation.
      *
      * @return a Future containing all valid log entries in order
      */

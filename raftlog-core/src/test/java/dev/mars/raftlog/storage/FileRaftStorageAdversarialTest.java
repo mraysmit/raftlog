@@ -90,26 +90,39 @@ class FileRaftStorageAdversarialTest {
     class WalCorruptionTests {
 
         @Test
-        @DisplayName("Corrupt magic number - should truncate at corruption point")
+        @DisplayName("Corrupt magic number with a valid record after it - reported, not truncated")
         void corruptMagicNumber() throws Exception {
             // Write valid entries
             writeValidEntries(3);
 
-            // Corrupt the magic number of the second record
+            // Corrupt the magic number of the second record; the third stays valid
+            corruptByteAt(getRecordStartPosition(1), (byte) 0xFF);
+            long sizeBefore = Files.size(tempDir.resolve("raft.log"));
+
+            // Reopen and replay: damage inside the committed region is not repaired here
+            reopenStorage();
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> storage.replayLog().get(5, TimeUnit.SECONDS));
+            var corrupt = assertInstanceOf(FileRaftStorage.CorruptLogException.class, failure.getCause());
+            assertEquals(1, corrupt.entriesBeforeCorruption());
+            assertEquals(sizeBefore, Files.size(tempDir.resolve("raft.log")));
+        }
+
+        @Test
+        @DisplayName("Corrupt magic number in the last record - torn tail truncated")
+        void corruptMagicNumberAtTail() throws Exception {
+            writeValidEntries(2);
             corruptByteAt(getRecordStartPosition(1), (byte) 0xFF);
 
-            // Reopen and replay
             reopenStorage();
             List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-
-            // Should recover only the first entry
             assertEquals(1, replayed.size());
         }
 
         @Test
-        @DisplayName("Corrupt version number - should truncate at corruption point")
+        @DisplayName("Corrupt version number in the last record - torn tail truncated")
         void corruptVersionNumber() throws Exception {
-            writeValidEntries(3);
+            writeValidEntries(2);
 
             // Corrupt version field (offset 4-5) of second record
             Path logPath = tempDir.resolve("raft.log");

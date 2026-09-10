@@ -114,7 +114,11 @@ public final class RaftStorageConfig {
         return syncEnabled;
     }
 
-    /** Whether to verify writes by reading back and checking CRC. */
+    /**
+     * Whether each record is forced and read back through the page cache with its CRC
+     * re-checked. Detects in-process encoding faults and write errors that surface on
+     * read; it cannot detect controller or media faults. Slower, off by default.
+     */
     public boolean verifyWrites() {
         return verifyWrites;
     }
@@ -204,7 +208,10 @@ public final class RaftStorageConfig {
             return this;
         }
 
-        /** Enables or disables write verification (default: false). */
+        /**
+         * Enables or disables read-after-write verification (default: false).
+         * See {@link RaftStorageConfig#verifyWrites()} for what it can and cannot detect.
+         */
         public Builder verifyWrites(boolean verifyWrites) {
             this.verifyWrites = verifyWrites;
             return this;

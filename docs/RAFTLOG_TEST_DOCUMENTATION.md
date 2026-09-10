@@ -7,6 +7,9 @@ This document provides a comprehensive overview of all test cases in the RaftLog
 - `FileRaftStoragePrefixCompactionTest`: 9 cases covering reclaiming bytes, inclusive boundaries, retained entries/metadata, repeated operations and restart.
 - `FileRaftStorageCompactionFailureTest`: 14 cases covering real filesystem failures, publication ordering, fencing, corruption, and four abruptly terminated child JVMs.
 - `FileRaftStorageRecoveryContractTest`: 22 cases covering append/truncate/replay semantics, including torn-tail fixtures.
+- `FileRaftStorageFencingTest`: 13 cases covering fencing after a failed WAL, metadata or directory force, and the replay classification of torn tails versus corruption inside the committed region.
+
+Replay policy since this change: an invalid record with no valid record after it is a torn tail and is truncated; an invalid record followed by a valid record is reported as `CorruptLogException`, the file is left untouched and the instance is fenced. Tests below that mention truncation at a mid-log corruption point now assert the report instead.
 
 The 23 compaction cases were retained as behavioral failures before implementation and then passed. See [Prefix compaction](RAFTLOG_PREFIX_COMPACTION.md). The older class/count inventory below is historical, not the current reactor total.
 
@@ -93,7 +96,7 @@ Tests core WAL functionality including append, replay, metadata, and basic recov
 |------|-------------|
 | `testReplay_SurvivesRestart` | Log survives close and reopen |
 | `testRecovery_TornWrite_PartialHeader` | Partial header at end is ignored |
-| `testRecovery_CorruptCRC` | Corrupt CRC causes truncation at that point |
+| `testRecovery_CorruptCRC` | Corrupt CRC on the last record is a torn tail and is truncated |
 
 ### Edge Cases
 
@@ -114,8 +117,9 @@ Adversarial tests that attempt to break the storage implementation through corru
 
 | Test | Description |
 |------|-------------|
-| `corruptMagicNumber` | Bad magic number causes truncation |
-| `corruptVersionNumber` | Invalid version causes truncation |
+| `corruptMagicNumber` | Bad magic with a valid record after it is reported, file untouched |
+| `corruptMagicNumberAtTail` | Bad magic on the last record is truncated |
+| `corruptVersionNumber` | Invalid version on the last record is truncated |
 | `unknownRecordType` | Unknown type byte causes truncation |
 | `negativePayloadLength` | Negative length causes truncation |
 | `payloadLengthExceedsMax` | Length > 16 MB causes truncation |
@@ -258,10 +262,10 @@ Tests for resilience against file-level corruption scenarios.
 
 | Test | Description | Validation |
 |------|-------------|------------|
-| `Random Byte Corruption in WAL` | Flip random byte in second half of WAL file | Entries before corruption point recovered |
+| `Random Byte Corruption in WAL` | Flip random byte in second half of WAL file | Torn tail repaired, or corruption reported with file untouched |
 | `Zero-Fill Corruption` | Append 4KB of zeros (SSD block failure simulation) | All 5 valid entries recovered, zeros ignored |
-| `Magic Number Corruption` | Corrupt magic number of 3rd entry to `0xDEADBEEF` | Entries before corruption recovered |
-| `CRC Bit Flip` | Single bit flip in payload of first entry | CRC mismatch detected, file truncated at corruption |
+| `Magic Number Corruption` | Corrupt magic number of 3rd entry to `0xDEADBEEF` | Corruption reported; entries 4-5 not discarded |
+| `CRC Bit Flip` | Single bit flip in payload of first entry | CRC mismatch reported; file untouched, instance fenced |
 | `Partial Record (Torn Write)` | Append partial 10-byte header (no index/term/payload/CRC) | All 5 valid entries recovered, partial record ignored |
 | `Metadata File Corruption` | Flip first byte of `meta.dat` file | Corruption detected on metadata load |
 | `Garbage Append After Valid Data` | Append 256 bytes of random garbage after valid entries | All 5 valid entries recovered |
@@ -369,7 +373,7 @@ Tests that verify the documented protection guarantees around thread safety, cra
 | `G6: crcDetectsBitFlipInHeader` | Single bit flip in header detected |
 | `G7: crcDetectsBitFlipInPayload` | Single bit flip in payload detected |
 | `G8: crcDetectsBitFlipInCrcField` | Bit flip in CRC field itself detected |
-| `G9: recoveryPreservesValidEntriesBeforeCorruption` | Entries before corruption point survive |
+| `G9: recoveryPreservesValidEntriesBeforeCorruption` | Mid-log corruption reported with the count of clean entries before it; file untouched |
 | `G10: atomicMetadataUpdate` | Partial metadata write detected |
 | `G11: walTruncationOnRecovery` | Torn tail removed on recovery |
 | `G12: multipleBitFlipsDetected` | Burst errors detected |
@@ -382,7 +386,7 @@ Tests that verify the documented protection guarantees around thread safety, cra
 | `F2: recoveryAfterMultipleRestarts` | 5 restart cycles all data intact |
 | `F3: gracefulDiskFullHandling` | IOException doesn't corrupt existing data |
 | `F4: crc32cCollisionResistance` | 10,000 random payloads produce >9,000 unique CRCs |
-| `F5: recoveryWithInterleavedCorruption` | Corruption mid-log truncates at that point |
+| `F5: recoveryWithInterleavedCorruption` | Corruption mid-log is reported, not truncated |
 
 ### Ordering Guarantees (3 tests)
 
@@ -475,16 +479,17 @@ Tests for integer overflow in batch size calculations.
 | `payloadLengthOverflowRejected` | Negative payload length (overflow) rejected |
 | `indexWrapAround` | Index at Long.MAX_VALUE handled correctly |
 
-### Middle-of-the-Log Corruption (4 tests)
+### Middle-of-the-Log Corruption (5 tests)
 
 **CRITICAL**: Tests for corruption in middle of log (not just tail).
 
 | Test | Description |
 |------|-------------|
-| `corruptionInMiddleReturnsOnlyPriorEntries` | Corruption at entry #5 of 10 returns only entries 1-4 |
-| `fileTruncatedAtCorruptionPoint` | File truncated at corruption point (no orphaned entries 6-10) |
-| `appendAfterMiddleCorruptionWorks` | New append after middle corruption continues correctly |
-| `corruptionAtFirstEntryReturnsEmpty` | Corruption at first entry returns empty log |
+| `corruptionInMiddleIsReported` | Corruption at entry #5 of 10 is reported with offset and 4 clean entries; file untouched |
+| `corruptInstanceIsFenced` | After the report, appends, sync and replay all fail and nothing is written |
+| `operatorTruncationAtReportedOffsetRecovers` | Truncating at the reported offset, once the tail is known to be unacknowledged, recovers entries 1-4 |
+| `corruptionAtFirstEntryIsReported` | Corruption at entry 1 with a valid entry 2 is reported, not truncated to empty |
+| `corruptionInLastRecordIsTornTail` | Corruption in the last record is a torn tail and is truncated |
 
 ### Clock Skew and File Timestamps (3 tests)
 
