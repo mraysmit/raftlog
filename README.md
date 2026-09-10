@@ -203,8 +203,8 @@ raftlog/
 │       ├── main/java/dev/mars/raftlog/
 │       │   └── storage/    # RaftStorage, FileRaftStorage, RaftStorageConfig, AppendPlan
 │       └── test/java/      # Unit tests (154 tests)
-├── raftlog-demo/           # Demo application
-│   └── src/main/java/      # WalDemo showing library usage
+├── raftlog-demo/           # Demo applications and chaos scenarios
+│   └── src/main/java/      # Basic WAL and key/value replay examples
 ├── LICENSE                 # Apache License 2.0
 ├── NOTICE                  # Third-party attributions
 └── OPEN_SOURCE_USAGE.md    # Open source compliance guide
@@ -221,6 +221,13 @@ java -jar raftlog-demo/target/raftlog-demo-1.3.0.jar
 
 # Run with custom data directory
 java -Draftlog.dataDir=/tmp/wal-demo -jar raftlog-demo/target/raftlog-demo-1.3.0.jar
+```
+
+Run the separate key/value replay example:
+
+```bash
+java -cp raftlog-demo/target/raftlog-demo-1.3.0.jar \
+  dev.mars.raftlog.demo.KeyValueExample /tmp/raftlog-key-values
 ```
 
 ## Documentation
