@@ -17,6 +17,7 @@ package dev.mars.raftlog.storage;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -32,9 +33,12 @@ import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
 import java.util.zip.CRC32C;
 
 /**
@@ -134,6 +138,7 @@ public final class FileRaftStorage implements RaftStorage {
 
     /** Maximum source characters retained when a node identifier is written to a log. */
     private static final int MAX_LOGGED_VOTED_FOR_CHARS = 64;
+    private static final int MAX_LOGGED_PATH_CHARS = 512;
 
     // ========================================================================
     // State
@@ -158,6 +163,8 @@ public final class FileRaftStorage implements RaftStorage {
     private final int maxPayloadSize;
     private final long minFreeSpace;
     private final CompactionIo compactionIo;
+    private final String storageId = UUID.randomUUID().toString();
+    private final AtomicLong operationSequence = new AtomicLong();
 
     private Path dataDir;
     private FileChannel logChannel;
@@ -216,8 +223,9 @@ public final class FileRaftStorage implements RaftStorage {
             return t;
         });
 
-        LOG.info("FileRaftStorage initialized: syncEnabled={}, verifyWrites={}, maxPayloadSize={} MB, minFreeSpace={} MB",
-                syncEnabled, verifyWrites, maxPayloadSize / 1024 / 1024, minFreeSpace / 1024 / 1024);
+        LOG.atInfo().addKeyValue("event", "storage.initialized").addKeyValue("storageId", storageId)
+                .log("FileRaftStorage initialized: syncEnabled={}, verifyWrites={}, maxPayloadSize={} MB, minFreeSpace={} MB",
+                        syncEnabled, verifyWrites, maxPayloadSize / 1024 / 1024, minFreeSpace / 1024 / 1024);
 
         if (!syncEnabled) {
             LOG.warn("FileRaftStorage created with fsync DISABLED. Do NOT use in production!");
@@ -294,9 +302,10 @@ public final class FileRaftStorage implements RaftStorage {
 
     @Override
     public CompletableFuture<Void> open(Path dataDir) {
-        return CompletableFuture.runAsync(() -> {
+        return runOperation("open", dataDir, () -> {
             try {
-                LOG.info("Opening WAL storage at: {}", dataDir);
+                LOG.atInfo().addKeyValue("event", "storage.open.started")
+                        .log("Opening WAL storage at: {}", pathForLog(dataDir));
                 this.dataDir = dataDir;
                 Files.createDirectories(dataDir);
                 LOG.debug("Created/verified data directory: {}", dataDir);
@@ -323,14 +332,17 @@ public final class FileRaftStorage implements RaftStorage {
                 // Seek to end for appends
                 long logSize = logChannel.size();
                 logChannel.position(logSize);
-                LOG.info("WAL opened successfully: path={}, size={} bytes", logPath, logSize);
+                LOG.atInfo().addKeyValue("event", "storage.open.completed")
+                        .addKeyValue("walBytes", logSize)
+                        .log("WAL opened successfully: path={}, size={} bytes", pathForLog(logPath), logSize);
 
             } catch (IOException e) {
-                LOG.error("Failed to open WAL at {}: {}", dataDir, e.getMessage(), e);
+                LOG.atError().addKeyValue("event", "storage.open.failed")
+                        .setCause(e).log("Failed to open WAL at {}: {}", pathForLog(dataDir), e.getMessage());
                 releaseExclusiveLock();
                 throw new StorageException("Failed to open WAL at " + dataDir, e);
             }
-        }, walExecutor);
+        });
     }
 
     @Override
@@ -340,22 +352,41 @@ public final class FileRaftStorage implements RaftStorage {
             return;
         }
         closed = true;
-        LOG.info("Closing WAL storage at: {}", dataDir);
+        long closeStarted = System.nanoTime();
+        String operationId = nextOperationId("close");
+        LOG.atInfo().addKeyValue("event", "storage.close.requested").addKeyValue("storageId", storageId)
+                .addKeyValue("operationId", operationId)
+                .log("Closing WAL storage at: {}", pathForLog(dataDir));
 
-        walExecutor.execute(() -> {
+        walExecutor.execute(() -> withLogContext(operationId, dataDir, () -> {
             try {
-                if (logChannel != null) {
-                    logChannel.close();
-                    LOG.debug("Log channel closed");
+                boolean cleanupSucceeded = true;
+                try {
+                    if (logChannel != null) {
+                        logChannel.close();
+                        LOG.debug("Log channel closed");
+                    }
+                } catch (IOException e) {
+                    cleanupSucceeded = false;
+                    LOG.warn("Error closing log channel: {}", e.getMessage(), e);
                 }
-            } catch (IOException e) {
-                LOG.warn("Error closing log channel: {}", e.getMessage());
+                cleanupSucceeded &= releaseExclusiveLock();
+                long elapsedMs = (System.nanoTime() - closeStarted) / 1_000_000;
+                LOG.atInfo().addKeyValue("event", cleanupSucceeded
+                                ? "storage.close.completed" : "storage.close.completed_with_warnings")
+                        .addKeyValue("durationMs", elapsedMs)
+                        .addKeyValue("cleanupSucceeded", cleanupSucceeded)
+                        .log("WAL storage closed: path={}, cleanupSucceeded={}, elapsedMs={}",
+                                pathForLog(dataDir), cleanupSucceeded, elapsedMs);
+            } catch (RuntimeException e) {
+                LOG.atError().addKeyValue("event", "storage.close.failed").setCause(e)
+                        .log("Failed to close WAL storage at {}: {}", pathForLog(dataDir), e.getMessage());
+                throw e;
             }
-            releaseExclusiveLock();
-        });
+            return null;
+        }));
 
         walExecutor.shutdown();
-        LOG.info("WAL storage closed");
     }
 
     // ========================================================================
@@ -364,7 +395,7 @@ public final class FileRaftStorage implements RaftStorage {
 
     @Override
     public CompletableFuture<Void> updateMetadata(long currentTerm, Optional<String> votedFor) {
-        return CompletableFuture.runAsync(() -> {
+        return runOperation("metadata-update", dataDir, () -> {
             ensureHealthy();
             try {
                 LOG.debug("Updating metadata: term={}, votedFor={}", currentTerm, votedForForLog(votedFor));
@@ -421,18 +452,20 @@ public final class FileRaftStorage implements RaftStorage {
                     }
                 }
 
-                LOG.info("Metadata updated: term={}, votedFor={}", currentTerm, votedForForLog(votedFor));
+                LOG.atDebug().addKeyValue("event", "metadata.update.completed")
+                        .log("Metadata updated: term={}, votedFor={}", currentTerm, votedForForLog(votedFor));
 
             } catch (IOException e) {
-                LOG.error("Failed to update metadata: {}", e.getMessage(), e);
+                LOG.atError().addKeyValue("event", "metadata.update.failed").setCause(e)
+                        .log("Failed to update metadata: {}", e.getMessage());
                 throw new StorageException("Failed to update metadata", e);
             }
-        }, walExecutor);
+        });
     }
 
     @Override
     public CompletableFuture<PersistentMeta> loadMetadata() {
-        return CompletableFuture.supplyAsync(() -> {
+        return supplyOperation("metadata-load", dataDir, () -> {
             ensureHealthy();
             try {
                 Path metaPath = dataDir.resolve(META_FILE);
@@ -443,6 +476,12 @@ public final class FileRaftStorage implements RaftStorage {
 
                 LOG.debug("Loading metadata from: {}", metaPath);
                 byte[] all = Files.readAllBytes(metaPath);
+                if (all.length < Long.BYTES + Integer.BYTES + Integer.BYTES) {
+                    LOG.atError().addKeyValue("event", "metadata.corrupt")
+                            .log("Corrupt metadata: file is {} bytes, minimum valid size is {} bytes",
+                                    all.length, Long.BYTES + Integer.BYTES + Integer.BYTES);
+                    throw new StorageException("Corrupt meta.dat: file is too short (" + all.length + " bytes)");
+                }
                 ByteBuffer buf = ByteBuffer.wrap(all);
 
                 long term = buf.getLong();
@@ -450,7 +489,8 @@ public final class FileRaftStorage implements RaftStorage {
 
                 // Validate length
                 if (voteLen < 0 || voteLen > (all.length - 8 - 4 - 4)) {
-                    LOG.error("Corrupt metadata: invalid vote length {}", voteLen);
+                    LOG.atError().addKeyValue("event", "metadata.corrupt")
+                            .log("Corrupt metadata: invalid vote length {}", voteLen);
                     throw new StorageException("Corrupt meta.dat: invalid vote length " + voteLen);
                 }
 
@@ -463,8 +503,9 @@ public final class FileRaftStorage implements RaftStorage {
                 CRC32C crc = new CRC32C();
                 crc.update(all, 0, 8 + 4 + voteLen);
                 if ((int) crc.getValue() != expectedCrc) {
-                    LOG.error("Corrupt metadata: CRC mismatch (expected={}, computed={})",
-                            expectedCrc, (int) crc.getValue());
+                    LOG.atError().addKeyValue("event", "metadata.corrupt")
+                            .log("Corrupt metadata: CRC mismatch (expected={}, computed={})",
+                                    expectedCrc, (int) crc.getValue());
                     throw new StorageException("Corrupt meta.dat: CRC mismatch");
                 }
 
@@ -472,14 +513,16 @@ public final class FileRaftStorage implements RaftStorage {
                         ? Optional.empty()
                         : Optional.of(new String(voteBytes, StandardCharsets.UTF_8));
 
-                LOG.info("Metadata loaded: term={}, votedFor={}", term, votedForForLog(votedFor));
+                LOG.atInfo().addKeyValue("event", "metadata.load.completed")
+                        .log("Metadata loaded: term={}, votedFor={}", term, votedForForLog(votedFor));
                 return new PersistentMeta(term, votedFor);
 
             } catch (IOException e) {
-                LOG.error("Failed to load metadata: {}", e.getMessage(), e);
+                LOG.atError().addKeyValue("event", "metadata.load.failed").setCause(e)
+                        .log("Failed to load metadata: {}", e.getMessage());
                 throw new StorageException("Failed to load metadata", e);
             }
-        }, walExecutor);
+        });
     }
 
     // ========================================================================
@@ -497,21 +540,22 @@ public final class FileRaftStorage implements RaftStorage {
         // Validate payload sizes before writing (Section 19.2: Payload Length Trust Boundary)
         for (LogEntryData entry : entries) {
             if (entry.payload() != null && entry.payload().length > maxPayloadSize) {
-                LOG.error("Payload too large: {} bytes (max: {})", entry.payload().length, maxPayloadSize);
+                LOG.atError().addKeyValue("event", "wal.append.rejected")
+                        .addKeyValue("entryIndex", entry.index())
+                        .log("Payload too large for entry index {}: {} bytes (max: {})",
+                                entry.index(), entry.payload().length, maxPayloadSize);
                 return CompletableFuture.failedFuture(
                         new StorageException("Payload too large: " + entry.payload().length +
                                 " bytes (max: " + maxPayloadSize + ")"));
             }
         }
 
-        LOG.debug("Appending {} entries (indices {}-{})",
-                entries.size(),
-                entries.getFirst().index(),
-                entries.getLast().index());
-
-        return CompletableFuture.runAsync(() -> {
+        return runOperation("append", dataDir, () -> {
             ensureHealthy();
+            LOG.debug("Appending {} entries (indices {}-{})",
+                    entries.size(), entries.getFirst().index(), entries.getLast().index());
             try {
+                long started = System.nanoTime();
                 long totalBytes = 0;
                 for (LogEntryData entry : entries) {
                     writeRecord(TYPE_APPEND, entry.index(), entry.term(),
@@ -521,34 +565,41 @@ public final class FileRaftStorage implements RaftStorage {
                             entry.index(), entry.term(),
                             entry.payload() != null ? entry.payload().length : 0);
                 }
-                LOG.info("Appended {} entries to WAL: indices [{}-{}], terms [{}-{}], {} bytes",
-                        entries.size(),
-                        entries.getFirst().index(),
-                        entries.getLast().index(),
-                        entries.getFirst().term(),
-                        entries.getLast().term(),
-                        totalBytes);
+                long elapsedMicros = (System.nanoTime() - started) / 1_000;
+                LOG.atDebug().addKeyValue("event", "wal.append.completed")
+                        .addKeyValue("entryCount", entries.size()).addKeyValue("walBytes", totalBytes)
+                        .addKeyValue("durationMicros", elapsedMicros)
+                        .log("Appended {} entries to WAL: indices [{}-{}], terms [{}-{}], {} bytes, elapsedUs={}",
+                                entries.size(), entries.getFirst().index(), entries.getLast().index(),
+                                entries.getFirst().term(), entries.getLast().term(), totalBytes, elapsedMicros);
             } catch (IOException e) {
-                LOG.error("Failed to append entries: {}", e.getMessage(), e);
+                LOG.atError().addKeyValue("event", "wal.append.failed")
+                        .addKeyValue("firstIndex", entries.getFirst().index())
+                        .addKeyValue("lastIndex", entries.getLast().index()).setCause(e)
+                        .log("Failed to append entries [{}-{}] at {}: {}",
+                                entries.getFirst().index(), entries.getLast().index(), pathForLog(dataDir), e.getMessage());
                 throw new StorageException("Failed to append entries", e);
             }
-        }, walExecutor);
+        });
     }
 
     @Override
     public CompletableFuture<Void> truncateSuffix(long fromIndex) {
-        LOG.debug("Truncating log suffix from index {}", fromIndex);
-        return CompletableFuture.runAsync(() -> {
+        return runOperation("suffix-truncate", dataDir, () -> {
             ensureHealthy();
+            LOG.debug("Truncating log suffix from index {}", fromIndex);
             try {
                 // Write a TRUNCATE record (no payload needed)
                 writeRecord(TYPE_TRUNCATE, fromIndex, 0L, new byte[0]);
-                LOG.info("Truncate record written: fromIndex={}", fromIndex);
+                LOG.atInfo().addKeyValue("event", "wal.suffix_truncate.completed")
+                        .log("Truncate record written: fromIndex={}", fromIndex);
             } catch (IOException e) {
-                LOG.error("Failed to write truncate record: {}", e.getMessage(), e);
+                LOG.atError().addKeyValue("event", "wal.suffix_truncate.failed").setCause(e)
+                        .log("Failed to write truncate record from index {} at {}: {}",
+                                fromIndex, pathForLog(dataDir), e.getMessage());
                 throw new StorageException("Failed to write truncate record", e);
             }
-        }, walExecutor);
+        });
     }
 
     @Override
@@ -559,31 +610,37 @@ public final class FileRaftStorage implements RaftStorage {
             return CompletableFuture.completedFuture(null);
         }
 
-        LOG.debug("Syncing WAL to disk");
-        return CompletableFuture.runAsync(() -> {
+        return runOperation("sync", dataDir, () -> {
             ensureHealthy();
+            LOG.debug("Syncing WAL to disk");
             try {
                 long startNanos = System.nanoTime();
                 compactionIo.forceChannel(logChannel);
                 long elapsedMicros = (System.nanoTime() - startNanos) / 1000;
-                LOG.debug("WAL synced to disk in {} us", elapsedMicros);
+                LOG.atDebug().addKeyValue("event", "wal.sync.completed")
+                        .addKeyValue("durationMicros", elapsedMicros)
+                        .log("WAL synced to disk in {} us", elapsedMicros);
             } catch (IOException e) {
                 // After a failed fsync the kernel may have discarded the dirty pages;
                 // a retry could report success for data that never reached the disk.
                 throw fence("Failed to sync WAL", e);
             }
-        }, walExecutor);
+        });
     }
 
     @Override
     public CompletableFuture<Void> truncatePrefix(long toIndex) {
-        return CompletableFuture.runAsync(() -> {
+        return runOperation("prefix-compaction", dataDir, () -> {
             ensureHealthy();
             if (toIndex < 0) throw new IllegalArgumentException("Prefix boundary must not be negative");
             if (toIndex == 0) return;
             Path temporary = dataDir.resolve(LOG_TMP_FILE);
             Path published = dataDir.resolve(LOG_FILE);
             boolean publicationAttempted = false;
+            long started = System.nanoTime();
+            LOG.atDebug().addKeyValue("event", "wal.compaction.started")
+                    .log("Compacting WAL prefix through index {}: source={}, temporary={}",
+                            toIndex, pathForLog(published), pathForLog(temporary));
             try {
                 // Do not turn source corruption into acknowledged prefix deletion.
                 // The caller must explicitly replay/repair a torn tail first.
@@ -607,7 +664,11 @@ public final class FileRaftStorage implements RaftStorage {
                 compactionIo.forceDirectory(dataDir);
                 logChannel = compactionIo.reopen(published);
                 logChannel.position(logChannel.size());
-                LOG.info("Compacted WAL through index {}: {} entries retained", toIndex, retained.size());
+                long elapsedMs = (System.nanoTime() - started) / 1_000_000;
+                LOG.atInfo().addKeyValue("event", "wal.compaction.completed")
+                        .addKeyValue("durationMs", elapsedMs).addKeyValue("retainedEntries", retained.size())
+                        .log("Compacted WAL through index {}: {} entries retained, elapsedMs={}",
+                                toIndex, retained.size(), elapsedMs);
             } catch (CorruptLogException e) {
                 // Nothing was written, but the source cannot be trusted for any later write.
                 throw fence("WAL contains ambiguous corruption", e);
@@ -619,57 +680,57 @@ public final class FileRaftStorage implements RaftStorage {
                 } else {
                     try { Files.deleteIfExists(temporary); } catch (IOException cleanupFailure) { failure.addSuppressed(cleanupFailure); }
                 }
+                LOG.atError().addKeyValue("event", "wal.compaction.failed")
+                        .addKeyValue("publicationAttempted", publicationAttempted).setCause(failure)
+                        .log("Prefix compaction failed through index {}: publicationAttempted={}, source={}, temporary={}, error={}",
+                                toIndex, publicationAttempted, pathForLog(published), pathForLog(temporary), e.getMessage());
                 throw failure;
             }
-        }, walExecutor);
+        });
     }
 
     private void ensureHealthy() {
         if (fatalFailure != null) throw fatalFailure;
     }
 
-    /**
-     * Records a fatal failure so that every later operation fails with it, and
-     * returns the exception for the caller to throw. Called only on the WAL executor.
-     */
-    private StorageException fence(String message, Throwable cause) {
-        String detail = String.valueOf(cause.getMessage()).replaceFirst("\\.+$", "");
-        LOG.error("{}: {}. Storage instance is now fenced; close it and open a fresh instance",
-                message, detail, cause);
-        StorageException failure = cause instanceof StorageException se ? se : new StorageException(message, cause);
-        if (fatalFailure == null) fatalFailure = failure;
-        return failure;
+    private CompletableFuture<Void> runOperation(String operation, Path path, Runnable action) {
+        String operationId = nextOperationId(operation);
+        return CompletableFuture.runAsync(
+                () -> withLogContext(operationId, path, () -> {
+                    action.run();
+                    return null;
+                }),
+                walExecutor);
     }
 
-    @Override
-    public CompletableFuture<List<LogEntryData>> replayLog() {
-        return CompletableFuture.supplyAsync(() -> {
-            ensureHealthy();
-            try {
-                return readLog(true);
-            } catch (CorruptLogException e) {
-                // The channel is positioned after the corrupt region. Appending there would
-                // splice new records onto data that cannot be trusted.
-                throw fence("WAL contains ambiguous corruption", e);
-            } catch (IOException e) {
-                throw new StorageException("Failed to replay log", e);
-            }
-        }, walExecutor);
+    private <T> CompletableFuture<T> supplyOperation(String operation, Path path, Supplier<T> action) {
+        String operationId = nextOperationId(operation);
+        return CompletableFuture.supplyAsync(() -> withLogContext(operationId, path, action), walExecutor);
     }
 
-    /** Result of decoding one record at a file position. */
-    private record DecodedRecord(byte type, long index, long term, byte[] payload, long end) {
+    private <T> T withLogContext(String operationId, Path path, Supplier<T> action) {
+        try (MDC.MDCCloseable ignoredStorage = MDC.putCloseable("storageId", storageId);
+             MDC.MDCCloseable ignoredOperation = MDC.putCloseable("operationId", operationId);
+             MDC.MDCCloseable ignoredPath = MDC.putCloseable("storagePath", pathForLog(path))) {
+            return action.get();
+        }
     }
 
-    /** Produces a bounded, single-line representation of a potentially untrusted node identifier. */
-    private static String votedForForLog(Optional<String> votedFor) {
-        if (votedFor.isEmpty()) return "(none)";
+    private String nextOperationId(String operation) {
+        return operation + "-" + operationSequence.incrementAndGet();
+    }
 
-        String value = votedFor.get();
-        int end = Math.min(value.length(), MAX_LOGGED_VOTED_FOR_CHARS);
+    /** Produces a bounded, single-line representation of a path controlled by the caller. */
+    private static String pathForLog(Path path) {
+        if (path == null) return "(not-open)";
+        return boundedSingleLine(path.toAbsolutePath().normalize().toString(), MAX_LOGGED_PATH_CHARS);
+    }
+
+    private static String boundedSingleLine(String value, int limit) {
+        int end = Math.min(value.length(), limit);
         if (end < value.length() && end > 0 && Character.isHighSurrogate(value.charAt(end - 1))) end--;
 
-        StringBuilder safe = new StringBuilder(128);
+        StringBuilder safe = new StringBuilder(Math.min(end + 16, limit + 16));
         for (int i = 0; i < end; i++) {
             char c = value.charAt(i);
             switch (c) {
@@ -688,6 +749,48 @@ public final class FileRaftStorage implements RaftStorage {
         }
         if (end < value.length()) safe.append("…[").append(value.length()).append(" chars]");
         return safe.toString();
+    }
+
+    /**
+     * Records a fatal failure so that every later operation fails with it, and
+     * returns the exception for the caller to throw. Called only on the WAL executor.
+     */
+    private StorageException fence(String message, Throwable cause) {
+        String detail = String.valueOf(cause.getMessage()).replaceFirst("\\.+$", "");
+        LOG.atError().addKeyValue("event", "storage.fenced").setCause(cause)
+                .log("{}: {}. Storage instance is now fenced; close it and open a fresh instance",
+                        message, detail);
+        StorageException failure = cause instanceof StorageException se ? se : new StorageException(message, cause);
+        if (fatalFailure == null) fatalFailure = failure;
+        return failure;
+    }
+
+    @Override
+    public CompletableFuture<List<LogEntryData>> replayLog() {
+        return supplyOperation("replay", dataDir, () -> {
+            ensureHealthy();
+            try {
+                return readLog(true);
+            } catch (CorruptLogException e) {
+                // The channel is positioned after the corrupt region. Appending there would
+                // splice new records onto data that cannot be trusted.
+                throw fence("WAL contains ambiguous corruption", e);
+            } catch (IOException e) {
+                LOG.atError().addKeyValue("event", "wal.replay.failed").setCause(e)
+                        .log("Failed to replay WAL at {}: {}", pathForLog(dataDir.resolve(LOG_FILE)), e.getMessage());
+                throw new StorageException("Failed to replay log", e);
+            }
+        });
+    }
+
+    /** Result of decoding one record at a file position. */
+    private record DecodedRecord(byte type, long index, long term, byte[] payload, long end) {
+    }
+
+    /** Produces a bounded, single-line representation of a potentially untrusted node identifier. */
+    private static String votedForForLog(Optional<String> votedFor) {
+        if (votedFor.isEmpty()) return "(none)";
+        return boundedSingleLine(votedFor.get(), MAX_LOGGED_VOTED_FOR_CHARS);
     }
 
     /**
@@ -825,7 +928,8 @@ public final class FileRaftStorage implements RaftStorage {
             return List.of();
         }
 
-        LOG.info("Replaying WAL from: {}", logPath);
+        LOG.atInfo().addKeyValue("event", "wal.replay.started")
+                .log("Replaying WAL from: {}", pathForLog(logPath));
         long startTime = System.currentTimeMillis();
         List<LogEntryData> entries = new ArrayList<>();
         int appendCount = 0;
@@ -868,8 +972,10 @@ public final class FileRaftStorage implements RaftStorage {
                     throw new CorruptLogException(logPath, lastGoodPos, fileSize, entries.size());
                 }
                 if (!repairTail) throw new IOException("WAL contains an incomplete tail; replay before compaction");
-                LOG.warn("Truncating torn tail: {} bytes removed (file was {} bytes, valid data {} bytes)",
-                        fileSize - lastGoodPos, fileSize, lastGoodPos);
+                LOG.atWarn().addKeyValue("event", "wal.tail.repaired")
+                        .addKeyValue("removedBytes", fileSize - lastGoodPos)
+                        .log("Truncating torn tail: {} bytes removed (file was {} bytes, valid data {} bytes)",
+                                fileSize - lastGoodPos, fileSize, lastGoodPos);
                 ch.truncate(lastGoodPos);
             }
         }
@@ -878,8 +984,10 @@ public final class FileRaftStorage implements RaftStorage {
         logChannel.position(Files.size(logPath));
 
         long elapsed = System.currentTimeMillis() - startTime;
-        LOG.info("WAL replay complete: {} entries recovered, {} appends, {} truncates, {} ms",
-                entries.size(), appendCount, truncateCount, elapsed);
+        LOG.atInfo().addKeyValue("event", "wal.replay.completed").addKeyValue("durationMs", elapsed)
+                .addKeyValue("recoveredEntries", entries.size())
+                .log("WAL replay complete: {} entries recovered, {} appends, {} truncates, {} ms",
+                        entries.size(), appendCount, truncateCount, elapsed);
 
         return entries;
     }
@@ -972,7 +1080,7 @@ public final class FileRaftStorage implements RaftStorage {
      */
     private void acquireExclusiveLock() throws IOException {
         Path lockPath = dataDir.resolve(LOCK_FILE);
-        LOG.debug("Acquiring exclusive lock: {}", lockPath);
+        LOG.debug("Acquiring exclusive lock: {}", pathForLog(lockPath));
 
         lockChannel = FileChannel.open(lockPath,
                 StandardOpenOption.CREATE,
@@ -983,15 +1091,15 @@ public final class FileRaftStorage implements RaftStorage {
             exclusiveLock = lockChannel.tryLock();
             if (exclusiveLock == null) {
                 lockChannel.close();
-                LOG.error("Cannot acquire exclusive lock: another process holds the lock");
+                LOG.error("Cannot acquire exclusive lock at {}: another process holds the lock", pathForLog(lockPath));
                 throw new StorageException(
                         "Cannot acquire exclusive lock on WAL directory: " + dataDir +
                         ". Another process may be using this storage.");
             }
-            LOG.info("Exclusive lock acquired: {}", lockPath);
+            LOG.info("Exclusive lock acquired: {}", pathForLog(lockPath));
         } catch (OverlappingFileLockException e) {
             lockChannel.close();
-            LOG.error("Cannot acquire exclusive lock: lock already held in this JVM");
+            LOG.error("Cannot acquire exclusive lock at {}: lock already held in this JVM", pathForLog(lockPath));
             throw new StorageException(
                     "Cannot acquire exclusive lock: lock already held in this JVM", e);
         }
@@ -1000,14 +1108,17 @@ public final class FileRaftStorage implements RaftStorage {
     /**
      * Releases the exclusive lock and closes the lock channel.
      */
-    private void releaseExclusiveLock() {
+    private boolean releaseExclusiveLock() {
+        boolean succeeded = true;
         try {
             if (exclusiveLock != null && exclusiveLock.isValid()) {
                 exclusiveLock.release();
                 LOG.debug("Exclusive lock released");
             }
         } catch (IOException e) {
-            LOG.warn("Could not release lock: {}", e.getMessage());
+            succeeded = false;
+            LOG.warn("Could not release lock at {}: {}", pathForLog(dataDir == null ? null : dataDir.resolve(LOCK_FILE)),
+                    e.getMessage(), e);
         }
         try {
             if (lockChannel != null && lockChannel.isOpen()) {
@@ -1015,8 +1126,11 @@ public final class FileRaftStorage implements RaftStorage {
                 LOG.trace("Lock channel closed");
             }
         } catch (IOException e) {
-            LOG.warn("Could not close lock channel: {}", e.getMessage());
+            succeeded = false;
+            LOG.warn("Could not close lock channel at {}: {}",
+                    pathForLog(dataDir == null ? null : dataDir.resolve(LOCK_FILE)), e.getMessage(), e);
         }
+        return succeeded;
     }
 
     /**
@@ -1030,11 +1144,12 @@ public final class FileRaftStorage implements RaftStorage {
         long usableSpaceMb = usableSpace / 1024 / 1024;
         long minFreeSpaceMb = minFreeSpace / 1024 / 1024;
 
-        LOG.trace("Disk space check: {} MB available, {} MB required", usableSpaceMb, minFreeSpaceMb);
+        LOG.trace("Disk space check at {}: {} MB available, {} MB required",
+                pathForLog(dataDir), usableSpaceMb, minFreeSpaceMb);
 
         if (usableSpace < minFreeSpace) {
-            LOG.error("Insufficient disk space: {} MB available, need at least {} MB",
-                    usableSpaceMb, minFreeSpaceMb);
+            LOG.error("Insufficient disk space at {}: {} MB available, need at least {} MB",
+                    pathForLog(dataDir), usableSpaceMb, minFreeSpaceMb);
             throw new StorageException(
                     "Insufficient disk space: " + usableSpaceMb + " MB available, " +
                     "need at least " + minFreeSpaceMb + " MB. " +

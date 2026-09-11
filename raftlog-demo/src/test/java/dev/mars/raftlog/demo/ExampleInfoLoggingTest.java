@@ -25,6 +25,7 @@ import org.slf4j.LoggerFactory;
 import java.nio.file.Path;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ExampleInfoLoggingTest {
@@ -47,6 +48,12 @@ class ExampleInfoLoggingTest {
         assertContains(messages, "Step 5/5: Appending 2 entries");
         assertContains(messages, "Prepared entry: index=1, term=1, payloadBytes=");
         assertContains(messages, "Durability barrier completed:");
+        assertContains(messages, "Durable entry: index=1, term=1, payloadBytes=15, payloadPreview=SET key1 value1");
+        assertContains(messages, "Durable entry: index=2, term=1, payloadBytes=15, payloadPreview=SET key2 value2");
+        assertMessageCount(messages, "Durable entry:", 2);
+        assertContains(messages, "Read-back verified entry: index=1, term=1, payloadBytes=15, payloadPreview=SET key1 value1");
+        assertContains(messages, "Read-back verified entry: index=2, term=1, payloadBytes=15, payloadPreview=SET key2 value2");
+        assertMessageCount(messages, "Read-back verified entry:", 2);
         assertContains(messages, "WAL example completed:");
     }
 
@@ -61,6 +68,13 @@ class ExampleInfoLoggingTest {
         assertContains(messages, "Prepared record: index=1, term=1, key=user.name");
         assertContains(messages, "Prepared record: index=8, term=1, key=ui.theme");
         assertContains(messages, "Durability barrier completed:");
+        assertContains(messages, "Durable record: index=1, term=1, key=user.name, value=Alice, payloadBytes=22");
+        assertContains(messages, "Durable record: index=8, term=1, key=ui.theme, value=light, payloadBytes=21");
+        assertMessageCount(messages, "Durable record:", 8);
+        assertContains(messages, "Read-back verified record: index=1, term=1, key=user.name, value=Alice, payloadBytes=22");
+        assertContains(messages, "Read-back verified record: index=2, term=1, key=ui.theme, value=dark, payloadBytes=20");
+        assertContains(messages, "Read-back verified record: index=8, term=1, key=ui.theme, value=light, payloadBytes=21");
+        assertMessageCount(messages, "Read-back verified record:", 8);
         assertContains(messages, "Final replay summary: records=8, currentKeys=7, overwrittenKeys=1");
         assertContains(messages, "Last-write-wins result: key=ui.theme, value=light");
         assertContains(messages, "Key/value WAL example completed:");
@@ -85,6 +99,11 @@ class ExampleInfoLoggingTest {
     private static void assertContains(List<String> messages, String expectedFragment) {
         assertTrue(messages.stream().anyMatch(message -> message.contains(expectedFragment)),
                 () -> "Expected log containing <" + expectedFragment + "> but got: " + messages);
+    }
+
+    private static void assertMessageCount(List<String> messages, String fragment, long expectedCount) {
+        assertEquals(expectedCount, messages.stream().filter(message -> message.contains(fragment)).count(),
+                () -> "Expected " + expectedCount + " logs containing <" + fragment + "> but got: " + messages);
     }
 
     @FunctionalInterface

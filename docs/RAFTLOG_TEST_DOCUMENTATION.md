@@ -2,6 +2,67 @@
 
 This document provides a comprehensive overview of all test cases in the RaftLog project, organized by test class and category.
 
+## Running Tests
+
+### Unit Tests (JUnit)
+
+```bash
+# Run all tests
+mvn test
+
+# Run specific test class
+mvn test -Dtest=FileRaftStorageAdversarialTest
+
+# Run specific test category
+mvn test '-Dtest=ProtectionGuaranteeTest$ThreadSafetyGuarantees'
+
+# Run with verbose output
+mvn test -Dtest=EnhancedProtectionTest -Dsurefire.useFile=false
+```
+
+### Demo Examples
+
+Run these commands from the project root:
+
+```powershell
+# Build the executable demo JAR and its dependencies
+mvn package -pl raftlog-demo -am -DskipTests
+
+# Run the main WAL example
+java -jar raftlog-demo/target/raftlog-demo-1.3.0.jar .\run-data\wal-demo
+
+# Run the key/value replay example
+java -cp raftlog-demo/target/raftlog-demo-1.3.0.jar dev.mars.raftlog.demo.KeyValueExample .\run-data\key-values
+```
+
+### Chaos Tests (WalChaos)
+
+WalChaos is an interactive chaos testing suite that runs as a standalone Java application:
+
+```bash
+# Build the demo module
+mvn package -pl raftlog-demo -am -DskipTests
+
+# Run all 38 chaos tests
+java -cp raftlog-demo/target/raftlog-demo-1.3.0.jar dev.mars.raftlog.demo.WalChaos
+
+# Run specific category
+java -cp raftlog-demo/target/raftlog-demo-1.3.0.jar dev.mars.raftlog.demo.WalChaos concurrent
+java -cp raftlog-demo/target/raftlog-demo-1.3.0.jar dev.mars.raftlog.demo.WalChaos corruption
+java -cp raftlog-demo/target/raftlog-demo-1.3.0.jar dev.mars.raftlog.demo.WalChaos boundary
+java -cp raftlog-demo/target/raftlog-demo-1.3.0.jar dev.mars.raftlog.demo.WalChaos stress
+```
+
+**WalChaos Output:**
+
+- Creates temporary directory for test files
+- Runs tests with real-time pass/fail indication
+- Reports total passed/failed at end
+- Returns exit code 0 on success, 1 on any failure
+- Automatically cleans up temporary files
+
+---
+
 ## Prefix compaction and recovery contract tests
 
 - `FileRaftStoragePrefixCompactionTest`: 9 cases covering reclaiming bytes, inclusive boundaries, retained entries/metadata, repeated operations and restart.
@@ -227,13 +288,13 @@ An interactive chaos testing suite that throws every nasty scenario at the WAL t
 mvn package -pl raftlog-demo -am -DskipTests
 
 # Run all chaos tests
-java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos
+java -cp raftlog-demo/target/raftlog-demo-1.3.0.jar dev.mars.raftlog.demo.WalChaos
 
 # Run specific test category
-java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos concurrent
-java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos corruption
-java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos boundary
-java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos stress
+java -cp raftlog-demo/target/raftlog-demo-1.3.0.jar dev.mars.raftlog.demo.WalChaos concurrent
+java -cp raftlog-demo/target/raftlog-demo-1.3.0.jar dev.mars.raftlog.demo.WalChaos corruption
+java -cp raftlog-demo/target/raftlog-demo-1.3.0.jar dev.mars.raftlog.demo.WalChaos boundary
+java -cp raftlog-demo/target/raftlog-demo-1.3.0.jar dev.mars.raftlog.demo.WalChaos stress
 ```
 
 ### Concurrency Chaos Tests (6 tests)
@@ -553,51 +614,6 @@ The implementation relies on the following assumptions about the underlying syst
 3. **No "Ghost" Writes**: Data written before a crash either appears completely or not at all.
    - No partial block corruption that produces valid-looking data
    - CRC32C provides detection for bit-level corruption
-
----
-
-## Running Tests
-
-### Unit Tests (JUnit)
-
-```bash
-# Run all tests
-mvn test
-
-# Run specific test class
-mvn test -Dtest=FileRaftStorageAdversarialTest
-
-# Run specific test category
-mvn test -Dtest=ProtectionGuaranteeTest$ThreadSafetyGuarantees
-
-# Run with verbose output
-mvn test -Dtest=EnhancedProtectionTest -Dsurefire.useFile=false
-```
-
-### Chaos Tests (WalChaos)
-
-WalChaos is an interactive chaos testing suite that runs as a standalone Java application:
-
-```bash
-# Build the demo module
-mvn package -pl raftlog-demo -am -DskipTests
-
-# Run all 38 chaos tests
-java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos
-
-# Run specific category
-java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos concurrent
-java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos corruption
-java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos boundary
-java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos stress
-```
-
-**WalChaos Output:**
-- Creates temporary directory for test files
-- Runs tests with real-time pass/fail indication
-- Reports total passed/failed at end
-- Returns exit code 0 on success, 1 on any failure
-- Automatically cleans up temporary files
 
 ---
 
