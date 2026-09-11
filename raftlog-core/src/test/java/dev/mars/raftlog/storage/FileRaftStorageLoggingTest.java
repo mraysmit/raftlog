@@ -16,6 +16,7 @@
 package dev.mars.raftlog.storage;
 
 import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import org.junit.jupiter.api.AfterEach;
@@ -145,6 +146,48 @@ class FileRaftStorageLoggingTest {
         assertFalse(message.contains(".. Storage"), message);
     }
 
+    @Test
+    void operationsCarryCorrelationAndStableEventFields() throws Exception {
+        FileRaftStorage storage = new FileRaftStorage();
+        await(storage.open(dir));
+        await(storage.appendEntries(List.of(new RaftStorage.LogEntryData(1, 1, new byte[]{1}))));
+        await(storage.sync());
+        closeAndAwait(storage);
+
+        ILoggingEvent opened = eventStartingWith("WAL opened successfully:");
+        assertFalse(opened.getMDCPropertyMap().get("storageId").isBlank());
+        assertTrue(opened.getMDCPropertyMap().get("operationId").startsWith("open-"));
+        assertEquals(dir.toAbsolutePath().normalize().toString(), opened.getMDCPropertyMap().get("storagePath"));
+        assertKeyValue(opened, "event", "storage.open.completed");
+
+        ILoggingEvent appended = eventStartingWith("Appended 1 entries to WAL:");
+        assertEquals(Level.DEBUG, appended.getLevel());
+        assertTrue(appended.getMDCPropertyMap().get("operationId").startsWith("append-"));
+        assertKeyValue(appended, "event", "wal.append.completed");
+
+        ILoggingEvent closed = eventStartingWith("WAL storage closed:");
+        assertTrue(closed.getFormattedMessage().contains("cleanupSucceeded=true"));
+        assertTrue(closed.getMDCPropertyMap().get("operationId").startsWith("close-"));
+        assertKeyValue(closed, "event", "storage.close.completed");
+    }
+
+    @Test
+    void truncatedMetadataHasExplicitCorruptionLog() throws Exception {
+        FileRaftStorage storage = new FileRaftStorage();
+        await(storage.open(dir));
+        Files.write(dir.resolve("meta.dat"), new byte[]{1, 2, 3});
+        try {
+            ExecutionException failure = assertThrows(ExecutionException.class, () -> await(storage.loadMetadata()));
+            assertTrue(failure.getCause() instanceof FileRaftStorage.StorageException);
+        } finally {
+            closeAndAwait(storage);
+        }
+
+        ILoggingEvent corrupt = eventStartingWith("Corrupt metadata: file is 3 bytes");
+        assertEquals(Level.ERROR, corrupt.getLevel());
+        assertKeyValue(corrupt, "event", "metadata.corrupt");
+    }
+
     private List<String> metadataVoteMessages() {
         return appender.list.stream()
                 .map(ILoggingEvent::getFormattedMessage)
@@ -152,6 +195,19 @@ class FileRaftStorageLoggingTest {
                         || message.startsWith("Metadata updated:")
                         || message.startsWith("Metadata loaded:"))
                 .toList();
+    }
+
+    private ILoggingEvent eventStartingWith(String prefix) {
+        return appender.list.stream()
+                .filter(event -> event.getFormattedMessage().startsWith(prefix))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("Expected log starting with: " + prefix));
+    }
+
+    private static void assertKeyValue(ILoggingEvent event, String key, Object value) {
+        assertTrue(event.getKeyValuePairs().stream()
+                        .anyMatch(pair -> key.equals(pair.key) && value.equals(pair.value)),
+                () -> "Expected " + key + "=" + value + " in " + event.getKeyValuePairs());
     }
 
     private static <T> T await(CompletableFuture<T> future) throws Exception {

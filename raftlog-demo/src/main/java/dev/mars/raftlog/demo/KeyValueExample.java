@@ -27,6 +27,7 @@ import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -101,7 +102,7 @@ public final class KeyValueExample {
                 long index = nextIndex++;
                 records.add(new LogEntryData(index, 1, payload));
                 encodedPayloadBytes = Math.addExact(encodedPayloadBytes, payload.length);
-                LOG.info("Prepared record: index={}, term=1, key={}, value={}, payloadBytes={}",
+                LOG.debug("Prepared record: index={}, term=1, key={}, value={}, payloadBytes={}",
                         index, write.key(), write.value(), payload.length);
             }
             LOG.info("Append plan: records={}, indexRange={}-{}, term=1, encodedPayloadBytes={}",
@@ -114,15 +115,23 @@ public final class KeyValueExample {
             LOG.info("Durability barrier completed: records={}, indexRange={}-{}, encodedPayloadBytes={}, elapsedMs={}",
                     records.size(), records.get(0).index(), records.get(records.size() - 1).index(),
                     encodedPayloadBytes, elapsedMillis(syncStarted));
+            for (int i = 0; i < records.size(); i++) {
+                LogEntryData record = records.get(i);
+                KeyValue write = writes.get(i);
+                LOG.debug("Durable record: index={}, term={}, key={}, value={}, payloadBytes={}",
+                        record.index(), record.term(), write.key(), write.value(), record.payload().length);
+            }
 
             List<LogEntryData> replayed = storage.replayLog().join();
+            verifyAppendedRecords(records, replayed);
             Map<String, String> currentState = materialize(replayed);
             LOG.info("Final replay summary: records={}, currentKeys={}, overwrittenKeys={}, indexRange={}-{}",
                     replayed.size(), currentState.size(), replayed.size() - currentState.size(),
                     replayed.get(0).index(), lastIndex(replayed));
-            LOG.info("Last-write-wins result: key=ui.theme, value={}", currentState.get("ui.theme"));
-            LOG.info("Current key/value state:");
-            currentState.forEach((key, value) -> LOG.info("  key={}, value={}", key, value));
+            LOG.info("Last-write-wins result computed for key=ui.theme; enable DEBUG to inspect its value");
+            LOG.debug("Last-write-wins result: key=ui.theme, value={}", currentState.get("ui.theme"));
+            LOG.debug("Current key/value state:");
+            currentState.forEach((key, value) -> LOG.debug("  key={}, value={}", key, value));
             LOG.info("Key/value WAL example completed: appendedRecords={}, resultingRecords={}, "
                             + "currentKeys={}, dataDir={}, elapsedMs={}",
                     records.size(), replayed.size(), currentState.size(), dataDir.toAbsolutePath(),
@@ -202,5 +211,26 @@ public final class KeyValueExample {
 
     private static long elapsedMillis(long startedNanos) {
         return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
+    }
+
+    private static void verifyAppendedRecords(List<LogEntryData> expected, List<LogEntryData> replayed) {
+        if (replayed.size() < expected.size()) {
+            throw new IllegalStateException("Replay returned fewer records than were appended");
+        }
+
+        int replayStart = replayed.size() - expected.size();
+        for (int i = 0; i < expected.size(); i++) {
+            LogEntryData written = expected.get(i);
+            LogEntryData recovered = replayed.get(replayStart + i);
+            if (written.index() != recovered.index()
+                    || written.term() != recovered.term()
+                    || !Arrays.equals(written.payload(), recovered.payload())) {
+                throw new IllegalStateException("Replay mismatch for appended record at index " + written.index());
+            }
+
+            KeyValue value = decode(recovered.payload());
+            LOG.debug("Read-back verified record: index={}, term={}, key={}, value={}, payloadBytes={}",
+                    recovered.index(), recovered.term(), value.key(), value.value(), recovered.payload().length);
+        }
     }
 }

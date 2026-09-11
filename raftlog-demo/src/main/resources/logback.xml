@@ -1,7 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
-    <statusListener class="ch.qos.logback.core.status.OnConsoleStatusListener"/>
-
     <property name="LOG_DIR" value="${RAFTLOG_LOG_DIR:-${user.dir}/logs}"/>
     <property name="INSTANCE_ID" value="${RAFTLOG_INSTANCE_ID:-${HOSTNAME:-local}}"/>
     <property name="LOG_BASE" value="${LOG_DIR}/raftlog-demo-${INSTANCE_ID}"/>
@@ -10,7 +8,7 @@
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
         <encoder>
             <charset>UTF-8</charset>
-            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36}%replace( [%X{agentId}]){' \[\]', ''}%replace( [%X{requestId}]){' \[\]', ''} - %msg%n</pattern>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36}%replace( [%X{storageId}]){' \[\]', ''}%replace( [%X{operationId}]){' \[\]', ''}%replace( [%X{agentId}]){' \[\]', ''}%replace( [%X{requestId}]){' \[\]', ''} %kvp - %msg%n</pattern>
         </encoder>
     </appender>
     
@@ -25,7 +23,7 @@
         </rollingPolicy>
         <encoder>
             <charset>UTF-8</charset>
-            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36}%replace( [%X{agentId}]){' \[\]', ''}%replace( [%X{requestId}]){' \[\]', ''} - %msg%n</pattern>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36}%replace( [%X{storageId}]){' \[\]', ''}%replace( [%X{operationId}]){' \[\]', ''}%replace( [%X{agentId}]){' \[\]', ''}%replace( [%X{requestId}]){' \[\]', ''} %kvp - %msg%n</pattern>
         </encoder>
     </appender>
     
@@ -45,6 +43,7 @@
                 <loggerName/>
                 <message/>
                 <mdc/>
+                <keyValuePairs/>
                 <arguments/>
                 <stackTrace/>
             </providers>
@@ -63,4 +62,3 @@
         <appender-ref ref="JSON"/>
     </root>
 </configuration>
-

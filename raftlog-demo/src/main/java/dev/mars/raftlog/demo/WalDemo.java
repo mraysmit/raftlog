@@ -23,6 +23,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
@@ -122,7 +123,7 @@ public class WalDemo {
                 int start = Math.max(0, existingEntries.size() - 3);
                 for (int i = start; i < existingEntries.size(); i++) {
                     LogEntryData entry = existingEntries.get(i);
-                    LOG.info("    Existing entry: index={}, term={}, payloadBytes={}, payloadPreview={}",
+                    LOG.debug("    Existing entry: index={}, term={}, payloadBytes={}, payloadPreview={}",
                             entry.index(), entry.term(), entry.payload().length, payloadPreview(entry));
                 }
             }
@@ -142,7 +143,7 @@ public class WalDemo {
             LOG.info("Step 5/5: Appending {} entries: indexRange={}-{}, term={}",
                     newEntries.size(), nextIndex, newEntries.get(newEntries.size() - 1).index(), newTerm);
             for (LogEntryData entry : newEntries) {
-                LOG.info("Prepared entry: index={}, term={}, payloadBytes={}, command={}",
+                LOG.debug("Prepared entry: index={}, term={}, payloadBytes={}, command={}",
                         entry.index(), entry.term(), entry.payload().length, payloadPreview(entry));
             }
 
@@ -154,15 +155,17 @@ public class WalDemo {
             LOG.info("Durability barrier completed: entries={}, indexRange={}-{}, elapsedMs={}",
                     newEntries.size(), nextIndex, newEntries.get(newEntries.size() - 1).index(), syncElapsedMs);
 
-            // Show what was appended
+            // Show what crossed the durability barrier
             LOG.info("");
-            LOG.info("  New entries appended:");
+            LOG.info("  Durable entries:");
             for (LogEntryData entry : newEntries) {
-                LOG.info("    Appended entry: index={}, term={}, payloadBytes={}, payloadPreview={}",
+                LOG.debug("    Durable entry: index={}, term={}, payloadBytes={}, payloadPreview={}",
                         entry.index(), entry.term(), entry.payload().length, payloadPreview(entry));
             }
 
-            long resultingEntryCount = Math.addExact(existingEntries.size(), newEntries.size());
+            List<LogEntryData> resultingEntries = storage.replayLog().join();
+            verifyAppendedEntries(newEntries, resultingEntries);
+            long resultingEntryCount = resultingEntries.size();
             LOG.info("WAL example completed: previousEntries={}, appendedEntries={}, resultingEntries={}, "
                             + "lastIndex={}, elapsedMs={}",
                     existingEntries.size(), newEntries.size(), resultingEntryCount,
@@ -197,5 +200,25 @@ public class WalDemo {
 
     private static long elapsedMillis(long startedNanos) {
         return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
+    }
+
+    private static void verifyAppendedEntries(List<LogEntryData> expected, List<LogEntryData> replayed) {
+        if (replayed.size() < expected.size()) {
+            throw new IllegalStateException("Replay returned fewer entries than were appended");
+        }
+
+        int replayStart = replayed.size() - expected.size();
+        for (int i = 0; i < expected.size(); i++) {
+            LogEntryData written = expected.get(i);
+            LogEntryData recovered = replayed.get(replayStart + i);
+            if (written.index() != recovered.index()
+                    || written.term() != recovered.term()
+                    || !Arrays.equals(written.payload(), recovered.payload())) {
+                throw new IllegalStateException("Replay mismatch for appended entry at index " + written.index());
+            }
+
+            LOG.debug("Read-back verified entry: index={}, term={}, payloadBytes={}, payloadPreview={}",
+                    recovered.index(), recovered.term(), recovered.payload().length, payloadPreview(recovered));
+        }
     }
 }
