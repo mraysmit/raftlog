@@ -32,6 +32,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Writes string key/value pairs as opaque WAL payloads and rebuilds the latest
@@ -56,6 +57,7 @@ public final class KeyValueExample {
     }
 
     public static void main(String[] args) {
+        long exampleStarted = System.nanoTime();
         Path dataDir = args.length > 0 && !args[0].isBlank()
                 ? Path.of(args[0])
                 : DEFAULT_DATA_DIR;
@@ -63,6 +65,12 @@ public final class KeyValueExample {
         RaftStorageConfig config = RaftStorageConfig.builder()
                 .dataDir(dataDir)
                 .build();
+
+        LOG.info("Starting key/value WAL example: dataDir={}, syncEnabled={}, verifyWrites={}, "
+                        + "minFreeSpaceMb={}, maxPayloadSizeMb={}",
+                dataDir.toAbsolutePath(), config.syncEnabled(), config.verifyWrites(),
+                config.minFreeSpaceMb(), config.maxPayloadSizeMb());
+        LOG.info("Encoding: length-prefixed UTF-8 key and value; replay policy=last-write-wins");
 
         List<KeyValue> writes = List.of(
                 new KeyValue("user.name", "Alice"),
@@ -75,26 +83,50 @@ public final class KeyValueExample {
                 new KeyValue("ui.theme", "light"));
 
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
+            LOG.info("Opening WAL storage and acquiring its exclusive lock");
             storage.open().join();
 
             List<LogEntryData> existing = storage.replayLog().join();
+            Map<String, String> initialState = materialize(existing);
+            LOG.info("Initial replay summary: records={}, currentKeys={}, overwrittenKeys={}, lastIndex={}",
+                    existing.size(), initialState.size(), existing.size() - initialState.size(), lastIndex(existing));
             long nextIndex = existing.isEmpty()
                     ? 1
                     : Math.addExact(existing.get(existing.size() - 1).index(), 1);
 
             List<LogEntryData> records = new ArrayList<>(writes.size());
+            long encodedPayloadBytes = 0;
             for (KeyValue write : writes) {
-                records.add(new LogEntryData(nextIndex++, 1, encode(write)));
-                LOG.info("Writing {}={}", write.key(), write.value());
+                byte[] payload = encode(write);
+                long index = nextIndex++;
+                records.add(new LogEntryData(index, 1, payload));
+                encodedPayloadBytes = Math.addExact(encodedPayloadBytes, payload.length);
+                LOG.info("Prepared record: index={}, term=1, key={}, value={}, payloadBytes={}",
+                        index, write.key(), write.value(), payload.length);
             }
+            LOG.info("Append plan: records={}, indexRange={}-{}, term=1, encodedPayloadBytes={}",
+                    records.size(), records.get(0).index(), records.get(records.size() - 1).index(),
+                    encodedPayloadBytes);
 
             storage.appendEntries(records).join();
+            long syncStarted = System.nanoTime();
             storage.sync().join();
-            LOG.info("Durably wrote {} key/value records to {}", records.size(), dataDir.toAbsolutePath());
+            LOG.info("Durability barrier completed: records={}, indexRange={}-{}, encodedPayloadBytes={}, elapsedMs={}",
+                    records.size(), records.get(0).index(), records.get(records.size() - 1).index(),
+                    encodedPayloadBytes, elapsedMillis(syncStarted));
 
-            Map<String, String> currentState = materialize(storage.replayLog().join());
-            LOG.info("Replayed {} current key/value pairs:", currentState.size());
-            currentState.forEach((key, value) -> LOG.info("  {}={}", key, value));
+            List<LogEntryData> replayed = storage.replayLog().join();
+            Map<String, String> currentState = materialize(replayed);
+            LOG.info("Final replay summary: records={}, currentKeys={}, overwrittenKeys={}, indexRange={}-{}",
+                    replayed.size(), currentState.size(), replayed.size() - currentState.size(),
+                    replayed.get(0).index(), lastIndex(replayed));
+            LOG.info("Last-write-wins result: key=ui.theme, value={}", currentState.get("ui.theme"));
+            LOG.info("Current key/value state:");
+            currentState.forEach((key, value) -> LOG.info("  key={}, value={}", key, value));
+            LOG.info("Key/value WAL example completed: appendedRecords={}, resultingRecords={}, "
+                            + "currentKeys={}, dataDir={}, elapsedMs={}",
+                    records.size(), replayed.size(), currentState.size(), dataDir.toAbsolutePath(),
+                    elapsedMillis(exampleStarted));
         }
     }
 
@@ -162,5 +194,13 @@ public final class KeyValueExample {
 
     private static IllegalArgumentException malformedPayload() {
         return new IllegalArgumentException("Malformed key/value WAL payload");
+    }
+
+    private static String lastIndex(List<LogEntryData> entries) {
+        return entries.isEmpty() ? "(none)" : Long.toString(entries.get(entries.size() - 1).index());
+    }
+
+    private static long elapsedMillis(long startedNanos) {
+        return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
     }
 }
