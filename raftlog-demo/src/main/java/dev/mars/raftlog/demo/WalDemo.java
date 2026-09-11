@@ -25,6 +25,7 @@ import org.slf4j.LoggerFactory;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Demo entry point for the Raft WAL implementation.
@@ -70,8 +71,10 @@ import java.util.Optional;
  */
 public class WalDemo {
     private static final Logger LOG = LoggerFactory.getLogger(WalDemo.class);
+    private static final int PAYLOAD_PREVIEW_LIMIT = 120;
 
     public static void main(String[] args) throws Exception {
+        long exampleStarted = System.nanoTime();
         LOG.info("+---------------------------------------+");
         LOG.info("|           Raft WAL Demo               |");
         LOG.info("+---------------------------------------+");
@@ -82,69 +85,117 @@ public class WalDemo {
                 ? RaftStorageConfig.builder().dataDir(args[0]).build()
                 : RaftStorageConfig.load();
 
-        LOG.info("Configuration: {}", config);
+        LOG.info("Starting Raft WAL example: dataDir={}, syncEnabled={}, verifyWrites={}, "
+                        + "minFreeSpaceMb={}, maxPayloadSizeMb={}",
+                config.dataDir().toAbsolutePath(), config.syncEnabled(), config.verifyWrites(),
+                config.minFreeSpaceMb(), config.maxPayloadSizeMb());
         LOG.info("");
 
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             // Open storage using config's data directory
+            LOG.info("Step 1/5: Opening WAL storage and acquiring its exclusive lock");
             storage.open().join();
             LOG.info("[OK] Storage opened at: {}", config.dataDir().toAbsolutePath());
 
             // Load existing metadata
+            LOG.info("Step 2/5: Loading persistent Raft metadata");
             PersistentMeta meta = storage.loadMetadata().join();
             LOG.info("[OK] Loaded metadata: term={}, votedFor={}", meta.currentTerm(),
                     meta.votedFor().orElse("(none)"));
 
             // Update metadata (simulate term increment)
-            long newTerm = meta.currentTerm() + 1;
+            long newTerm = Math.addExact(meta.currentTerm(), 1);
+            LOG.info("Step 3/5: Persisting metadata transition: term {} -> {}, votedFor {} -> node-1",
+                    meta.currentTerm(), newTerm, meta.votedFor().orElse("(none)"));
             storage.updateMetadata(newTerm, Optional.of("node-1")).join();
             LOG.info("[OK] Updated metadata: term={}, votedFor=node-1", newTerm);
 
             // Replay existing log
+            LOG.info("Step 4/5: Replaying WAL entries in index order");
             List<LogEntryData> existingEntries = storage.replayLog().join();
-            LOG.info("[OK] Replayed {} existing entries", existingEntries.size());
+            logReplaySummary(existingEntries);
 
-                // Show last few entries if any exist
+            // Show last few entries if any exist
             if (!existingEntries.isEmpty()) {
                 LOG.info("");
                 LOG.info("  Last entries in log:");
                 int start = Math.max(0, existingEntries.size() - 3);
                 for (int i = start; i < existingEntries.size(); i++) {
                     LogEntryData entry = existingEntries.get(i);
-                    String payload = new String(entry.payload(), StandardCharsets.UTF_8);
-                    LOG.info("    [{}] term={}: {}", entry.index(), entry.term(), payload);
+                    LOG.info("    Existing entry: index={}, term={}, payloadBytes={}, payloadPreview={}",
+                            entry.index(), entry.term(), entry.payload().length, payloadPreview(entry));
                 }
             }
 
             // Append new entries
-            long nextIndex = existingEntries.isEmpty() ? 1 : 
-                    existingEntries.get(existingEntries.size() - 1).index() + 1;
+            long nextIndex = existingEntries.isEmpty() ? 1 :
+                    Math.addExact(existingEntries.get(existingEntries.size() - 1).index(), 1);
 
             List<LogEntryData> newEntries = List.of(
-                    new LogEntryData(nextIndex, newTerm, 
+                    new LogEntryData(nextIndex, newTerm,
                             ("SET key" + nextIndex + " value" + nextIndex).getBytes(StandardCharsets.UTF_8)),
-                    new LogEntryData(nextIndex + 1, newTerm, 
-                            ("SET key" + (nextIndex + 1) + " value" + (nextIndex + 1)).getBytes(StandardCharsets.UTF_8))
+                    new LogEntryData(Math.addExact(nextIndex, 1), newTerm,
+                            ("SET key" + Math.addExact(nextIndex, 1) + " value" + Math.addExact(nextIndex, 1))
+                                    .getBytes(StandardCharsets.UTF_8))
             );
 
+            LOG.info("Step 5/5: Appending {} entries: indexRange={}-{}, term={}",
+                    newEntries.size(), nextIndex, newEntries.get(newEntries.size() - 1).index(), newTerm);
+            for (LogEntryData entry : newEntries) {
+                LOG.info("Prepared entry: index={}, term={}, payloadBytes={}, command={}",
+                        entry.index(), entry.term(), entry.payload().length, payloadPreview(entry));
+            }
+
             storage.appendEntries(newEntries).join();
+            long syncStarted = System.nanoTime();
             storage.sync().join(); // Durability barrier
+            long syncElapsedMs = elapsedMillis(syncStarted);
             LOG.info("");
-            LOG.info("[OK] Appended {} entries (indices {}-{})", newEntries.size(), nextIndex, nextIndex + 1);
+            LOG.info("Durability barrier completed: entries={}, indexRange={}-{}, elapsedMs={}",
+                    newEntries.size(), nextIndex, newEntries.get(newEntries.size() - 1).index(), syncElapsedMs);
 
             // Show what was appended
             LOG.info("");
             LOG.info("  New entries appended:");
             for (LogEntryData entry : newEntries) {
-                String payload = new String(entry.payload(), StandardCharsets.UTF_8);
-                LOG.info("    [{}] term={}: {}", entry.index(), entry.term(), payload);
+                LOG.info("    Appended entry: index={}, term={}, payloadBytes={}, payloadPreview={}",
+                        entry.index(), entry.term(), entry.payload().length, payloadPreview(entry));
             }
 
+            long resultingEntryCount = Math.addExact(existingEntries.size(), newEntries.size());
+            LOG.info("WAL example completed: previousEntries={}, appendedEntries={}, resultingEntries={}, "
+                            + "lastIndex={}, elapsedMs={}",
+                    existingEntries.size(), newEntries.size(), resultingEntryCount,
+                    newEntries.get(newEntries.size() - 1).index(), elapsedMillis(exampleStarted));
             LOG.info("");
             LOG.info("+---------------------------------------+");
             LOG.info("|  WAL demo complete!                   |");
             LOG.info("|  Run again to see entries replayed.   |");
             LOG.info("+---------------------------------------+");
         }
+    }
+
+    private static void logReplaySummary(List<LogEntryData> entries) {
+        if (entries.isEmpty()) {
+            LOG.info("Replay summary: entries=0, indexRange=(empty), termRange=(empty)");
+            return;
+        }
+
+        long minTerm = entries.stream().mapToLong(LogEntryData::term).min().orElseThrow();
+        long maxTerm = entries.stream().mapToLong(LogEntryData::term).max().orElseThrow();
+        LOG.info("Replay summary: entries={}, indexRange={}-{}, termRange={}-{}",
+                entries.size(), entries.get(0).index(), entries.get(entries.size() - 1).index(), minTerm, maxTerm);
+    }
+
+    private static String payloadPreview(LogEntryData entry) {
+        String payload = new String(entry.payload(), StandardCharsets.UTF_8)
+                .replace("\r", "\\r")
+                .replace("\n", "\\n");
+        if (payload.length() <= PAYLOAD_PREVIEW_LIMIT) return payload;
+        return payload.substring(0, PAYLOAD_PREVIEW_LIMIT) + "…";
+    }
+
+    private static long elapsedMillis(long startedNanos) {
+        return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
     }
 }
