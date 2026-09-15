@@ -18,7 +18,7 @@ RaftLog provides the durability core for Raft-based distributed systems. It impl
 
 ## Requirements
 
-- Java 21 or later
+- Java 25 or later
 - Maven 3.8+
 
 ## Maven Coordinates

@@ -25,7 +25,7 @@ Keep historical evidence intact and distinguish this release from earlier claims
 
 Before performing a release, ensure you have:
 
-- **Java 21+** installed and configured
+- **Java 25+** installed and configured
 - **Maven 3.8.0+** installed
 - **Git** configured with push access to the repository
 - **GPG** installed (for signing releases)
@@ -34,7 +34,7 @@ Before performing a release, ensure you have:
 ### Verify Your Environment
 
 ```bash
-# Check Java version (must be 21+)
+# Check Java version (must be 25+)
 java -version
 
 # Check Maven version (must be 3.8.0+)
