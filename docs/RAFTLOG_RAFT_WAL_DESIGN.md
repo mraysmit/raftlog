@@ -7,7 +7,7 @@
 
 RaftLog is a small Java library that provides the persistence layer for a Raft consensus implementation. It stores the three pieces of state that the Raft protocol requires a server to keep on stable storage, `currentTerm`, `votedFor` and the replicated log, and it guarantees that once it reports an operation complete, that state will survive a process crash and, subject to the filesystem's own guarantees, a power loss.
 
-It is published as `io.github.mraysmit:raftlog-core`, requires Java 21, is licensed under Apache 2.0, and has no framework dependency. A single class, `FileRaftStorage`, implements a single interface, `RaftStorage`, on top of two files in a directory. The whole library can be read in an afternoon, and that is deliberate.
+It is published as `io.github.mraysmit:raftlog-core`, requires Java 25, is licensed under Apache 2.0, and has no framework dependency. A single class, `FileRaftStorage`, implements a single interface, `RaftStorage`, on top of two files in a directory. The whole library can be read in an afternoon, and that is deliberate.
 
 ### Background
 
@@ -2309,7 +2309,7 @@ WantedBy=multi-user.target
 | **Network** | Raft ports open between nodes | `nc -zv node-2 9080` |
 | **Firewall** | Ports 8080, 9080 allowed | `iptables -L -n` |
 | **DNS/Hosts** | Peer hostnames resolvable | `getent hosts node-2` |
-| **JVM** | Java 21+ installed | `java -version` |
+| **JVM** | Java 25+ installed | `java -version` |
 
 ### D.6 Path Handling Safety
 

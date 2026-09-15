@@ -1,7 +1,7 @@
 # RaftLog - AI Agent Instructions
 
 ## Project Overview
-RaftLog is a minimal, crash-safe Write-Ahead Log (WAL) for Raft consensus in Java 21. It implements **only** append, truncate (suffix deletion), and sequential replay—it is **not** a general-purpose storage engine.
+RaftLog is a minimal, crash-safe Write-Ahead Log (WAL) for Raft consensus in Java 25. It implements **only** append, truncate (suffix deletion), and sequential replay—it is **not** a general-purpose storage engine.
 
 **Integration context:** Designed for Vert.x 5.x Raft implementations. WAL operations are blocking and should run on a dedicated `WorkerExecutor` while Raft logic remains on the event loop.
 
