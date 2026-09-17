@@ -25,8 +25,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.LoggerFactory;
 
-import java.nio.channels.FileChannel;
-import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -40,7 +38,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /** Edge-case coverage for bounded, unambiguous, single-line operational logs. */
 class FileRaftStorageLoggingTest {
@@ -214,19 +211,8 @@ class FileRaftStorageLoggingTest {
         return future.get(10, TimeUnit.SECONDS);
     }
 
-    private void closeAndAwait(FileRaftStorage storage) throws Exception {
-        storage.close();
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-        try (FileChannel channel = FileChannel.open(dir.resolve("raft.lock"), StandardOpenOption.WRITE)) {
-            while (System.nanoTime() < deadline) {
-                try (var lock = channel.tryLock()) {
-                    if (lock != null) return;
-                } catch (OverlappingFileLockException pendingClose) {
-                    // The executor is still closing the prior instance.
-                }
-                Thread.sleep(5);
-            }
-        }
-        fail("Storage did not release its lock after close");
+    /** Waits for close to finish so the executor emits no further log events. */
+    private static void closeAndAwait(FileRaftStorage storage) throws Exception {
+        await(storage.closeAsync());
     }
 }

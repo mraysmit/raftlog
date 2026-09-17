@@ -886,6 +886,8 @@ class HighCoverageTest {
                     storage.appendEntries(List.of(new LogEntryData(1, 1, tooLarge))).get(5, TimeUnit.SECONDS));
 
             assertTrue(ex.getCause() instanceof StorageException);
+            WriteRejection rejection = assertInstanceOf(WriteRejection.class, ex.getCause());
+            assertEquals(WriteRejectionReason.PAYLOAD_TOO_LARGE, rejection.reason());
             assertTrue(ex.getCause().getMessage().contains("Payload too large"));
 
             storage.close();

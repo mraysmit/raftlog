@@ -110,7 +110,7 @@ for (var entry : replayed) {
 }
 
 // Close when done
-storage.close();
+storage.closeAsync().join();
 ```
 
 ## Prefix compaction
