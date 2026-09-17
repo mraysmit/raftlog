@@ -34,6 +34,8 @@ import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
@@ -124,13 +126,15 @@ class ProtectionGuaranteeTest {
     class ThreadSafetyGuarantees {
 
         @Test
-        @DisplayName("G1: Write serialization - concurrent appends produce valid log")
+        @DisplayName("G1: Write serialization - racing appenders cannot produce a malformed log")
         void writeSerializationConcurrentAppends() throws Exception {
             int numThreads = 20;
             int entriesPerThread = 50;
             ExecutorService executor = Executors.newFixedThreadPool(numThreads);
             CyclicBarrier barrier = new CyclicBarrier(numThreads);
             AtomicInteger indexCounter = new AtomicInteger(1);
+            AtomicInteger accepted = new AtomicInteger(0);
+            AtomicInteger rejected = new AtomicInteger(0);
             AtomicInteger failures = new AtomicInteger(0);
 
             List<Future<?>> futures = new ArrayList<>();
@@ -141,9 +145,15 @@ class ProtectionGuaranteeTest {
                         barrier.await(); // Start all threads simultaneously
                         for (int i = 0; i < entriesPerThread; i++) {
                             int idx = indexCounter.getAndIncrement();
-                            storage.appendEntries(List.of(
-                                    new LogEntryData(idx, 1, ("thread-data-" + idx).getBytes())
-                            )).get(5, TimeUnit.SECONDS);
+                            try {
+                                storage.appendEntries(List.of(
+                                        new LogEntryData(idx, 1, ("thread-data-" + idx).getBytes())
+                                )).get(5, TimeUnit.SECONDS);
+                                accepted.incrementAndGet();
+                            } catch (ExecutionException e) {
+                                if (isRejection(e, WriteRejectionReason.INDEX_NOT_CONTIGUOUS)) rejected.incrementAndGet();
+                                else failures.incrementAndGet();
+                            }
                         }
                     } catch (Exception e) {
                         failures.incrementAndGet();
@@ -160,12 +170,13 @@ class ProtectionGuaranteeTest {
 
             storage.sync().get(5, TimeUnit.SECONDS);
 
-            // Verify: all entries should be written and recoverable
+            // Verify: whichever appends won the race, the log is a contiguous Raft log
             List<LogEntryData> replayed = storage.replayLog().get(10, TimeUnit.SECONDS);
 
-            assertEquals(0, failures.get(), "No thread should have failed");
-            assertEquals(numThreads * entriesPerThread, replayed.size(),
-                    "All entries should be persisted");
+            assertEquals(0, failures.get(), "Only INDEX_NOT_CONTIGUOUS rejections are acceptable");
+            assertEquals(numThreads * entriesPerThread, accepted.get() + rejected.get());
+            assertEquals(accepted.get(), replayed.size(), "Exactly the accepted entries are persisted");
+            assertContiguous(replayed);
 
             // Verify each entry is intact (CRC validates on replay)
             for (LogEntryData entry : replayed) {
@@ -180,10 +191,11 @@ class ProtectionGuaranteeTest {
             int numThreads = 10;
             int entriesPerThread = 20;
             int payloadSize = 1000; // Large enough to potentially interleave if not serialized
-            
+
             ExecutorService executor = Executors.newFixedThreadPool(numThreads);
             CyclicBarrier barrier = new CyclicBarrier(numThreads);
             AtomicInteger indexCounter = new AtomicInteger(1);
+            AtomicInteger accepted = new AtomicInteger(0);
 
             List<Future<?>> futures = new ArrayList<>();
 
@@ -200,9 +212,15 @@ class ProtectionGuaranteeTest {
                             for (int j = 0; j < payloadSize; j++) {
                                 payload[j] = marker;
                             }
-                            storage.appendEntries(List.of(
-                                    new LogEntryData(idx, threadId + 1, payload)
-                            )).get(5, TimeUnit.SECONDS);
+                            try {
+                                storage.appendEntries(List.of(
+                                        new LogEntryData(idx, 1, payload)
+                                )).get(5, TimeUnit.SECONDS);
+                                accepted.incrementAndGet();
+                            } catch (ExecutionException e) {
+                                // Losing the race for the tail is refused, never reordered.
+                                if (!isRejection(e, WriteRejectionReason.INDEX_NOT_CONTIGUOUS)) throw e;
+                            }
                         }
                     } catch (Exception e) {
                         throw new RuntimeException(e);
@@ -218,6 +236,8 @@ class ProtectionGuaranteeTest {
 
             // Verify: each payload should be uniform (no interleaving)
             List<LogEntryData> replayed = storage.replayLog().get(10, TimeUnit.SECONDS);
+            assertEquals(accepted.get(), replayed.size());
+            assertContiguous(replayed);
 
             for (LogEntryData entry : replayed) {
                 byte[] payload = entry.payload();
@@ -230,14 +250,15 @@ class ProtectionGuaranteeTest {
         }
 
         @Test
-        @DisplayName("G3: Metadata updates are atomic under concurrent access")
+        @DisplayName("G3: Metadata updates are atomic under concurrent access and the term never regresses")
         void metadataAtomicUpdates() throws Exception {
             int numThreads = 10;
             int updatesPerThread = 20;
-            
+
             ExecutorService executor = Executors.newFixedThreadPool(numThreads);
             CyclicBarrier barrier = new CyclicBarrier(numThreads);
             AtomicLong termCounter = new AtomicLong(1);
+            Map<Long, String> acceptedVotes = new ConcurrentHashMap<>();
 
             List<Future<?>> futures = new ArrayList<>();
 
@@ -248,8 +269,16 @@ class ProtectionGuaranteeTest {
                         barrier.await();
                         for (int i = 0; i < updatesPerThread; i++) {
                             long term = termCounter.getAndIncrement();
-                            storage.updateMetadata(term, Optional.of(nodeId + "-" + i))
-                                    .get(5, TimeUnit.SECONDS);
+                            String vote = nodeId + "-" + i;
+                            try {
+                                storage.updateMetadata(term, Optional.of(vote)).get(5, TimeUnit.SECONDS);
+                                acceptedVotes.put(term, vote);
+                            } catch (ExecutionException e) {
+                                // A thread that lost the race holds a term the storage has
+                                // already moved past. Persisting it would let the node vote
+                                // twice in one term, so it is refused.
+                                if (!isRejection(e, WriteRejectionReason.TERM_REGRESSION)) throw e;
+                            }
                         }
                     } catch (Exception e) {
                         throw new RuntimeException(e);
@@ -261,6 +290,12 @@ class ProtectionGuaranteeTest {
                 f.get(60, TimeUnit.SECONDS);
             }
             executor.shutdown();
+
+            // Verify: the persisted term is the highest accepted one, with its own vote
+            long highest = acceptedVotes.keySet().stream().mapToLong(Long::longValue).max().orElseThrow();
+            PersistentMeta persisted = storage.loadMetadata().get(5, TimeUnit.SECONDS);
+            assertEquals(highest, persisted.currentTerm());
+            assertEquals(Optional.of(acceptedVotes.get(highest)), persisted.votedFor());
 
             // Verify metadata is valid (not corrupted)
             PersistentMeta meta = storage.loadMetadata().get(5, TimeUnit.SECONDS);
@@ -276,7 +311,7 @@ class ProtectionGuaranteeTest {
         void mixedOperationsSerialized() throws Exception {
             int numThreads = 15;
             int opsPerThread = 30;
-            
+
             ExecutorService executor = Executors.newFixedThreadPool(numThreads);
             CyclicBarrier barrier = new CyclicBarrier(numThreads);
             AtomicInteger indexCounter = new AtomicInteger(1);
@@ -290,22 +325,32 @@ class ProtectionGuaranteeTest {
                         Random localRandom = new Random(42 + threadId);
                         for (int i = 0; i < opsPerThread; i++) {
                             int op = localRandom.nextInt(3);
-                            switch (op) {
-                                case 0 -> {
-                                    int idx = indexCounter.getAndIncrement();
-                                    storage.appendEntries(List.of(
-                                            new LogEntryData(idx, 1, ("mixed-" + idx).getBytes())
-                                    )).get(5, TimeUnit.SECONDS);
+                            try {
+                                switch (op) {
+                                    case 0 -> {
+                                        int idx = indexCounter.getAndIncrement();
+                                        storage.appendEntries(List.of(
+                                                new LogEntryData(idx, 1, ("mixed-" + idx).getBytes())
+                                        )).get(5, TimeUnit.SECONDS);
+                                    }
+                                    case 1 -> {
+                                        storage.truncateSuffix(localRandom.nextInt(100) + 1)
+                                                .get(5, TimeUnit.SECONDS);
+                                    }
+                                    case 2 -> {
+                                        storage.updateMetadata(localRandom.nextInt(100),
+                                                Optional.of("node-" + threadId))
+                                                .get(5, TimeUnit.SECONDS);
+                                    }
                                 }
-                                case 1 -> {
-                                    storage.truncateSuffix(localRandom.nextInt(100) + 1)
-                                            .get(5, TimeUnit.SECONDS);
-                                }
-                                case 2 -> {
-                                    storage.updateMetadata(localRandom.nextInt(100),
-                                            Optional.of("node-" + threadId))
-                                            .get(5, TimeUnit.SECONDS);
-                                }
+                            } catch (ExecutionException e) {
+                                // Random operations against a live log violate Raft's ordering
+                                // rules constantly. Each violation must be refused with a
+                                // reason; anything else is a real failure.
+                                if (!isRejection(e, WriteRejectionReason.INDEX_NOT_CONTIGUOUS,
+                                        WriteRejectionReason.INVALID_TRUNCATION,
+                                        WriteRejectionReason.TERM_REGRESSION,
+                                        WriteRejectionReason.VOTE_CHANGED)) throw e;
                             }
                         }
                     } catch (Exception e) {
@@ -321,9 +366,9 @@ class ProtectionGuaranteeTest {
 
             storage.sync().get(5, TimeUnit.SECONDS);
 
-            // Verify: log and metadata should be in consistent state
-            // (no exceptions on replay means CRCs are valid)
-            assertDoesNotThrow(() -> storage.replayLog().get(10, TimeUnit.SECONDS));
+            // Verify: whatever was refused, what remains is a well-formed Raft log
+            List<LogEntryData> replayed = storage.replayLog().get(10, TimeUnit.SECONDS);
+            assertContiguous(replayed);
             assertDoesNotThrow(() -> storage.loadMetadata().get(5, TimeUnit.SECONDS));
         }
 
@@ -332,11 +377,12 @@ class ProtectionGuaranteeTest {
         void raceConditionStressTest() throws Exception {
             int numThreads = 8;
             int iterations = 100;
-            
+
             ExecutorService executor = Executors.newFixedThreadPool(numThreads);
             CountDownLatch startLatch = new CountDownLatch(1);
             CountDownLatch doneLatch = new CountDownLatch(numThreads);
             AtomicInteger errors = new AtomicInteger(0);
+            AtomicInteger accepted = new AtomicInteger(0);
             AtomicInteger index = new AtomicInteger(1);
 
             for (int t = 0; t < numThreads; t++) {
@@ -345,9 +391,14 @@ class ProtectionGuaranteeTest {
                         startLatch.await();
                         for (int i = 0; i < iterations; i++) {
                             int idx = index.getAndIncrement();
-                            storage.appendEntries(List.of(
-                                    new LogEntryData(idx, 1, ("stress-" + idx).getBytes())
-                            )).get(5, TimeUnit.SECONDS);
+                            try {
+                                storage.appendEntries(List.of(
+                                        new LogEntryData(idx, 1, ("stress-" + idx).getBytes())
+                                )).get(5, TimeUnit.SECONDS);
+                                accepted.incrementAndGet();
+                            } catch (ExecutionException e) {
+                                if (!isRejection(e, WriteRejectionReason.INDEX_NOT_CONTIGUOUS)) errors.incrementAndGet();
+                            }
                         }
                     } catch (Exception e) {
                         errors.incrementAndGet();
@@ -365,7 +416,20 @@ class ProtectionGuaranteeTest {
 
             assertEquals(0, errors.get());
             List<LogEntryData> replayed = storage.replayLog().get(10, TimeUnit.SECONDS);
-            assertEquals(numThreads * iterations, replayed.size());
+            assertEquals(accepted.get(), replayed.size());
+            assertContiguous(replayed);
+        }
+
+        private boolean isRejection(ExecutionException failure, WriteRejectionReason... reasons) {
+            if (!(failure.getCause() instanceof FileRaftStorage.WriteRejectedException rejected)) return false;
+            for (WriteRejectionReason reason : reasons) if (rejected.reason() == reason) return true;
+            return false;
+        }
+
+        private void assertContiguous(List<LogEntryData> log) {
+            for (int i = 0; i < log.size(); i++) {
+                assertEquals(i + 1, log.get(i).index(), "log must be contiguous from index 1");
+            }
         }
     }
 
@@ -494,7 +558,7 @@ class ProtectionGuaranteeTest {
                 )).get(5, TimeUnit.SECONDS);
             }
             storage.sync().get(5, TimeUnit.SECONDS);
-            
+
             long validSize = Files.size(tempDir.resolve("raft.log"));
             storage.close();
 
@@ -607,12 +671,12 @@ class ProtectionGuaranteeTest {
                     )).get(5, TimeUnit.SECONDS);
                 }
                 storage.sync().get(5, TimeUnit.SECONDS);
-                
+
                 // Simulate restart
                 storage.close();
                 storage = new FileRaftStorage(true);
                 storage.open(tempDir).get(5, TimeUnit.SECONDS);
-                
+
                 // Replay and verify
                 List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
                 assertEquals((cycle + 1) * 10, replayed.size());
@@ -624,17 +688,17 @@ class ProtectionGuaranteeTest {
         void gracefulDiskFullHandling() throws Exception {
             // We can't actually fill the disk, but we can test that IOExceptions
             // are properly wrapped and don't corrupt existing data
-            
+
             // Write valid data first
             storage.appendEntries(List.of(
                     new LogEntryData(1, 1, "preserved".getBytes())
             )).get(5, TimeUnit.SECONDS);
             storage.sync().get(5, TimeUnit.SECONDS);
-            
+
             // The executor model ensures that even if one write fails,
             // subsequent operations can proceed (assuming disk space freed)
             // This is a design verification rather than actual disk full test
-            
+
             List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
             assertEquals(1, replayed.size());
         }
@@ -644,10 +708,10 @@ class ProtectionGuaranteeTest {
         void crc32cCollisionResistance() throws Exception {
             // CRC32C can detect all single-bit errors, all double-bit errors,
             // and most burst errors. Test that different payloads produce different CRCs.
-            
+
             Set<Integer> crcs = new HashSet<>();
             CRC32C crc = new CRC32C();
-            
+
             // Generate many different payloads and verify CRC diversity
             Random random = new Random(42);
             for (int i = 0; i < 10000; i++) {
@@ -657,7 +721,7 @@ class ProtectionGuaranteeTest {
                 crc.update(data);
                 crcs.add((int) crc.getValue());
             }
-            
+
             // With 10000 random inputs, we should have high CRC diversity
             // (some collisions expected due to birthday paradox, but not too many)
             assertTrue(crcs.size() > 9000, 
@@ -706,7 +770,7 @@ class ProtectionGuaranteeTest {
         void writeOrderPreserved() throws Exception {
             int numEntries = 1000;
             List<CompletableFuture<Void>> futures = new ArrayList<>();
-            
+
             // Submit entries in order
             for (int i = 1; i <= numEntries; i++) {
                 final int idx = i;
@@ -714,14 +778,14 @@ class ProtectionGuaranteeTest {
                         new LogEntryData(idx, 1, ("ordered-" + idx).getBytes())
                 )));
             }
-            
+
             // Wait for all
             CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
                     .get(30, TimeUnit.SECONDS);
             storage.sync().get(5, TimeUnit.SECONDS);
-            
+
             List<LogEntryData> replayed = storage.replayLog().get(10, TimeUnit.SECONDS);
-            
+
             // Verify order matches submission order
             assertEquals(numEntries, replayed.size());
             for (int i = 0; i < numEntries; i++) {
@@ -738,14 +802,14 @@ class ProtectionGuaranteeTest {
                     new LogEntryData(1, 1, "must-be-durable".getBytes())
             )).get(5, TimeUnit.SECONDS);
             storage.sync().get(5, TimeUnit.SECONDS);
-            
+
             // After sync returns, data should survive "crash"
             storage.close();
-            
+
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-            
+
             assertEquals(1, replayed.size());
             assertEquals("must-be-durable", new String(replayed.get(0).payload()));
         }
@@ -755,22 +819,22 @@ class ProtectionGuaranteeTest {
         void metadataHappensBefore() throws Exception {
             // Update metadata
             storage.updateMetadata(5L, Optional.of("leader-1")).get(5, TimeUnit.SECONDS);
-            
+
             // Then append (this should see the updated metadata state)
             storage.appendEntries(List.of(
                     new LogEntryData(1, 5, "term-5-entry".getBytes())
             )).get(5, TimeUnit.SECONDS);
             storage.sync().get(5, TimeUnit.SECONDS);
-            
+
             // Verify both persist correctly
             storage.close();
-            
+
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
-            
+
             PersistentMeta meta = storage.loadMetadata().get(5, TimeUnit.SECONDS);
             List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-            
+
             assertEquals(5L, meta.currentTerm());
             assertEquals("leader-1", meta.votedFor().orElse(""));
             assertEquals(1, replayed.size());
@@ -823,7 +887,7 @@ class ProtectionGuaranteeTest {
 
     private ByteBuffer createPartialRecord(int truncateAt) {
         ByteBuffer buf = ByteBuffer.allocate(truncateAt);
-        
+
         if (truncateAt >= 4) buf.putInt(0x52414654);      // Magic
         if (truncateAt >= 6) buf.putShort((short) 1);     // Version
         if (truncateAt >= 7) buf.put((byte) 2);           // Type APPEND
@@ -834,7 +898,7 @@ class ProtectionGuaranteeTest {
             byte[] partial = new byte[truncateAt - 27];
             buf.put(partial);
         }
-        
+
         buf.flip();
         return buf;
     }

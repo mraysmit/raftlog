@@ -89,7 +89,8 @@ public record AppendPlan(
      *
      * @param startIndex      the log index where incoming entries begin (prevLogIndex + 1)
      * @param incomingEntries the entries from the Leader's AppendEntries RPC
-     * @param currentLog      the current in-memory log (index 0 = log entry at index 1)
+     * @param currentLog      the current in-memory log; its first entry defines the base
+     *                        index, so a log compacted through a snapshot needs no adjustment
      * @return the calculated plan
      */
     public static AppendPlan from(long startIndex,
@@ -105,22 +106,25 @@ public record AppendPlan(
 
         Long truncateAt = null;
         int firstNewEntryIdx = 0;
+        // The log carries its own indices; after prefix compaction position 0 is not index 1.
+        long baseIndex = currentLog.isEmpty() ? startIndex : currentLog.getFirst().index();
 
         // Walk through incoming entries to find divergence point
         for (int i = 0; i < incomingEntries.size(); i++) {
             long logIndex = startIndex + i;
-            int logPos = (int) (logIndex - 1); // Convert to 0-based array index
+            long logPos = logIndex - baseIndex;
 
             if (logPos < 0) {
-                // Invalid index, treat everything as new
-                firstNewEntryIdx = i;
-                LOG.debug("Incoming entry [{}] has negative log position {}; marking all entries as new", i, logPos);
-                break;
+                // Below the retained log: already covered by the snapshot, nothing to do
+                firstNewEntryIdx = i + 1;
+                LOG.debug("Incoming entry [{}] at index {} precedes the retained log (first index {}); skipping",
+                        i, logIndex, baseIndex);
+                continue;
             }
 
             if (logPos < currentLog.size()) {
                 // We have an entry at this position - check for conflict
-                LogEntryData existing = currentLog.get(logPos);
+                LogEntryData existing = currentLog.get((int) logPos);
                 LogEntryData incoming = incomingEntries.get(i);
 
                 if (existing.term() != incoming.term()) {
@@ -172,7 +176,8 @@ public record AppendPlan(
     public void applyTo(List<LogEntryData> memoryLog) {
         // Step 1: Truncate if needed
         if (truncateFromIndex != null) {
-            int fromPos = (int) (truncateFromIndex - 1); // Convert to 0-based
+            long baseIndex = memoryLog.isEmpty() ? truncateFromIndex : memoryLog.getFirst().index();
+            int fromPos = (int) (truncateFromIndex - baseIndex);
             if (fromPos >= 0 && fromPos < memoryLog.size()) {
                 LOG.debug("Applying append plan: truncating in-memory log from position {} (index {})",
                         fromPos, truncateFromIndex);

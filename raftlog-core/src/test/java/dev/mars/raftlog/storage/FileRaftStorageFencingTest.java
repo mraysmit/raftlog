@@ -67,6 +67,18 @@ class FileRaftStorageFencingTest {
         await(storage.closeAsync());
     }
 
+    /** Encodes one APPEND record in the on-disk format: header(27) + payload + CRC32C. */
+    private static byte[] encode(LogEntryData entry) {
+        ByteBuffer buf = ByteBuffer.allocate(27 + entry.payload().length + 4);
+        buf.putInt(0x52414654).putShort((short) 1).put((byte) 2)
+                .putLong(entry.index()).putLong(entry.term()).putInt(entry.payload().length)
+                .put(entry.payload());
+        java.util.zip.CRC32C crc = new java.util.zip.CRC32C();
+        crc.update(buf.array(), 0, 27 + entry.payload().length);
+        buf.putInt((int) crc.getValue());
+        return buf.array();
+    }
+
     private void seed() throws Exception {
         FileRaftStorage storage = new FileRaftStorage(true);
         await(storage.open(dir));
@@ -115,6 +127,7 @@ class FileRaftStorageFencingTest {
         FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build(), io);
         await(storage.open(dir));
         try {
+            await(storage.replayLog());
             await(storage.appendEntries(List.of(entry(4, 2))));
             Throwable cause = failureOf(storage.sync());
             assertInstanceOf(FileRaftStorage.StorageException.class, cause);
@@ -132,7 +145,8 @@ class FileRaftStorageFencingTest {
             List<LogEntryData> replayed = await(fresh.replayLog());
             assertTrue(replayed.size() == 3 || replayed.size() == 4);
             assertEntries(SEED, replayed.subList(0, 3));
-            await(fresh.appendEntries(List.of(entry(10, 3))));
+            // The fresh instance continues at whatever tail replay established.
+            await(fresh.appendEntries(List.of(entry(replayed.size() + 1L, 3))));
             await(fresh.sync());
         } finally { close(fresh, dir); }
     }
@@ -187,6 +201,7 @@ class FileRaftStorageFencingTest {
                 RaftStorageConfig.builder().build(), io);
         await(storage.open(dir));
         try {
+            await(storage.replayLog());
             await(storage.appendEntries(List.of(entry(4, 2))));
             await(storage.sync());
             await(storage.updateMetadata(3, Optional.empty()));
@@ -325,12 +340,8 @@ class FileRaftStorageFencingTest {
         Files.write(dir.resolve("raft.log"), garbage, StandardOpenOption.APPEND);
 
         // Append a genuine record after the garbage, as bitrot in the middle would leave.
-        FileRaftStorage writer = new FileRaftStorage(RaftStorageConfig.builder().build(), new CompactionIo());
-        await(writer.open(dir));
-        try {
-            await(writer.appendEntries(List.of(entry(4, 1))));
-            await(writer.sync());
-        } finally { close(writer, dir); }
+        // Written raw: the storage itself refuses to append behind a tail it has not replayed.
+        Files.write(dir.resolve("raft.log"), encode(entry(4, 1)), StandardOpenOption.APPEND);
 
         FileRaftStorage storage = new FileRaftStorage(true);
         await(storage.open(dir));

@@ -319,6 +319,8 @@ class NastyEdgeCaseTest {
         @DisplayName("Index wrap-around at Long.MAX_VALUE")
         void indexWrapAround() throws Exception {
             // Write entry at Long.MAX_VALUE
+            // Long.MAX_VALUE is only reachable as the continuation of a compacted log.
+            storage.truncatePrefix(Long.MAX_VALUE - 1).get(5, TimeUnit.SECONDS);
             storage.appendEntries(List.of(
                     new LogEntryData(Long.MAX_VALUE, 1, "max".getBytes())
             )).get(5, TimeUnit.SECONDS);

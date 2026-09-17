@@ -59,6 +59,12 @@ public interface RaftStorage extends Closeable {
      * A failure to force the staging file or, on non-Windows providers, the data
      * directory is a durability failure: the instance is fenced and every later
      * operation fails until it is closed and a fresh instance is opened.
+     * <p>
+     * <b>Invariants enforced:</b> the term must not be lower than the persisted term,
+     * and a vote already cast in the persisted term cannot be changed within that
+     * term. Either is a node bug that would allow double voting, and is refused with a
+     * {@link WriteRejection} whose reason is {@link WriteRejectionReason#TERM_REGRESSION}
+     * or {@link WriteRejectionReason#VOTE_CHANGED} before anything is written.
      *
      * @param currentTerm the current Raft term
      * @param votedFor    the candidate ID voted for (empty if no vote cast)
@@ -92,6 +98,19 @@ public interface RaftStorage extends Closeable {
      * <p>
      * NOT required to fsync immediately - use {@link #sync()} for that.
      * This allows batching multiple appends before a single fsync.
+     * <p>
+     * <b>Invariants enforced:</b> the batch must continue the log at its tail with
+     * contiguous indices starting at 1, and terms must not decrease. The whole batch
+     * is validated before the first byte is written, so a refused batch leaves the
+     * WAL untouched. A fresh log starts at index 1; a compacted log continues at the
+     * persisted boundary plus one. Violations are refused with
+     * {@link WriteRejectionReason#INDEX_NOT_CONTIGUOUS} or
+     * {@link WriteRejectionReason#TERM_REGRESSION}.
+     * <p>
+     * <b>Precondition:</b> a non-empty log must be replayed with {@link #replayLog()}
+     * before the first write after open, so the tail is known. Until then writes are
+     * refused with {@link WriteRejectionReason#LOG_STATE_UNKNOWN}. A failed write also
+     * leaves the tail unknown until the next replay.
      *
      * @param entries the log entries to append
      * @return a Future that completes when entries are written (but not necessarily synced)
@@ -124,6 +143,12 @@ public interface RaftStorage extends Closeable {
      *    .thenAccept(v -> plan.applyTo(memoryLog));
      * }</pre>
      *
+     * <b>Invariants enforced:</b> {@code fromIndex} must be at least 1 and no greater
+     * than the next index after the tail (truncating exactly at the tail is a legal
+     * no-op). Anything else is refused with
+     * {@link WriteRejectionReason#INVALID_TRUNCATION}. The same replay precondition
+     * as {@link #appendEntries(List)} applies.
+     *
      * @param fromIndex the first index to delete (inclusive)
      * @return a Future that completes when the truncation record is written (but NOT synced)
      */
@@ -139,8 +164,10 @@ public interface RaftStorage extends Closeable {
      * is disabled. Directory force is required on non-Windows providers; the
      * Java Windows provider supports only file force and atomic replacement.
      * A publication failure requires closing and opening a fresh storage instance.
-     * This operation does not remember the boundary or prevent later appends at
-     * removed indexes; the caller owns its snapshot index and term.
+     * The boundary is persisted as the first record of the rewritten WAL, so both
+     * this instance and any later restart know that the log continues at
+     * {@code toIndex + 1} even when nothing was retained. The caller still owns its
+     * snapshot index and term.
      * Implementations without compaction fail explicitly for compatibility.
      *
      * @param toIndex inclusive last index to remove
@@ -181,6 +208,11 @@ public interface RaftStorage extends Closeable {
      * with {@link FileRaftStorage.CorruptLogException}, leaves the file unchanged and
      * fences the instance. Such a node must be restored from its peers rather than
      * repaired by truncation.
+     * <p>
+     * The reconstructed log must be a well-formed Raft log: contiguous indices and
+     * non-decreasing terms. Anything else fails with a StorageException, since the
+     * file was not written by a conforming node. Replay establishes the tail that
+     * later writes are checked against.
      *
      * @return a Future containing all valid log entries in order
      */

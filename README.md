@@ -4,17 +4,56 @@
 
 # RaftLog
 
-A minimal, high-performance Write-Ahead Log (WAL) implementation for Raft consensus in Java.
+The persistent state of a Raft node, as a Java library: current term, vote, and the replicated log.
 
 ## Overview
 
-RaftLog provides the durability core for Raft-based distributed systems. It implements a write-ahead log with:
+RaftLog is the "persistent state on all servers" box from the Raft paper, and nothing
+else. It is not a consensus implementation. There are no elections, no RPCs and no
+replication here; you pair it with your own node, which owns the consensus logic and
+calls this library to make its state durable.
+
+The API is shaped by Raft's storage contract rather than by a generic log:
+
+- `updateMetadata(currentTerm, votedFor)` persists the term and vote atomically, so a
+  node can persist before it grants a vote.
+- Log entries carry a term. `truncateSuffix(fromIndex)` exists for the AppendEntries
+  conflict rule, and `truncatePrefix(toIndex)` for compaction after a snapshot.
+- `AppendPlan` computes the AppendEntries receiver step: find the first term mismatch,
+  truncate there, append the rest.
+- Replay never truncates a tail it cannot prove was an incomplete write. A node that
+  forgets an acknowledged entry can lose it cluster-wide, so ambiguous damage is
+  reported and left in place for the operator.
+
+Underneath that contract is a conventional write-ahead log:
 
 - **CRC32C checksums** for data integrity validation
 - **Atomic metadata updates** using rename-based persistence
 - **Serialized writes** via single-threaded executor for thread safety
 - **Efficient replay** that repairs structurally incomplete EOF writes and reports all ambiguous corruption without truncating it
 - **Prefix compaction** that reclaims WAL space after caller-owned durable snapshots
+
+### What the library checks
+
+A generic WAL records whatever it is given. This one refuses anything that would not
+be a valid Raft log, before writing a byte, with a categorised `WriteRejectedException`:
+
+| Rule | Reason |
+|------|--------|
+| An append must continue the log at its tail, with contiguous indices from 1 | `INDEX_NOT_CONTIGUOUS` |
+| Entry terms must not decrease; a metadata term must not go below the persisted one | `TERM_REGRESSION` |
+| A vote cast in a term cannot be changed within that term | `VOTE_CHANGED` |
+| A suffix truncation must be at least 1 and not beyond the tail | `INVALID_TRUNCATION` |
+| A non-empty log must be replayed before it is written to | `LOG_STATE_UNKNOWN` |
+
+Replay likewise refuses a log that is not contiguous. A fresh log starts at index 1.
+Prefix compaction writes its boundary as the first record of the rewritten WAL, so a
+compacted log continues at the boundary plus one across restarts even when nothing was
+retained.
+
+The point is loud failure over silent divergence. A node that appends out of order or
+regresses its term has a bug, and the storage reports it at the call site rather than
+handing back a log that replays into something `AppendPlan` cannot reason about.
 
 ## Requirements
 
@@ -182,6 +221,7 @@ These values are fixed and define the on-disk format:
 | `VERSION` | `1` | Record format version |
 | `TYPE_TRUNCATE` | `1` | Record type: truncate suffix |
 | `TYPE_APPEND` | `2` | Record type: append entry |
+| `TYPE_PREFIX` | `3` | Record type: prefix compaction boundary; first record of a compacted WAL, INDEX = inclusive boundary |
 | `HEADER_SIZE` | `27` | Header size in bytes |
 | `CRC_SIZE` | `4` | CRC32C checksum size |
 
@@ -189,7 +229,7 @@ These values are fixed and define the on-disk format:
 
 | File | Purpose |
 |------|---------|
-| `raft.log` | Append-only WAL containing TRUNCATE and APPEND records |
+| `raft.log` | Append-only WAL of APPEND and TRUNCATE records, led by a PREFIX record once compacted |
 | `meta.dat` | Persistent metadata (currentTerm, votedFor) with atomic updates |
 | `meta.dat.tmp` | Temporary file for atomic metadata rename |
 | `raft.lock` | Exclusive lock file to prevent concurrent access |

@@ -51,7 +51,7 @@ import java.util.zip.CRC32C;
  * <pre>
  * data/
  *  ├─ meta.dat     // currentTerm + votedFor (atomic replace)
- *  ├─ raft.log     // WAL: TRUNCATE and APPEND records; replaced on compaction
+ *  ├─ raft.log     // WAL: APPEND and TRUNCATE records; a leading PREFIX record after compaction
  *  └─ raft.log.tmp // unpublished prefix-compaction output
  * </pre>
  * <p>
@@ -117,6 +117,13 @@ public final class FileRaftStorage implements RaftStorage {
     /** Record type: Append a log entry */
     private static final byte TYPE_APPEND = 2;
 
+    /**
+     * Record type: prefix compaction boundary. Written first in a compacted WAL so a
+     * restart knows the next index even when no entries were retained. INDEX holds the
+     * inclusive boundary; TERM and payload are unused.
+     */
+    private static final byte TYPE_PREFIX = 3;
+
     /** Header size: MAGIC(4) + VERSION(2) + TYPE(1) + INDEX(8) + TERM(8) + PAYLOAD_LEN(4) */
     private static final int HEADER_SIZE = 4 + 2 + 1 + 8 + 8 + 4;
 
@@ -173,6 +180,26 @@ public final class FileRaftStorage implements RaftStorage {
      * context and error messages, hence volatile.
      */
     private volatile Path dataDir;
+
+    // ------------------------------------------------------------------------
+    // Raft log invariants. Owned by the WAL executor: every read and write of
+    // these fields happens inside an executor task.
+    // ------------------------------------------------------------------------
+
+    private static final long UNKNOWN_TERM = -1L;
+
+    /** True once the tail is known: after replay, or when opened on an empty WAL. */
+    private boolean logStateKnown;
+    /** Index the next append must start at. A fresh log starts at 1. */
+    private long nextIndex = 1;
+    /** Inclusive prefix compaction boundary persisted in the WAL, or 0 if never compacted. */
+    private long prefixBoundary;
+    /** Term of the last entry, or {@link #UNKNOWN_TERM} when it cannot be checked. */
+    private long lastTerm = UNKNOWN_TERM;
+    /** True once the persisted term and vote have been read or written. */
+    private boolean metaKnown;
+    private long persistedTerm;
+    private Optional<String> persistedVote = Optional.empty();
     private FileChannel logChannel;
     private FileChannel lockChannel;
     private FileLock exclusiveLock;
@@ -352,6 +379,14 @@ public final class FileRaftStorage implements RaftStorage {
                 // Seek to end for appends
                 long logSize = logChannel.size();
                 logChannel.position(logSize);
+
+                // An empty WAL has a known tail. Anything else must be replayed before
+                // the first write so appends can be checked against the real tail.
+                logStateKnown = logSize == 0;
+                nextIndex = 1;
+                prefixBoundary = 0;
+                lastTerm = UNKNOWN_TERM;
+                seedMetadataBaseline(requestedPath);
                 LOG.atInfo().addKeyValue("event", "storage.open.completed")
                         .addKeyValue("walBytes", logSize)
                         .log("WAL opened successfully: path={}, size={} bytes", pathForLog(logPath), logSize);
@@ -488,6 +523,7 @@ public final class FileRaftStorage implements RaftStorage {
     public CompletableFuture<Void> updateMetadata(long currentTerm, Optional<String> votedFor) {
         return runOperation("metadata-update", dataDir, () -> {
             ensureHealthy();
+            validateMetadataUpdate(currentTerm, votedFor);
             try {
                 LOG.debug("Updating metadata: term={}, votedFor={}", currentTerm, votedForForLog(votedFor));
                 Path tmpPath = dataDir.resolve(META_TMP_FILE);
@@ -543,6 +579,9 @@ public final class FileRaftStorage implements RaftStorage {
                     }
                 }
 
+                metaKnown = true;
+                persistedTerm = currentTerm;
+                persistedVote = votedFor;
                 LOG.atDebug().addKeyValue("event", "metadata.update.completed")
                         .log("Metadata updated: term={}, votedFor={}", currentTerm, votedForForLog(votedFor));
 
@@ -559,7 +598,24 @@ public final class FileRaftStorage implements RaftStorage {
         return supplyOperation("metadata-load", dataDir, () -> {
             ensureHealthy();
             try {
-                Path metaPath = dataDir.resolve(META_FILE);
+                PersistentMeta meta = readMetadataFile(dataDir);
+                metaKnown = true;
+                persistedTerm = meta.currentTerm();
+                persistedVote = meta.votedFor();
+                LOG.atInfo().addKeyValue("event", "metadata.load.completed")
+                        .log("Metadata loaded: term={}, votedFor={}", meta.currentTerm(), votedForForLog(meta.votedFor()));
+                return meta;
+            } catch (IOException e) {
+                LOG.atError().addKeyValue("event", "metadata.load.failed").setCause(e)
+                        .log("Failed to load metadata: {}", e.getMessage());
+                throw new StorageException("Failed to load metadata", e);
+            }
+        });
+    }
+
+    /** Parses meta.dat, or returns EMPTY when it does not exist. Called only on the WAL executor. */
+    private static PersistentMeta readMetadataFile(Path dir) throws IOException {
+                Path metaPath = dir.resolve(META_FILE);
                 if (!Files.exists(metaPath)) {
                     LOG.debug("No metadata file found, returning empty metadata");
                     return PersistentMeta.EMPTY;
@@ -604,16 +660,25 @@ public final class FileRaftStorage implements RaftStorage {
                         ? Optional.empty()
                         : Optional.of(new String(voteBytes, StandardCharsets.UTF_8));
 
-                LOG.atInfo().addKeyValue("event", "metadata.load.completed")
-                        .log("Metadata loaded: term={}, votedFor={}", term, votedForForLog(votedFor));
                 return new PersistentMeta(term, votedFor);
+    }
 
-            } catch (IOException e) {
-                LOG.atError().addKeyValue("event", "metadata.load.failed").setCause(e)
-                        .log("Failed to load metadata: {}", e.getMessage());
-                throw new StorageException("Failed to load metadata", e);
-            }
-        });
+    /**
+     * Establishes the term/vote baseline at open so a later update can be checked for
+     * regression. Unreadable metadata leaves the baseline unknown; loadMetadata()
+     * reports the problem to the caller.
+     */
+    private void seedMetadataBaseline(Path dir) {
+        try {
+            PersistentMeta meta = readMetadataFile(dir);
+            metaKnown = true;
+            persistedTerm = meta.currentTerm();
+            persistedVote = meta.votedFor();
+        } catch (IOException | StorageException e) {
+            metaKnown = false;
+            LOG.warn("Metadata baseline unavailable at open; term regression cannot be checked until loadMetadata(): {}",
+                    e.getMessage());
+        }
     }
 
     // ========================================================================
@@ -650,6 +715,7 @@ public final class FileRaftStorage implements RaftStorage {
 
         return runOperation("append", dataDir, () -> {
             ensureHealthy();
+            validateAppend(acceptedEntries);
             LOG.debug("Appending {} entries (indices {}-{})",
                     acceptedEntries.size(), acceptedEntries.getFirst().index(), acceptedEntries.getLast().index());
             try {
@@ -663,6 +729,8 @@ public final class FileRaftStorage implements RaftStorage {
                             entry.index(), entry.term(),
                             entry.payload() != null ? entry.payload().length : 0);
                 }
+                nextIndex = acceptedEntries.getLast().index() + 1;
+                lastTerm = acceptedEntries.getLast().term();
                 long elapsedMicros = (System.nanoTime() - started) / 1_000;
                 LOG.atDebug().addKeyValue("event", "wal.append.completed")
                         .addKeyValue("entryCount", acceptedEntries.size()).addKeyValue("walBytes", totalBytes)
@@ -677,6 +745,8 @@ public final class FileRaftStorage implements RaftStorage {
                         .log("Failed to append entries [{}-{}] at {}: {}",
                                 acceptedEntries.getFirst().index(), acceptedEntries.getLast().index(),
                                 pathForLog(dataDir), e.getMessage());
+                // Part of the batch may be on disk. The tail is unknown until replay.
+                logStateKnown = false;
                 throw new StorageException("Failed to append entries", e);
             }
         });
@@ -686,13 +756,17 @@ public final class FileRaftStorage implements RaftStorage {
     public CompletableFuture<Void> truncateSuffix(long fromIndex) {
         return runOperation("suffix-truncate", dataDir, () -> {
             ensureHealthy();
+            validateSuffixTruncation(fromIndex);
             LOG.debug("Truncating log suffix from index {}", fromIndex);
             try {
                 // Write a TRUNCATE record (no payload needed)
                 writeRecord(TYPE_TRUNCATE, fromIndex, 0L, new byte[0]);
+                if (fromIndex < nextIndex) nextIndex = fromIndex;
+                lastTerm = UNKNOWN_TERM;
                 LOG.atInfo().addKeyValue("event", "wal.suffix_truncate.completed")
                         .log("Truncate record written: fromIndex={}", fromIndex);
             } catch (IOException e) {
+                logStateKnown = false;
                 LOG.atError().addKeyValue("event", "wal.suffix_truncate.failed").setCause(e)
                         .log("Failed to write truncate record from index {} at {}: {}",
                                 fromIndex, pathForLog(dataDir), e.getMessage());
@@ -748,8 +822,12 @@ public final class FileRaftStorage implements RaftStorage {
                 List<LogEntryData> retained = readLog(false).stream().filter(e -> e.index() > toIndex).toList();
                 checkDiskSpace();
                 Files.deleteIfExists(temporary);
+                long boundary = Math.max(toIndex, prefixBoundary);
                 try (FileChannel output = FileChannel.open(temporary,
                         StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
+                    // The boundary is persisted so a restart knows where the log continues
+                    // even when nothing is retained.
+                    compactionIo.write(output, encodeRecord(TYPE_PREFIX, boundary, 0L, new byte[0]));
                     for (LogEntryData entry : retained) {
                         compactionIo.write(output, encodeRecord(TYPE_APPEND, entry.index(), entry.term(), entry.payload()));
                     }
@@ -765,6 +843,11 @@ public final class FileRaftStorage implements RaftStorage {
                 compactionIo.forceDirectory(dataDir);
                 logChannel = compactionIo.reopen(published);
                 logChannel.position(logChannel.size());
+                // The compaction boundary establishes the tail even when nothing is retained.
+                logStateKnown = true;
+                prefixBoundary = boundary;
+                nextIndex = retained.isEmpty() ? boundary + 1 : retained.getLast().index() + 1;
+                lastTerm = retained.isEmpty() ? UNKNOWN_TERM : retained.getLast().term();
                 long elapsedMs = (System.nanoTime() - started) / 1_000_000;
                 LOG.atInfo().addKeyValue("event", "wal.compaction.completed")
                         .addKeyValue("durationMs", elapsedMs).addKeyValue("retainedEntries", retained.size())
@@ -788,6 +871,102 @@ public final class FileRaftStorage implements RaftStorage {
                 throw failure;
             }
         });
+    }
+
+    // ------------------------------------------------------------------------
+    // Raft invariant checks. All run on the WAL executor before any byte is
+    // written, so a rejected operation leaves the WAL untouched.
+    // ------------------------------------------------------------------------
+
+    private void requireKnownLogState() {
+        if (!logStateKnown) {
+            throw new WriteRejectedException(WriteRejectionReason.LOG_STATE_UNKNOWN,
+                    "Log tail is unknown: call replayLog() before writing to " + pathForLog(dataDir));
+        }
+    }
+
+    private void validateAppend(List<LogEntryData> entries) {
+        requireKnownLogState();
+        LogEntryData first = entries.getFirst();
+        if (first.index() < 1) {
+            throw new WriteRejectedException(WriteRejectionReason.INDEX_NOT_CONTIGUOUS,
+                    "Log indices start at 1, got " + first.index());
+        }
+        if (first.index() != nextIndex) {
+            throw new WriteRejectedException(WriteRejectionReason.INDEX_NOT_CONTIGUOUS,
+                    "Append must start at index " + nextIndex + ", got " + first.index());
+        }
+        long previousTerm = lastTerm;
+        long expected = first.index();
+        for (LogEntryData entry : entries) {
+            if (entry.index() != expected) {
+                throw new WriteRejectedException(WriteRejectionReason.INDEX_NOT_CONTIGUOUS,
+                        "Batch is not contiguous: expected index " + expected + ", got " + entry.index());
+            }
+            if (entry.term() < 0 || (previousTerm != UNKNOWN_TERM && entry.term() < previousTerm)) {
+                throw new WriteRejectedException(WriteRejectionReason.TERM_REGRESSION,
+                        "Entry " + entry.index() + " has term " + entry.term()
+                                + " below the preceding term " + previousTerm);
+            }
+            previousTerm = entry.term();
+            expected++;
+        }
+    }
+
+    private void validateSuffixTruncation(long fromIndex) {
+        requireKnownLogState();
+        if (fromIndex < 1) {
+            throw new WriteRejectedException(WriteRejectionReason.INVALID_TRUNCATION,
+                    "Suffix truncation boundary must be at least 1, got " + fromIndex);
+        }
+        if (fromIndex <= prefixBoundary) {
+            throw new WriteRejectedException(WriteRejectionReason.INVALID_TRUNCATION,
+                    "Suffix truncation from " + fromIndex + " reaches into the compacted prefix (boundary "
+                            + prefixBoundary + ")");
+        }
+        if (fromIndex > nextIndex) {
+            throw new WriteRejectedException(WriteRejectionReason.INVALID_TRUNCATION,
+                    "Suffix truncation from " + fromIndex + " is beyond the end of the log (next index "
+                            + nextIndex + ")");
+        }
+    }
+
+    private void validateMetadataUpdate(long term, Optional<String> votedFor) {
+        if (term < 0) {
+            throw new WriteRejectedException(WriteRejectionReason.TERM_REGRESSION,
+                    "Term must not be negative: " + term);
+        }
+        if (!metaKnown) return;
+        if (term < persistedTerm) {
+            throw new WriteRejectedException(WriteRejectionReason.TERM_REGRESSION,
+                    "Term " + term + " is below the persisted term " + persistedTerm);
+        }
+        if (term == persistedTerm && persistedVote.isPresent() && !persistedVote.equals(votedFor)) {
+            throw new WriteRejectedException(WriteRejectionReason.VOTE_CHANGED,
+                    "Vote in term " + term + " already cast for " + votedForForLog(persistedVote)
+                            + "; cannot change it to " + votedForForLog(votedFor));
+        }
+    }
+
+    /** A replayed log must be a well-formed Raft log: contiguous indices and non-decreasing terms. */
+    private static void validateReplayedLog(List<LogEntryData> entries, long boundary, Path logPath) {
+        if (!entries.isEmpty() && boundary > 0 && entries.getFirst().index() != boundary + 1) {
+            throw new StorageException("WAL " + logPath + " is compacted through index " + boundary
+                    + " but its first entry is " + entries.getFirst().index());
+        }
+        for (int i = 1; i < entries.size(); i++) {
+            LogEntryData previous = entries.get(i - 1);
+            LogEntryData current = entries.get(i);
+            if (current.index() != previous.index() + 1) {
+                throw new StorageException("WAL " + logPath + " is not a contiguous Raft log: entry "
+                        + previous.index() + " is followed by entry " + current.index());
+            }
+            if (current.term() < previous.term()) {
+                throw new StorageException("WAL " + logPath + " has a term regression: entry "
+                        + previous.index() + " (term " + previous.term() + ") is followed by entry "
+                        + current.index() + " (term " + current.term() + ")");
+            }
+        }
     }
 
     /**
@@ -966,7 +1145,7 @@ public final class FileRaftStorage implements RaftStorage {
             if (warn) LOG.warn("Invalid payload length at pos {}: {}", pos, payloadLen);
             return null;
         }
-        if (type != TYPE_TRUNCATE && type != TYPE_APPEND) {
+        if (type != TYPE_TRUNCATE && type != TYPE_APPEND && type != TYPE_PREFIX) {
             if (warn) LOG.warn("Unknown record type at pos {}: {}", pos, type);
             return null;
         }
@@ -1053,7 +1232,7 @@ public final class FileRaftStorage implements RaftStorage {
         int payloadLen = header.getInt();
 
         if (magic != MAGIC || version != VERSION) return false;
-        if (type != TYPE_TRUNCATE && type != TYPE_APPEND) return false;
+        if (type != TYPE_TRUNCATE && type != TYPE_APPEND && type != TYPE_PREFIX) return false;
         if (payloadLen < 0 || payloadLen > maxPayloadSize) return false;
 
         long completeSize = (long) HEADER_SIZE + payloadLen + CRC_SIZE;
@@ -1074,6 +1253,8 @@ public final class FileRaftStorage implements RaftStorage {
         List<LogEntryData> entries = new ArrayList<>();
         int appendCount = 0;
         int truncateCount = 0;
+        long tail = 1;
+        long boundary = 0;
 
         try (FileChannel ch = FileChannel.open(logPath,
                 StandardOpenOption.READ,
@@ -1087,14 +1268,25 @@ public final class FileRaftStorage implements RaftStorage {
                 DecodedRecord record = decodeRecord(ch, pos, true);
                 if (record == null) break;
 
-                if (record.type() == TYPE_TRUNCATE) {
+                if (record.type() == TYPE_PREFIX) {
+                    // Written by compaction as the first record of the rewritten WAL.
+                    if (pos != 0) {
+                        throw new StorageException("WAL " + logPath + " has a prefix marker at byte " + pos
+                                + "; it is only valid as the first record");
+                    }
+                    boundary = record.index();
+                    tail = boundary + 1;
+                    LOG.trace("Replay PREFIX: compacted through index {}", boundary);
+                } else if (record.type() == TYPE_TRUNCATE) {
                     long truncateFrom = record.index();
                     int beforeSize = entries.size();
                     entries.removeIf(e -> e.index() >= truncateFrom);
+                    if (truncateFrom < tail) tail = truncateFrom;
                     truncateCount++;
                     LOG.trace("Replay TRUNCATE: fromIndex={}, removed {} entries", truncateFrom, beforeSize - entries.size());
                 } else {
                     entries.add(new LogEntryData(record.index(), record.term(), record.payload()));
+                    tail = record.index() + 1;
                     appendCount++;
                     LOG.trace("Replay APPEND: index={}, term={}, payloadLen={}",
                             record.index(), record.term(), record.payload().length);
@@ -1122,6 +1314,12 @@ public final class FileRaftStorage implements RaftStorage {
 
         // Update log channel position
         logChannel.position(Files.size(logPath));
+
+        validateReplayedLog(entries, boundary, logPath);
+        logStateKnown = true;
+        prefixBoundary = boundary;
+        nextIndex = entries.isEmpty() ? tail : entries.getLast().index() + 1;
+        lastTerm = entries.isEmpty() ? UNKNOWN_TERM : entries.getLast().term();
 
         long elapsed = System.currentTimeMillis() - startTime;
         LOG.atInfo().addKeyValue("event", "wal.replay.completed").addKeyValue("durationMs", elapsed)
@@ -1156,7 +1354,8 @@ public final class FileRaftStorage implements RaftStorage {
         int recordSize = HEADER_SIZE + payloadLen + CRC_SIZE;
 
         LOG.trace("Writing record: type={}, index={}, term={}, payloadLen={}, recordSize={}",
-                type == TYPE_APPEND ? "APPEND" : "TRUNCATE", index, term, payloadLen, recordSize);
+                type == TYPE_APPEND ? "APPEND" : type == TYPE_TRUNCATE ? "TRUNCATE" : "PREFIX",
+                index, term, payloadLen, recordSize);
 
         // Pre-flight disk space check for large writes
         if (recordSize > 1024 * 1024) { // Check for writes > 1MB

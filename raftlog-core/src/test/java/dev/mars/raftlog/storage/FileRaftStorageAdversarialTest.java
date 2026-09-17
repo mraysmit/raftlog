@@ -496,6 +496,8 @@ class FileRaftStorageAdversarialTest {
         @Test
         @DisplayName("Index at Long.MAX_VALUE")
         void maxIndexValue() throws Exception {
+            // Long.MAX_VALUE is only reachable as the continuation of a compacted log.
+            storage.truncatePrefix(Long.MAX_VALUE - 1).get(5, TimeUnit.SECONDS);
             LogEntryData entry = new LogEntryData(Long.MAX_VALUE, 1, "data".getBytes());
             storage.appendEntries(List.of(entry)).get(5, TimeUnit.SECONDS);
             storage.sync().get(5, TimeUnit.SECONDS);
@@ -518,15 +520,13 @@ class FileRaftStorageAdversarialTest {
         }
 
         @Test
-        @DisplayName("Zero index")
+        @DisplayName("Zero index is rejected: Raft log indices start at 1")
         void zeroIndex() throws Exception {
             LogEntryData entry = new LogEntryData(0, 1, "data".getBytes());
-            storage.appendEntries(List.of(entry)).get(5, TimeUnit.SECONDS);
-            storage.sync().get(5, TimeUnit.SECONDS);
+            assertRejected(storage.appendEntries(List.of(entry)), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
 
             List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-            assertEquals(1, replayed.size());
-            assertEquals(0, replayed.get(0).index());
+            assertEquals(0, replayed.size(), "a rejected append writes nothing");
         }
 
         @Test
@@ -542,28 +542,19 @@ class FileRaftStorageAdversarialTest {
         }
 
         @Test
-        @DisplayName("Negative index (should still store/replay)")
+        @DisplayName("Negative index is rejected")
         void negativeIndex() throws Exception {
-            // Design decision: negative indices are allowed at storage layer
             LogEntryData entry = new LogEntryData(-1, 1, "data".getBytes());
-            storage.appendEntries(List.of(entry)).get(5, TimeUnit.SECONDS);
-            storage.sync().get(5, TimeUnit.SECONDS);
-
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-            assertEquals(1, replayed.size());
-            assertEquals(-1, replayed.get(0).index());
+            assertRejected(storage.appendEntries(List.of(entry)), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            assertEquals(0, storage.replayLog().get(5, TimeUnit.SECONDS).size());
         }
 
         @Test
-        @DisplayName("Negative term (should still store/replay)")
+        @DisplayName("Negative term is rejected")
         void negativeTerm() throws Exception {
             LogEntryData entry = new LogEntryData(1, -1, "data".getBytes());
-            storage.appendEntries(List.of(entry)).get(5, TimeUnit.SECONDS);
-            storage.sync().get(5, TimeUnit.SECONDS);
-
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-            assertEquals(1, replayed.size());
-            assertEquals(-1, replayed.get(0).term());
+            assertRejected(storage.appendEntries(List.of(entry)), WriteRejectionReason.TERM_REGRESSION);
+            assertEquals(0, storage.replayLog().get(5, TimeUnit.SECONDS).size());
         }
 
         @Test
@@ -632,41 +623,39 @@ class FileRaftStorageAdversarialTest {
         }
 
         @Test
-        @DisplayName("Truncate to index 0")
+        @DisplayName("Truncate from index 0 is rejected; truncate from 1 empties the log")
         void truncateToZero() throws Exception {
             writeValidEntries(5);
 
-            storage.truncateSuffix(0).get(5, TimeUnit.SECONDS);
-            storage.sync().get(5, TimeUnit.SECONDS);
+            assertRejected(storage.truncateSuffix(0), WriteRejectionReason.INVALID_TRUNCATION);
+            assertEquals(5, storage.replayLog().get(5, TimeUnit.SECONDS).size());
 
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-            assertEquals(0, replayed.size());
+            storage.truncateSuffix(1).get(5, TimeUnit.SECONDS);
+            storage.sync().get(5, TimeUnit.SECONDS);
+            assertEquals(0, storage.replayLog().get(5, TimeUnit.SECONDS).size());
         }
 
         @Test
-        @DisplayName("Truncate to negative index")
+        @DisplayName("Truncate from a negative index is rejected")
         void truncateToNegative() throws Exception {
             writeValidEntries(5);
 
-            storage.truncateSuffix(-1).get(5, TimeUnit.SECONDS);
-            storage.sync().get(5, TimeUnit.SECONDS);
-
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-            assertEquals(0, replayed.size());
+            assertRejected(storage.truncateSuffix(-1), WriteRejectionReason.INVALID_TRUNCATION);
+            assertEquals(5, storage.replayLog().get(5, TimeUnit.SECONDS).size());
         }
 
         @Test
-        @DisplayName("Truncate beyond current log length")
+        @DisplayName("Truncate beyond the end of the log is rejected")
         void truncateBeyondLength() throws Exception {
             writeValidEntries(3);
 
-            // Truncate from index 100 when we only have indices 1-3
-            storage.truncateSuffix(100).get(5, TimeUnit.SECONDS);
+            // A node never truncates past its own tail; doing so is a bug worth surfacing.
+            assertRejected(storage.truncateSuffix(100), WriteRejectionReason.INVALID_TRUNCATION);
+            // Truncating exactly at the tail is a legal no-op.
+            storage.truncateSuffix(4).get(5, TimeUnit.SECONDS);
             storage.sync().get(5, TimeUnit.SECONDS);
 
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-            // Should have no effect
-            assertEquals(3, replayed.size());
+            assertEquals(3, storage.replayLog().get(5, TimeUnit.SECONDS).size());
         }
     }
 
@@ -679,7 +668,7 @@ class FileRaftStorageAdversarialTest {
     class ConcurrencyTests {
 
         @Test
-        @DisplayName("Parallel appends from multiple threads")
+        @DisplayName("Racing appenders cannot produce a malformed log: out-of-order appends are refused")
         void parallelAppends() throws Exception {
             int numThreads = 10;
             int entriesPerThread = 100;
@@ -687,6 +676,9 @@ class FileRaftStorageAdversarialTest {
             CountDownLatch startLatch = new CountDownLatch(1);
             CountDownLatch doneLatch = new CountDownLatch(numThreads);
             AtomicInteger nextIndex = new AtomicInteger(1);
+            AtomicInteger accepted = new AtomicInteger();
+            AtomicInteger rejected = new AtomicInteger();
+            AtomicInteger unexpected = new AtomicInteger();
 
             try {
                 for (int t = 0; t < numThreads; t++) {
@@ -695,12 +687,22 @@ class FileRaftStorageAdversarialTest {
                             startLatch.await();
                             for (int i = 0; i < entriesPerThread; i++) {
                                 int idx = nextIndex.getAndIncrement();
-                                storage.appendEntries(List.of(
-                                        new LogEntryData(idx, 1, ("data-" + idx).getBytes())
-                                )).get(5, TimeUnit.SECONDS);
+                                try {
+                                    storage.appendEntries(List.of(
+                                            new LogEntryData(idx, 1, ("data-" + idx).getBytes())
+                                    )).get(5, TimeUnit.SECONDS);
+                                    accepted.incrementAndGet();
+                                } catch (ExecutionException e) {
+                                    if (e.getCause() instanceof FileRaftStorage.WriteRejectedException r
+                                            && r.reason() == WriteRejectionReason.INDEX_NOT_CONTIGUOUS) {
+                                        rejected.incrementAndGet();
+                                    } else {
+                                        unexpected.incrementAndGet();
+                                    }
+                                }
                             }
                         } catch (Exception e) {
-                            e.printStackTrace();
+                            unexpected.incrementAndGet();
                         } finally {
                             doneLatch.countDown();
                         }
@@ -713,8 +715,14 @@ class FileRaftStorageAdversarialTest {
                 storage.sync().get(5, TimeUnit.SECONDS);
                 List<LogEntryData> replayed = storage.replayLog().get(10, TimeUnit.SECONDS);
 
-                // All entries should be written
-                assertEquals(numThreads * entriesPerThread, replayed.size());
+                // Every append either extended the log at its tail or was refused; the
+                // log itself is contiguous from 1 no matter how the race went.
+                assertEquals(0, unexpected.get(), "only INDEX_NOT_CONTIGUOUS rejections are acceptable");
+                assertEquals(numThreads * entriesPerThread, accepted.get() + rejected.get());
+                assertEquals(accepted.get(), replayed.size());
+                for (int i = 0; i < replayed.size(); i++) {
+                    assertEquals(i + 1, replayed.get(i).index(), "log must be contiguous from 1");
+                }
             } finally {
                 executor.shutdown();
             }
@@ -733,10 +741,11 @@ class FileRaftStorageAdversarialTest {
 
             CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get(30, TimeUnit.SECONDS);
 
-            // Final metadata should be consistent (one of the updates)
+            // Terms were submitted in increasing order, so every update is accepted
+            // and the last one wins.
             PersistentMeta meta = storage.loadMetadata().get(5, TimeUnit.SECONDS);
             assertNotNull(meta);
-            assertTrue(meta.currentTerm() >= 0 && meta.currentTerm() < numUpdates);
+            assertEquals(numUpdates - 1, meta.currentTerm());
         }
 
         @Test
@@ -841,68 +850,63 @@ class FileRaftStorageAdversarialTest {
         }
 
         @Test
-        @DisplayName("Repeated truncate-append cycles - accumulates entries with same index")
+        @DisplayName("Repeated truncate-append cycles keep the log contiguous")
         void repeatedTruncateAppendCycles() throws Exception {
-            for (int cycle = 0; cycle < 10; cycle++) {
-                // Append 10 entries
-                for (int i = 1; i <= 10; i++) {
+            for (int i = 1; i <= 10; i++) {
+                storage.appendEntries(List.of(
+                        new LogEntryData(i, 1, ("cycle-0-" + i).getBytes())
+                )).get(5, TimeUnit.SECONDS);
+            }
+
+            for (int cycle = 1; cycle < 10; cycle++) {
+                // Truncate from index 4 (keeps indices 1-3), then the leader resends 4-10.
+                storage.truncateSuffix(4).get(5, TimeUnit.SECONDS);
+
+                // Re-sending from index 1 would duplicate retained entries: refused.
+                assertRejected(storage.appendEntries(List.of(
+                        new LogEntryData(1, cycle + 1, "dup".getBytes()))), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+
+                for (int i = 4; i <= 10; i++) {
                     storage.appendEntries(List.of(
                             new LogEntryData(i, cycle + 1, ("cycle-" + cycle + "-" + i).getBytes())
                     )).get(5, TimeUnit.SECONDS);
                 }
-
-                // Truncate from index 4 (keeps indices 1-3)
-                storage.truncateSuffix(4).get(5, TimeUnit.SECONDS);
             }
 
             storage.sync().get(5, TimeUnit.SECONDS);
             List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
 
-            // After replaying all APPEND and TRUNCATE records:
-            // The replay appends entries to a list and truncate removes by index.
-            // Since indices 1-3 are added each cycle, they accumulate:
-            // Cycle 1: adds 1-10, truncate leaves 1-3
-            // Cycle 2: adds 1-10 again (now have two sets of 1-3), truncate from 4 only removes 4-10
-            // ... after 10 cycles, we have 10 copies of entries 1-3
-            // 
-            // This is correct WAL behavior - the storage layer faithfully records
-            // what happens. The Raft layer would use AppendPlan to avoid duplicates.
-            assertEquals(30, replayed.size()); // 10 cycles × 3 entries each
+            assertEquals(10, replayed.size());
+            for (int i = 0; i < 10; i++) {
+                assertEquals(i + 1, replayed.get(i).index());
+                assertEquals(i < 3 ? 1 : 10, replayed.get(i).term());
+            }
         }
 
         @Test
-        @DisplayName("Non-sequential indices")
+        @DisplayName("Non-sequential indices within a batch are rejected without writing anything")
         void nonSequentialIndices() throws Exception {
-            // Raft log indices should be sequential, but storage layer shouldn't enforce this
-            storage.appendEntries(List.of(
+            assertRejected(storage.appendEntries(List.of(
                     new LogEntryData(1, 1, "a".getBytes()),
                     new LogEntryData(5, 1, "b".getBytes()),  // Gap!
                     new LogEntryData(3, 1, "c".getBytes())   // Out of order!
-            )).get(5, TimeUnit.SECONDS);
+            )), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
             storage.sync().get(5, TimeUnit.SECONDS);
 
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-
-            // Storage layer should faithfully store what it's given
-            assertEquals(3, replayed.size());
-            assertEquals(1, replayed.get(0).index());
-            assertEquals(5, replayed.get(1).index());
-            assertEquals(3, replayed.get(2).index());
+            // Validation runs before the first byte is written, so entry 1 is not there either.
+            assertEquals(0, storage.replayLog().get(5, TimeUnit.SECONDS).size());
         }
 
         @Test
-        @DisplayName("Duplicate indices in single append")
+        @DisplayName("Duplicate indices in a single append are rejected without writing anything")
         void duplicateIndicesInSingleAppend() throws Exception {
-            storage.appendEntries(List.of(
+            assertRejected(storage.appendEntries(List.of(
                     new LogEntryData(1, 1, "first".getBytes()),
                     new LogEntryData(1, 1, "second".getBytes())  // Same index!
-            )).get(5, TimeUnit.SECONDS);
+            )), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
             storage.sync().get(5, TimeUnit.SECONDS);
 
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-
-            // Both should be stored
-            assertEquals(2, replayed.size());
+            assertEquals(0, storage.replayLog().get(5, TimeUnit.SECONDS).size());
         }
     }
 
@@ -1171,6 +1175,14 @@ class FileRaftStorageAdversarialTest {
     // Helper Methods
     // ========================================================================
 
+    private static FileRaftStorage.WriteRejectedException assertRejected(
+            CompletableFuture<?> future, WriteRejectionReason reason) {
+        ExecutionException failure = assertThrows(ExecutionException.class, () -> future.get(5, TimeUnit.SECONDS));
+        var rejected = assertInstanceOf(FileRaftStorage.WriteRejectedException.class, failure.getCause());
+        assertEquals(reason, rejected.reason());
+        return rejected;
+    }
+
     private void writeValidEntries(int count) throws Exception {
         List<LogEntryData> entries = new ArrayList<>();
         for (int i = 1; i <= count; i++) {
@@ -1205,24 +1217,24 @@ class FileRaftStorageAdversarialTest {
         // Each record: HEADER(27) + payload + CRC(4)
         // For our test entries with "data-N" payload (6-7 bytes depending on N)
         // Approximate: 27 + 7 + 4 = 38 bytes per record
-        
+
         Path logPath = tempDir.resolve("raft.log");
         try (FileChannel fc = FileChannel.open(logPath, StandardOpenOption.READ)) {
             long pos = 0;
             ByteBuffer headerBuf = ByteBuffer.allocate(27);
-            
+
             for (int i = 0; i < recordNumber; i++) {
                 headerBuf.clear();
                 fc.read(headerBuf, pos);
                 headerBuf.flip();
-                
+
                 headerBuf.getInt();   // magic
                 headerBuf.getShort(); // version
                 headerBuf.get();      // type
                 headerBuf.getLong();  // index
                 headerBuf.getLong();  // term
                 int payloadLen = headerBuf.getInt();
-                
+
                 pos += 27 + payloadLen + 4;
             }
             return pos;

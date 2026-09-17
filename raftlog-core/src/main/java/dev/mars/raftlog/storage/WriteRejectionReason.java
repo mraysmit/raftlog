@@ -18,5 +18,15 @@ package dev.mars.raftlog.storage;
 /** Stable categories for understood storage write rejections. */
 public enum WriteRejectionReason {
     PAYLOAD_TOO_LARGE,
-    INSUFFICIENT_DISK_SPACE
+    INSUFFICIENT_DISK_SPACE,
+    /** The log has not been replayed since open, or a failed write left its tail unknown. */
+    LOG_STATE_UNKNOWN,
+    /** An append does not continue the log at the next index, or the batch is not contiguous. */
+    INDEX_NOT_CONTIGUOUS,
+    /** An entry's term is lower than the term before it, or a metadata term went backwards. */
+    TERM_REGRESSION,
+    /** A vote was changed within the same term. */
+    VOTE_CHANGED,
+    /** A suffix truncation boundary is below 1 or beyond the end of the log. */
+    INVALID_TRUNCATION
 }
