@@ -187,7 +187,25 @@ public interface RaftStorage extends Closeable {
     CompletableFuture<List<LogEntryData>> replayLog();
 
     /**
-     * Closes the storage, releasing all resources.
+     * Starts closing the storage and completes after all resources have been released.
+     * <p>
+     * Implementations must make this operation idempotent. The default preserves
+     * compatibility for implementations whose {@link #close()} is synchronous.
+     *
+     * @return a future that completes when the storage is fully closed
+     */
+    default CompletableFuture<Void> closeAsync() {
+        try {
+            close();
+            return CompletableFuture.completedFuture(null);
+        } catch (Throwable error) {
+            return CompletableFuture.failedFuture(error);
+        }
+    }
+
+    /**
+     * Initiates storage close. Implementations may release resources asynchronously;
+     * use {@link #closeAsync()} when the caller must observe completion.
      * <p>
      * After close, no other methods should be called.
      */

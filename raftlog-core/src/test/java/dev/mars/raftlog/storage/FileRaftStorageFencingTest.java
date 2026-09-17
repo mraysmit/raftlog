@@ -24,7 +24,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
-import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -65,19 +64,7 @@ class FileRaftStorageFencingTest {
     }
 
     private static void close(FileRaftStorage storage, Path dir) throws Exception {
-        storage.close();
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-        try (FileChannel channel = FileChannel.open(dir.resolve("raft.lock"), StandardOpenOption.WRITE)) {
-            while (System.nanoTime() < deadline) {
-                try (var lock = channel.tryLock()) {
-                    if (lock != null) return;
-                } catch (OverlappingFileLockException pendingClose) {
-                    // still owned by the closing instance
-                }
-                Thread.sleep(5);
-            }
-        }
-        fail("Storage did not release its lock after close");
+        await(storage.closeAsync());
     }
 
     private void seed() throws Exception {

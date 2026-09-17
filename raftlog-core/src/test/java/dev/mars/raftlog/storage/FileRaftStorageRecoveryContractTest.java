@@ -7,8 +7,9 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.io.IOException;
+import java.lang.reflect.Field;
 import java.nio.channels.FileChannel;
-import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -16,6 +17,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -39,20 +42,7 @@ class FileRaftStorageRecoveryContractTest {
     }
 
     private static void close(FileRaftStorage storage, Path dir) throws Exception {
-        storage.close();
-        // close() queues cleanup. Observe real lock release before a fresh instance opens.
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-        try (FileChannel channel = FileChannel.open(dir.resolve("raft.lock"), StandardOpenOption.WRITE)) {
-            while (System.nanoTime() < deadline) {
-                try (var lock = channel.tryLock()) {
-                    if (lock != null) return;
-                } catch (OverlappingFileLockException pendingClose) {
-                    // The previous instance still owns the lock.
-                }
-                Thread.sleep(5);
-            }
-        }
-        fail("Storage did not release its lock after close");
+        await(storage.closeAsync());
     }
 
     private static void assertEntries(List<LogEntryData> expected, List<LogEntryData> actual) {
@@ -76,6 +66,147 @@ class FileRaftStorageRecoveryContractTest {
         FileRaftStorage storage = open(dir);
         try { return await(storage.replayLog()); }
         finally { close(storage, dir); }
+    }
+
+    @Test void closeCompletionAllowsImmediateReopenAndIsIdempotent() throws Exception {
+        FileRaftStorage first = open(tempDir);
+        CompletableFuture<Void> firstClose = first.closeAsync();
+        assertSame(firstClose, first.closeAsync());
+        await(firstClose);
+
+        FileRaftStorage second = open(tempDir);
+        close(second, tempDir);
+    }
+
+    @Test void concurrentOpenOfSameDirectoryIsIdempotent() throws Exception {
+        FileRaftStorage storage = new FileRaftStorage(true);
+        CompletableFuture<Void> firstOpen = storage.open(tempDir);
+        CompletableFuture<Void> secondOpen = storage.open(tempDir);
+
+        await(firstOpen);
+        await(secondOpen);
+        await(storage.closeAsync());
+    }
+
+    @Test void operationsAfterCloseFailWithStorageExceptionNotExecutorRejection() throws Exception {
+        FileRaftStorage storage = open(tempDir);
+        await(storage.closeAsync());
+
+        List<CompletableFuture<?>> rejected = List.of(
+                storage.appendEntries(List.of(entry(1, 1))),
+                storage.sync(),
+                storage.replayLog(),
+                storage.loadMetadata(),
+                storage.updateMetadata(1, Optional.empty()),
+                storage.truncateSuffix(1),
+                storage.truncatePrefix(1),
+                storage.open(tempDir));
+        for (CompletableFuture<?> future : rejected) {
+            assertTrue(future.isCompletedExceptionally());
+            Throwable cause = assertThrows(java.util.concurrent.ExecutionException.class, future::get).getCause();
+            assertInstanceOf(FileRaftStorage.StorageException.class, cause);
+            assertTrue(cause.getMessage().startsWith("Storage is closed"), cause.getMessage());
+        }
+    }
+
+    @Test void closeDrainsOperationsAcceptedBeforeIt() throws Exception {
+        CountDownLatch forceStarted = new CountDownLatch(1);
+        CountDownLatch releaseForce = new CountDownLatch(1);
+        CompactionIo blockingIo = new CompactionIo() {
+            @Override
+            void forceChannel(FileChannel channel) throws IOException {
+                forceStarted.countDown();
+                try {
+                    assertTrue(releaseForce.await(10, TimeUnit.SECONDS), "Timed out waiting to release force");
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while blocking force", e);
+                }
+                super.forceChannel(channel);
+            }
+        };
+        RaftStorageConfig config = RaftStorageConfig.builder().dataDir(tempDir.toString()).build();
+        FileRaftStorage storage = new FileRaftStorage(config, blockingIo);
+        await(storage.open());
+
+        CompletableFuture<Void> blockingSync = storage.sync();
+        assertTrue(forceStarted.await(10, TimeUnit.SECONDS));
+        CompletableFuture<Void> acceptedAppend = storage.appendEntries(List.of(entry(1, 1)));
+        CompletableFuture<Void> close = storage.closeAsync();
+        releaseForce.countDown();
+
+        await(blockingSync);
+        await(acceptedAppend);
+        await(close);
+        assertEntries(List.of(entry(1, 1)), recover(tempDir));
+    }
+
+    @Test void executorRefusalIsReportedThroughFailedFuture() throws Exception {
+        FileRaftStorage storage = new FileRaftStorage(true);
+        Field executorField = FileRaftStorage.class.getDeclaredField("walExecutor");
+        executorField.setAccessible(true);
+        ((ExecutorService) executorField.get(storage)).shutdown();
+
+        CompletableFuture<Void> rejected = assertDoesNotThrow(() -> storage.open(tempDir));
+        Throwable cause = assertThrows(java.util.concurrent.ExecutionException.class, rejected::get).getCause();
+        assertInstanceOf(FileRaftStorage.StorageException.class, cause);
+        assertTrue(cause.getMessage().startsWith("Storage operation could not be scheduled"), cause.getMessage());
+    }
+
+    @Test void appendCapturesCallerOwnedListBeforeReturning() throws Exception {
+        CountDownLatch forceStarted = new CountDownLatch(1);
+        CountDownLatch releaseForce = new CountDownLatch(1);
+        FileRaftStorage storage = storageWithBlockingForce(forceStarted, releaseForce);
+        await(storage.open());
+        CompletableFuture<Void> blockingSync = storage.sync();
+        assertTrue(forceStarted.await(10, TimeUnit.SECONDS));
+
+        ArrayList<LogEntryData> entries = new ArrayList<>(List.of(entry(1, 1)));
+        CompletableFuture<Void> append = storage.appendEntries(entries);
+        entries.clear();
+        releaseForce.countDown();
+
+        await(blockingSync);
+        await(append);
+        await(storage.closeAsync());
+        assertEntries(List.of(entry(1, 1)), recover(tempDir));
+    }
+
+    @Test void appendCapturesCallerOwnedPayloadBeforeReturning() throws Exception {
+        CountDownLatch forceStarted = new CountDownLatch(1);
+        CountDownLatch releaseForce = new CountDownLatch(1);
+        FileRaftStorage storage = storageWithBlockingForce(forceStarted, releaseForce);
+        await(storage.open());
+        CompletableFuture<Void> blockingSync = storage.sync();
+        assertTrue(forceStarted.await(10, TimeUnit.SECONDS));
+
+        byte[] payload = {1};
+        CompletableFuture<Void> append = storage.appendEntries(List.of(new LogEntryData(1, 1, payload)));
+        payload[0] = 9;
+        releaseForce.countDown();
+
+        await(blockingSync);
+        await(append);
+        await(storage.closeAsync());
+        assertEntries(List.of(entry(1, 1)), recover(tempDir));
+    }
+
+    private FileRaftStorage storageWithBlockingForce(CountDownLatch forceStarted,
+                                                     CountDownLatch releaseForce) {
+        CompactionIo blockingIo = new CompactionIo() {
+            @Override
+            void forceChannel(FileChannel channel) throws IOException {
+                forceStarted.countDown();
+                try {
+                    assertTrue(releaseForce.await(10, TimeUnit.SECONDS), "Timed out waiting to release force");
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while blocking force", e);
+                }
+            }
+        };
+        RaftStorageConfig config = RaftStorageConfig.builder().dataDir(tempDir.toString()).build();
+        return new FileRaftStorage(config, blockingIo);
     }
 
     @Test void overlappingBatchAppendsOnlyNewEntriesAndRetryAfterRestartWritesNothing() throws Exception {
