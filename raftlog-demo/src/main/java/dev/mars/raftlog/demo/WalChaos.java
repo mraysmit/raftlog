@@ -166,7 +166,7 @@ public class WalChaos {
         AtomicInteger successCount = new AtomicInteger(0);
         AtomicInteger errorCount = new AtomicInteger(0);
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
 
             ExecutorService executor = Executors.newFixedThreadPool(numThreads);
@@ -227,7 +227,7 @@ public class WalChaos {
         int updatesPerThread = 20;
         AtomicInteger errorCount = new AtomicInteger(0);
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
 
             ExecutorService executor = Executors.newFixedThreadPool(numThreads);
@@ -274,7 +274,7 @@ public class WalChaos {
         int numThreads = 10;
         int opsPerThread = 50;
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
 
             AtomicLong indexCounter = new AtomicLong(1);
@@ -339,7 +339,7 @@ public class WalChaos {
         AtomicLong indexCounter = new AtomicLong(1);
 
         for (int i = 0; i < cycles; i++) {
-            try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+            try (FileRaftStorage storage = new FileRaftStorage(config)) {
                 storage.open().join();
 
                 // Quick append
@@ -353,7 +353,7 @@ public class WalChaos {
         }
 
         // Verify all entries survived
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
             if (entries.size() != cycles) {
@@ -369,7 +369,7 @@ public class WalChaos {
                 .syncEnabled(true)
                 .build();
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
 
             AtomicBoolean running = new AtomicBoolean(true);
@@ -423,7 +423,7 @@ public class WalChaos {
                 .syncEnabled(true)
                 .build();
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
 
             int numThreads = 10;
@@ -492,7 +492,7 @@ public class WalChaos {
                 .build();
 
         // Write some valid entries
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             for (int i = 1; i <= 10; i++) {
                 storage.appendEntries(List.of(
@@ -511,7 +511,7 @@ public class WalChaos {
 
         // Reopen and verify recovery. Damage in the last record is a torn tail and is
         // truncated; damage with valid records after it is reported and left in place.
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             replayExpectingRepairOrReport(storage, "random corruption");
         }
@@ -533,6 +533,34 @@ public class WalChaos {
         }
     }
 
+    /**
+     * Replays a WAL whose tail is ambiguous corruption and requires the strict
+     * outcome: a {@link FileRaftStorage.CorruptLogException} naming the expected
+     * number of clean entries before the damage, with the file left untouched.
+     */
+    private static void replayExpectingCorruptionReport(FileRaftStorage storage, String what,
+                                                        int expectedEntriesBefore) throws IOException {
+        Path walFile = storage.config().dataDir().resolve("raft.log");
+        long sizeBefore = Files.size(walFile);
+        try {
+            List<LogEntryData> entries = storage.replayLog().join();
+            throw new AssertionError("Expected corruption report after " + what
+                    + " but replay returned " + entries.size() + " entries");
+        } catch (java.util.concurrent.CompletionException e) {
+            if (!(e.getCause() instanceof FileRaftStorage.CorruptLogException corrupt)) throw e;
+            if (corrupt.entriesBeforeCorruption() != expectedEntriesBefore) {
+                throw new AssertionError("Expected " + expectedEntriesBefore + " entries before corruption, got "
+                        + corrupt.entriesBeforeCorruption());
+            }
+            long sizeAfter = Files.size(walFile);
+            if (sizeAfter != sizeBefore) {
+                throw new AssertionError("WAL was modified: " + sizeBefore + " -> " + sizeAfter + " bytes");
+            }
+            LOG.info("    Corruption reported at byte {} after {}: {} entries precede it, file untouched",
+                    corrupt.corruptOffset(), what, corrupt.entriesBeforeCorruption());
+        }
+    }
+
     private void zeroFillCorruption() throws Exception {
         Path testDir = createTestDir("zero-fill");
         RaftStorageConfig config = RaftStorageConfig.builder()
@@ -540,7 +568,7 @@ public class WalChaos {
                 .build();
 
         // Write valid entries
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             for (int i = 1; i <= 5; i++) {
                 storage.appendEntries(List.of(
@@ -557,13 +585,12 @@ public class WalChaos {
             channel.write(zeros);
         }
 
-        // Should recover entries before zeros
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        // A zeroed block longer than a record header is indistinguishable from
+        // acknowledged records that a failing device later returned as zeros. Replay
+        // must report it and leave the file untouched rather than truncate it.
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
-            List<LogEntryData> entries = storage.replayLog().join();
-            if (entries.size() != 5) {
-                throw new AssertionError("Expected 5 entries, got " + entries.size());
-            }
+            replayExpectingCorruptionReport(storage, "zero-filled tail", 5);
         }
     }
 
@@ -574,7 +601,7 @@ public class WalChaos {
                 .build();
 
         // Write entries
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             for (int i = 1; i <= 5; i++) {
                 storage.appendEntries(List.of(
@@ -596,7 +623,7 @@ public class WalChaos {
         }
 
         // Entries 4-5 remain valid after the damage, so this is reported, not truncated
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             replayExpectingRepairOrReport(storage, "magic corruption");
         }
@@ -609,7 +636,7 @@ public class WalChaos {
                 .build();
 
         // Write entries
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             for (int i = 1; i <= 5; i++) {
                 storage.appendEntries(List.of(
@@ -627,7 +654,7 @@ public class WalChaos {
         Files.write(walFile, data);
 
         // The CRC detects the flip; entries 2-5 remain valid, so it is reported, not truncated
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             replayExpectingRepairOrReport(storage, "CRC bit flip");
         }
@@ -640,7 +667,7 @@ public class WalChaos {
                 .build();
 
         // Write entries
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             for (int i = 1; i <= 5; i++) {
                 storage.appendEntries(List.of(
@@ -663,7 +690,7 @@ public class WalChaos {
         }
 
         // Should recover all 5 valid entries
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
             if (entries.size() != 5) {
@@ -679,7 +706,7 @@ public class WalChaos {
                 .build();
 
         // Write metadata
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             storage.updateMetadata(42, Optional.of("node-leader")).join();
         }
@@ -691,7 +718,7 @@ public class WalChaos {
         Files.write(metaFile, data);
 
         // Should detect corruption
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             try {
                 storage.loadMetadata().join();
@@ -710,7 +737,7 @@ public class WalChaos {
                 .build();
 
         // Write valid entries
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             for (int i = 1; i <= 5; i++) {
                 storage.appendEntries(List.of(
@@ -726,13 +753,11 @@ public class WalChaos {
         SECURE_RANDOM.nextBytes(garbage);
         Files.write(walFile, garbage, StandardOpenOption.APPEND);
 
-        // Should recover valid entries
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        // Garbage longer than a record header may be acknowledged data damaged after
+        // the write, so replay reports it and preserves the file instead of truncating.
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
-            List<LogEntryData> entries = storage.replayLog().join();
-            if (entries.size() != 5) {
-                throw new AssertionError("Expected 5 entries, got " + entries.size());
-            }
+            replayExpectingCorruptionReport(storage, "garbage tail", 5);
         }
     }
 
@@ -743,7 +768,7 @@ public class WalChaos {
                 .build();
 
         // Write entries, truncate, write more
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
 
             for (int i = 1; i <= 10; i++) {
@@ -766,7 +791,7 @@ public class WalChaos {
         }
 
         // Verify truncate + append worked
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
             
@@ -806,7 +831,7 @@ public class WalChaos {
         byte[] largePayload = new byte[maxSize];
         SECURE_RANDOM.nextBytes(largePayload);
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             storage.appendEntries(List.of(
                     new LogEntryData(1, 1, largePayload)
@@ -815,7 +840,7 @@ public class WalChaos {
         }
 
         // Verify
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
             if (entries.size() != 1) {
@@ -833,7 +858,7 @@ public class WalChaos {
                 .dataDir(testDir.toString())
                 .build();
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             storage.appendEntries(List.of(
                     new LogEntryData(1, 1, new byte[0]),
@@ -843,7 +868,7 @@ public class WalChaos {
             storage.sync().join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
             if (entries.size() != 3) {
@@ -869,7 +894,7 @@ public class WalChaos {
             allBytes[i] = (byte) i;
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             storage.appendEntries(List.of(
                     new LogEntryData(1, 1, allBytes)
@@ -877,7 +902,7 @@ public class WalChaos {
             storage.sync().join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
             if (!Arrays.equals(entries.get(0).payload(), allBytes)) {
@@ -905,7 +930,7 @@ public class WalChaos {
                 "𐀀𐀁𐀂𐀃" // Supplementary characters
         };
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             for (int i = 0; i < unicodeStrings.length; i++) {
                 storage.appendEntries(List.of(
@@ -915,7 +940,7 @@ public class WalChaos {
             storage.sync().join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
             for (int i = 0; i < unicodeStrings.length; i++) {
@@ -933,7 +958,7 @@ public class WalChaos {
                 .dataDir(testDir.toString())
                 .build();
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             storage.appendEntries(List.of(
                     new LogEntryData(Long.MAX_VALUE, 1, "max-index".getBytes())
@@ -941,7 +966,7 @@ public class WalChaos {
             storage.sync().join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
             if (entries.get(0).index() != Long.MAX_VALUE) {
@@ -956,7 +981,7 @@ public class WalChaos {
                 .dataDir(testDir.toString())
                 .build();
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             storage.appendEntries(List.of(
                     new LogEntryData(1, Long.MAX_VALUE, "max-term".getBytes())
@@ -965,7 +990,7 @@ public class WalChaos {
             storage.sync().join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
             PersistentMeta meta = storage.loadMetadata().join();
@@ -988,12 +1013,12 @@ public class WalChaos {
         // 10,000 character node ID
         String longNodeId = "node-" + "x".repeat(10000);
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             storage.updateMetadata(1, Optional.of(longNodeId)).join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             PersistentMeta meta = storage.loadMetadata().join();
             if (!meta.votedFor().orElse("").equals(longNodeId)) {
@@ -1017,7 +1042,7 @@ public class WalChaos {
                 new byte[]{(byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF}
         };
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             for (int i = 0; i < nullLike.length; i++) {
                 storage.appendEntries(List.of(
@@ -1027,7 +1052,7 @@ public class WalChaos {
             storage.sync().join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
             for (int i = 0; i < nullLike.length; i++) {
@@ -1059,7 +1084,7 @@ public class WalChaos {
         byte[] evilPayload = new byte[buf.remaining()];
         buf.get(evilPayload);
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             storage.appendEntries(List.of(
                     new LogEntryData(1, 1, evilPayload),
@@ -1068,7 +1093,7 @@ public class WalChaos {
             storage.sync().join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
             if (entries.size() != 2) {
@@ -1103,7 +1128,7 @@ public class WalChaos {
 
         int count = 10000;
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
 
             List<LogEntryData> batch = new ArrayList<>();
@@ -1114,7 +1139,7 @@ public class WalChaos {
             storage.sync().join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
             if (entries.size() != count) {
@@ -1132,7 +1157,7 @@ public class WalChaos {
 
         int toggles = 1000;
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
 
             for (int i = 0; i < toggles; i++) {
@@ -1140,7 +1165,7 @@ public class WalChaos {
             }
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             PersistentMeta meta = storage.loadMetadata().join();
             // Last update was toggles-1
@@ -1160,7 +1185,7 @@ public class WalChaos {
 
         int cycles = 100;
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
 
             for (int c = 0; c < cycles; c++) {
@@ -1178,7 +1203,7 @@ public class WalChaos {
             storage.sync().join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
             LOG.info("    Final log size after {} truncate cycles: {} entries", cycles, entries.size());
@@ -1197,7 +1222,7 @@ public class WalChaos {
         int payloadSize = 4096;
         int batches = 10;
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
 
             for (int b = 0; b < batches; b++) {
@@ -1212,7 +1237,7 @@ public class WalChaos {
             storage.sync().join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
             if (entries.size() != batchSize * batches) {
@@ -1230,7 +1255,7 @@ public class WalChaos {
 
         int operations = 100;
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
 
             for (int i = 1; i <= operations; i++) {
@@ -1241,7 +1266,7 @@ public class WalChaos {
             }
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
             if (entries.size() != operations) {
@@ -1275,11 +1300,11 @@ public class WalChaos {
                 .dataDir(testDir.toString())
                 .build();
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
 
             // Try to open another instance
-            try (FileRaftStorage storage2 = new FileRaftStorage(config); AutoCloseable awaited2 = closeAwaited(storage2)) {
+            try (FileRaftStorage storage2 = new FileRaftStorage(config)) {
                 try {
                     storage2.open().join();
                     // If locking is enabled, this should fail
@@ -1329,7 +1354,7 @@ public class WalChaos {
                 .dataDir(testDir.toString())
                 .build();
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             // Storage layer doesn't validate - it just stores
             storage.appendEntries(List.of(
@@ -1338,7 +1363,7 @@ public class WalChaos {
             storage.sync().join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
             if (entries.get(0).index() != -1) {
@@ -1353,7 +1378,7 @@ public class WalChaos {
                 .dataDir(testDir.toString())
                 .build();
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             storage.appendEntries(List.of(
                     new LogEntryData(1, -1, "negative-term".getBytes())
@@ -1361,7 +1386,7 @@ public class WalChaos {
             storage.sync().join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
             if (entries.get(0).term() != -1) {
@@ -1376,7 +1401,7 @@ public class WalChaos {
                 .dataDir(testDir.toString())
                 .build();
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             storage.appendEntries(List.of(
                     new LogEntryData(1, 1, "first".getBytes()),
@@ -1387,7 +1412,7 @@ public class WalChaos {
             storage.sync().join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
             // Storage layer stores as-is
@@ -1403,7 +1428,7 @@ public class WalChaos {
                 .dataDir(testDir.toString())
                 .build();
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             storage.appendEntries(List.of(
                     new LogEntryData(1, 1, "first".getBytes()),
@@ -1413,7 +1438,7 @@ public class WalChaos {
             storage.sync().join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
             // Storage stores all - deduplication is protocol layer's job
@@ -1429,7 +1454,7 @@ public class WalChaos {
                 .dataDir(testDir.toString())
                 .build();
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             
             // Append empty list
@@ -1443,7 +1468,7 @@ public class WalChaos {
             storage.sync().join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
             if (entries.size() != 1) {
@@ -1458,7 +1483,7 @@ public class WalChaos {
                 .dataDir(testDir.toString())
                 .build();
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             
             storage.appendEntries(List.of(
@@ -1471,7 +1496,7 @@ public class WalChaos {
             storage.sync().join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
             // All entries should be gone
@@ -1487,7 +1512,7 @@ public class WalChaos {
                 .dataDir(testDir.toString())
                 .build();
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             
             storage.appendEntries(List.of(
@@ -1500,7 +1525,7 @@ public class WalChaos {
             storage.sync().join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config); AutoCloseable awaited = closeAwaited(storage)) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
             // Should be a no-op
@@ -1540,10 +1565,6 @@ public class WalChaos {
      * block exits. Chaos scenarios reopen the same directory immediately and need
      * the exclusive lock released first.
      */
-    private static AutoCloseable closeAwaited(FileRaftStorage storage) {
-        return () -> storage.closeAsync().join();
-    }
-
     private Path createTestDir(String name) throws IOException {
         Path dir = baseDir.resolve(name + "-" + System.nanoTime());
         Files.createDirectories(dir);

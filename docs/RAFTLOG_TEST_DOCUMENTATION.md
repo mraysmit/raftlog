@@ -67,7 +67,7 @@ java -cp raftlog-demo/target/raftlog-demo-1.3.0.jar dev.mars.raftlog.demo.WalCha
 
 - `FileRaftStoragePrefixCompactionTest`: 9 cases covering reclaiming bytes, inclusive boundaries, retained entries/metadata, repeated operations and restart.
 - `FileRaftStorageCompactionFailureTest`: 14 cases covering real filesystem failures, publication ordering, fencing, corruption, and four abruptly terminated child JVMs.
-- `FileRaftStorageRecoveryContractTest`: 22 cases covering append/truncate/replay semantics, including torn-tail fixtures.
+- `FileRaftStorageRecoveryContractTest`: 32 cases covering append/truncate/replay semantics, torn-tail fixtures, and lifecycle races: close draining accepted work, immediate reopen after close, idempotent concurrent opens, operations queued before or behind a failed open, and `sync()` as an ordering barrier with fsync disabled.
 - `FileRaftStorageFencingTest`: 13 cases covering fencing after a failed WAL, metadata or directory force, and the replay classification of torn tails versus corruption inside the committed region.
 
 Replay policy since this change: only a structurally incomplete EOF fragment is treated as a torn write and truncated. A complete record with a bad CRC, a malformed header, arbitrary garbage, or an invalid record followed by a valid record is reported as `CorruptLogException`; the file is left untouched and the instance is fenced.
@@ -391,7 +391,7 @@ Tests for subtle protocol violations and API misuse.
 | Test | Description | Validation |
 |------|-------------|------------|
 | `Double Open Same Directory` | Open two FileRaftStorage instances on same directory | Second instance blocked by file lock |
-| `Double Close` | Call `close()` twice on same instance | No exception thrown (idempotent close) |
+| `Double Close` | Call `close()` twice on same instance | No exception thrown (idempotent close); `close()` returns only after the lock is released |
 | `Operations After Close` | Attempt append after `close()` | Operation rejected with appropriate exception |
 | `Negative Index (Protocol Violation)` | Store entry with `index = -1` | Value stored as-is (storage doesn't validate) |
 | `Negative Term (Protocol Violation)` | Store entry with `term = -1` | Value stored as-is |

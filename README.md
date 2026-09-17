@@ -109,8 +109,9 @@ for (var entry : replayed) {
     System.out.println("Index: " + entry.index() + ", Term: " + entry.term());
 }
 
-// Close when done
-storage.closeAsync().join();
+// Close when done. close() blocks until the channel and directory lock are
+// released; closeAsync() returns a future for callers that must not block.
+storage.close();
 ```
 
 ## Prefix compaction

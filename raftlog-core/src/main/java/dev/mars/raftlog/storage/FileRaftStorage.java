@@ -157,6 +157,8 @@ public final class FileRaftStorage implements RaftStorage {
      * <b>DO NOT</b> increase the pool size or add parallel write paths.
      */
     private final ExecutorService walExecutor;
+    /** The single executor thread, so close() can avoid joining its own queue. */
+    private volatile Thread walThread;
     private final RaftStorageConfig config;
     private final boolean syncEnabled;
     private final boolean verifyWrites;
@@ -166,7 +168,11 @@ public final class FileRaftStorage implements RaftStorage {
     private final String storageId = UUID.randomUUID().toString();
     private final AtomicLong operationSequence = new AtomicLong();
 
-    private Path dataDir;
+    /**
+     * Written on the WAL executor by open(); also read on caller threads for log
+     * context and error messages, hence volatile.
+     */
+    private volatile Path dataDir;
     private FileChannel logChannel;
     private FileChannel lockChannel;
     private FileLock exclusiveLock;
@@ -223,6 +229,7 @@ public final class FileRaftStorage implements RaftStorage {
         this.walExecutor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "wal-executor");
             t.setDaemon(true);
+            walThread = t;
             return t;
         });
 
@@ -352,10 +359,10 @@ public final class FileRaftStorage implements RaftStorage {
             } catch (IOException e) {
                 LOG.atError().addKeyValue("event", "storage.open.failed")
                         .setCause(e).log("Failed to open WAL at {}: {}", pathForLog(requestedPath), e.getMessage());
-                releaseExclusiveLock();
+                abandonFailedOpen();
                 throw new StorageException("Failed to open WAL at " + requestedPath, e);
             } catch (RuntimeException e) {
-                releaseExclusiveLock();
+                abandonFailedOpen();
                 throw e;
             }
         });
@@ -367,6 +374,23 @@ public final class FileRaftStorage implements RaftStorage {
         return opening;
     }
 
+    /**
+     * Releases whatever a failed open acquired so queued operations see a closed
+     * instance rather than a half-opened channel. Runs on the WAL executor.
+     */
+    private void abandonFailedOpen() {
+        FileChannel channel = logChannel;
+        logChannel = null;
+        if (channel != null) {
+            try {
+                channel.close();
+            } catch (IOException e) {
+                LOG.warn("Could not close log channel after failed open: {}", e.getMessage(), e);
+            }
+        }
+        releaseExclusiveLock();
+    }
+
     private synchronized void resetFailedOpen(CompletableFuture<Void> failedOpen) {
         if (!closed && openFuture == failedOpen) {
             openFuture = null;
@@ -374,9 +398,29 @@ public final class FileRaftStorage implements RaftStorage {
         }
     }
 
+    /**
+     * Closes the storage and blocks until the log channel and directory lock have been
+     * released, so a new instance can open the same directory as soon as this returns.
+     * <p>
+     * When called from the WAL executor thread itself (for example inside a future
+     * callback) it cannot wait on its own queue; it then behaves like {@link #closeAsync()}.
+     *
+     * @throws StorageException if resource release fails
+     */
     @Override
     public void close() {
-        closeAsync();
+        CompletableFuture<Void> completion = closeAsync();
+        if (Thread.currentThread() == walThread) {
+            LOG.debug("close() invoked on the WAL executor thread; not waiting for completion");
+            return;
+        }
+        try {
+            completion.join();
+        } catch (java.util.concurrent.CompletionException e) {
+            Throwable cause = e.getCause() != null ? e.getCause() : e;
+            if (cause instanceof StorageException se) throw se;
+            throw new StorageException("Failed to close WAL storage at " + pathForLog(dataDir), cause);
+        }
     }
 
     @Override
@@ -661,13 +705,14 @@ public final class FileRaftStorage implements RaftStorage {
     public CompletableFuture<Void> sync() {
         StorageException rejection = rejectionForNewOperation();
         if (rejection != null) return CompletableFuture.failedFuture(rejection);
-        if (!syncEnabled) {
-            LOG.trace("sync() called but fsync is disabled");
-            return CompletableFuture.completedFuture(null);
-        }
-
+        // Even with fsync disabled the request goes through the executor so that a
+        // joined sync() is still an ordering barrier for earlier appends.
         return runOperation("sync", dataDir, () -> {
             ensureHealthy();
+            if (!syncEnabled) {
+                LOG.trace("sync() called but fsync is disabled");
+                return;
+            }
             LOG.debug("Syncing WAL to disk");
             try {
                 long startNanos = System.nanoTime();
@@ -745,8 +790,15 @@ public final class FileRaftStorage implements RaftStorage {
         });
     }
 
+    /**
+     * Called on the WAL executor at the start of every operation. Rejects fenced
+     * instances and operations that were queued before an open completed, or behind an
+     * open that failed, so they fail with a StorageException rather than a
+     * NullPointerException from a missing channel.
+     */
     private void ensureHealthy() {
         if (fatalFailure != null) throw fatalFailure;
+        if (logChannel == null) throw new StorageException("Storage is not open: " + pathForLog(dataDir));
     }
 
     /**

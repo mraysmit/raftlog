@@ -834,10 +834,13 @@ public final class FileRaftStorage implements RaftStorage {
 
   @Override
   public void close() {
-    walExecutor.execute(() -> {
+    // Release runs behind any operation already accepted, and close() waits for it so
+    // a fresh instance can lock the same directory as soon as this returns.
+    CompletableFuture<Void> released = CompletableFuture.runAsync(() -> {
       try { if (logCh != null) logCh.close(); } catch (IOException ignored) { }
-    });
+    }, walExecutor);
     walExecutor.shutdown();
+    released.join();
   }
 
   public static class StorageException extends RuntimeException {
@@ -2865,6 +2868,9 @@ public class RaftNode {
  * 2. WAL operations are dispatched to walExecutor (single-threaded)
  * 3. State machine operations run on the consensus thread (callbacks hop back with *Async variants)
  * 4. In-memory state (log, commitIndex, lastApplied) is only mutated on the consensus thread
+ * 5. Storage lifecycle is serialized with operation admission: work accepted before
+ *    close() drains first, work submitted after it is rejected, and close() returns only
+ *    once the log channel and directory lock are released
  * 
  * This means:
  * - No explicit locking needed for in-memory state
