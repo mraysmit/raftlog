@@ -109,6 +109,47 @@ class FileRaftStorageRecoveryContractTest {
         }
     }
 
+    @Test void operationsQueuedBehindFailedOpenFailWithStorageException() throws Exception {
+        // Hold the directory lock so the open fails, then queue work behind it.
+        FileRaftStorage holder = open(tempDir);
+        try {
+            FileRaftStorage storage = new FileRaftStorage(true);
+            CompletableFuture<Void> opening = storage.open(tempDir);
+            CompletableFuture<Void> append = storage.appendEntries(List.of(entry(1, 1)));
+            CompletableFuture<List<LogEntryData>> replay = storage.replayLog();
+            CompletableFuture<Void> sync = storage.sync();
+
+            assertThrows(java.util.concurrent.ExecutionException.class, () -> await(opening));
+            for (CompletableFuture<?> future : List.of(append, replay, sync)) {
+                Throwable cause = assertThrows(java.util.concurrent.ExecutionException.class,
+                        () -> await(future)).getCause();
+                assertInstanceOf(FileRaftStorage.StorageException.class, cause);
+                assertTrue(cause.getMessage().startsWith("Storage is not open"), cause.getMessage());
+            }
+            await(storage.closeAsync());
+        } finally {
+            await(holder.closeAsync());
+        }
+    }
+
+    @Test void operationsBeforeOpenFailWithStorageException() throws Exception {
+        FileRaftStorage storage = new FileRaftStorage(true);
+        Throwable cause = assertThrows(java.util.concurrent.ExecutionException.class,
+                () -> await(storage.appendEntries(List.of(entry(1, 1))))).getCause();
+        assertInstanceOf(FileRaftStorage.StorageException.class, cause);
+        assertTrue(cause.getMessage().startsWith("Storage is not open"), cause.getMessage());
+        await(storage.closeAsync());
+    }
+
+    @Test void syncIsAnOrderingBarrierEvenWithFsyncDisabled() throws Exception {
+        FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(false);
+        await(storage.open(tempDir));
+        CompletableFuture<Void> append = storage.appendEntries(List.of(entry(1, 1)));
+        await(storage.sync());
+        assertTrue(append.isDone(), "sync() completed before an earlier append");
+        await(storage.closeAsync());
+    }
+
     @Test void closeDrainsOperationsAcceptedBeforeIt() throws Exception {
         CountDownLatch forceStarted = new CountDownLatch(1);
         CountDownLatch releaseForce = new CountDownLatch(1);

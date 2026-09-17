@@ -204,8 +204,9 @@ public interface RaftStorage extends Closeable {
     }
 
     /**
-     * Initiates storage close. Implementations may release resources asynchronously;
-     * use {@link #closeAsync()} when the caller must observe completion.
+     * Closes the storage and releases all resources before returning, so that a new
+     * instance may open the same directory immediately afterwards. Use
+     * {@link #closeAsync()} to observe completion without blocking.
      * <p>
      * After close, no other methods should be called.
      */

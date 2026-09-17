@@ -110,9 +110,6 @@ class EnhancedProtectionTest {
             storage.close();
             storage = null;
 
-            // Wait a moment for lock release
-            Thread.sleep(100);
-
             // Second instance should succeed
             FileRaftStorage storage2 = new FileRaftStorage(true);
             assertDoesNotThrow(() -> storage2.open(tempDir).get(5, TimeUnit.SECONDS));
@@ -390,7 +387,6 @@ class EnhancedProtectionTest {
 
             // Close and reopen
             storage.close();
-            Thread.sleep(100);
 
             storage = new FileRaftStorage(true, true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);

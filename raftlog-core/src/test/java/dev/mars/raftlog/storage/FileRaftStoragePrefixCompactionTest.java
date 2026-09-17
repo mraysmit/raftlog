@@ -6,11 +6,8 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.nio.channels.FileChannel;
-import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -35,18 +32,9 @@ class FileRaftStoragePrefixCompactionTest {
         return storage;
     }
 
-    static void close(FileRaftStorage storage, Path dir) throws Exception {
+    static void close(FileRaftStorage storage, Path dir) {
+        // close() blocks until the channel and directory lock are released.
         storage.close();
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-        try (var channel = FileChannel.open(dir.resolve("raft.lock"), StandardOpenOption.WRITE)) {
-            while (System.nanoTime() < deadline) {
-                try (var lock = channel.tryLock()) {
-                    if (lock != null) return;
-                } catch (OverlappingFileLockException pending) { }
-                Thread.sleep(5);
-            }
-        }
-        fail("Storage did not release lock");
     }
 
     static void assertEntries(List<LogEntryData> expected, List<LogEntryData> actual) {
