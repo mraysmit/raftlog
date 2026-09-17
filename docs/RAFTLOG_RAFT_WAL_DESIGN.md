@@ -116,6 +116,34 @@ Per the classic Raft paper, the following **must be durably persisted**:
 
 Durability means: **written to disk and fsync’d**.
 
+### Invariants the storage enforces
+
+The persistent state is only useful if it is a *well-formed* Raft state, so the
+storage checks the following before it writes anything and refuses violations with a
+`WriteRejectedException` carrying a `WriteRejectionReason`:
+
+| Operation | Rule | Reason |
+|-----------|------|--------|
+| `appendEntries` | First index equals the next index after the tail; batch indices contiguous; indices start at 1 | `INDEX_NOT_CONTIGUOUS` |
+| `appendEntries` | Terms non-decreasing within the batch and against the last entry | `TERM_REGRESSION` |
+| `truncateSuffix` | Boundary at least 1 and no greater than next index (exactly at the tail is a no-op) | `INVALID_TRUNCATION` |
+| `updateMetadata` | Term not below the persisted term | `TERM_REGRESSION` |
+| `updateMetadata` | Vote in the persisted term not changed once cast | `VOTE_CHANGED` |
+| any write | A non-empty log has been replayed since open, and no write has failed since | `LOG_STATE_UNKNOWN` |
+
+Replay applies the same shape check to the reconstructed log and fails on a gap, a
+term regression, or a first entry that does not follow the compaction boundary. The
+tail state is owned by the WAL executor and is established by `open()` on an empty file
+(next index 1), by `replayLog()`, and by `truncatePrefix()`. Compaction persists its
+boundary as a `PREFIX` record at the head of the rewritten WAL, so after a restart the
+log continues at the boundary plus one even when nothing was retained, and a suffix
+truncation cannot reach into the compacted prefix.
+
+Refusal, not repair, is deliberate. Concurrent appenders, a leader that resends an
+index without truncating first, or a node that regresses its term are all bugs. The
+storage reports them at the call site rather than recording a log that replays into
+something the AppendEntries algorithm cannot interpret.
+
 ---
 
 ## 3. Design Constraints & Assumptions
@@ -212,6 +240,12 @@ On node startup:
 1. Load `meta.dat`
 2. Replay `raft.log` sequentially
 3. Truncate `raft.log` to the last valid byte offset
+
+Replay is not optional. `open()` seeds the term/vote baseline from `meta.dat` so
+metadata updates can be checked immediately, but the log tail is only known after
+`replayLog()`; until then every append and suffix truncation on a non-empty log is
+refused with `LOG_STATE_UNKNOWN`. A write that fails part way also marks the tail
+unknown, so the node must replay before it writes again.
 
 ---
 
@@ -341,6 +375,11 @@ This is significant implementation effort that can be deferred.
 
 **If you need this later:** You don't for Raft. If you somehow need parallel writes, you're probably building something other than a Raft log.
 
+**What happens if you do it anyway:** the executor still serializes the bytes, and the
+invariant checks refuse every append that does not continue the tail. Racing appenders
+therefore get a stream of `INDEX_NOT_CONTIGUOUS` rejections and a contiguous log, never
+a reordered or interleaved one. The chaos suite's writer storm demonstrates exactly this.
+
 ### 13.7 No Read-After-Write Guarantees Beyond In-Memory State
 
 **What this means:** After you call `appendEntries()`, you can immediately read those entries—from the **in-memory log**. There's no guarantee you can read them **from disk** until recovery.
@@ -371,7 +410,7 @@ The compaction flow is:
 Implementation details:
 - No segment files are used; compaction is implemented by rewriting `raft.log` via `raft.log.tmp`.
 - The WAL executor serializes compaction with append, suffix truncation, metadata, replay and sync.
-- Retained APPEND records are written to the temp file, then forced, and then atomically moved into place.
+- A PREFIX record carrying the inclusive boundary is written first, then the retained APPEND records, then the temp file is forced and atomically moved into place.
 - Directory force is attempted after replacement on non-Windows providers.
 - `truncatePrefix` is idempotent; zero is a no-op and negative indices are rejected.
 
@@ -537,6 +576,7 @@ A simple, robust binary record:
 ```java
 static final byte TYPE_TRUNCATE = 1;
 static final byte TYPE_APPEND   = 2;
+static final byte TYPE_PREFIX   = 3; // compaction boundary; first record of a compacted WAL, INDEX = inclusive boundary
 ```
 
 ### 15.4 meta.dat (term + vote)

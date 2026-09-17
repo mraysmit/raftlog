@@ -64,7 +64,10 @@ class FileRaftStoragePrefixCompactionTest {
             await(storage.sync());
             await(storage.truncatePrefix(boundary));
             assertEntries(expected, await(storage.replayLog()));
-            assertEquals(expected.size() * 35L, Files.size(dir.resolve("raft.log")));
+            // Boundary 0 is a no-op that rewrites nothing. Otherwise a 31-byte PREFIX marker
+            // leads the rewritten WAL, followed by 35 bytes per retained entry.
+            long marker = boundary == 0 ? 0 : 31;
+            assertEquals(marker + expected.size() * 35L, Files.size(dir.resolve("raft.log")));
         } finally { close(storage, dir); }
         storage = open(dir);
         try {
@@ -73,16 +76,16 @@ class FileRaftStoragePrefixCompactionTest {
         } finally { close(storage, dir); }
     }
 
-    @Test void compactionResolvesSuffixMarkersButPreservesRawAppendOrderAndDuplicates() throws Exception {
-        var expected = List.of(entry(2, 1), entry(2, 1), entry(3, 3), entry(5, 3), entry(4, 3));
+    @Test void compactionResolvesSuffixMarkersAndRetainsOnlyEntriesAboveTheBoundary() throws Exception {
+        var expected = List.of(entry(2, 1), entry(3, 3), entry(4, 3), entry(5, 3));
         FileRaftStorage storage = open(dir);
         try {
-            await(storage.appendEntries(List.of(entry(1, 1), entry(2, 1), entry(2, 1), entry(3, 2), entry(4, 2))));
+            await(storage.appendEntries(List.of(entry(1, 1), entry(2, 1), entry(3, 2), entry(4, 2))));
             await(storage.truncateSuffix(3));
-            await(storage.appendEntries(expected.subList(2, 5)));
+            await(storage.appendEntries(expected.subList(1, 4)));
             await(storage.truncatePrefix(1));
             assertEntries(expected, await(storage.replayLog()));
-            assertEquals(175, Files.size(dir.resolve("raft.log")));
+            assertEquals(31 + 4 * 35, Files.size(dir.resolve("raft.log")));
         } finally { close(storage, dir); }
         assertReopened(dir, expected);
     }
@@ -111,7 +114,8 @@ class FileRaftStoragePrefixCompactionTest {
         FileRaftStorage storage = open(dir);
         try {
             await(storage.truncatePrefix(100));
-            assertEquals(0, Files.size(dir.resolve("raft.log")));
+            // Nothing retained: only the persisted boundary remains.
+            assertEquals(31, Files.size(dir.resolve("raft.log")));
             await(storage.appendEntries(List.of(entry(101, 5))));
             await(storage.sync());
         } finally { close(storage, dir); }

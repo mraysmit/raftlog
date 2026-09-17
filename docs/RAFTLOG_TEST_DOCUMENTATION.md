@@ -67,7 +67,7 @@ java -cp raftlog-demo/target/raftlog-demo-1.3.0.jar dev.mars.raftlog.demo.WalCha
 
 - `FileRaftStoragePrefixCompactionTest`: 9 cases covering reclaiming bytes, inclusive boundaries, retained entries/metadata, repeated operations and restart.
 - `FileRaftStorageCompactionFailureTest`: 14 cases covering real filesystem failures, publication ordering, fencing, corruption, and four abruptly terminated child JVMs.
-- `FileRaftStorageRecoveryContractTest`: 32 cases covering append/truncate/replay semantics, torn-tail fixtures, and lifecycle races: close draining accepted work, immediate reopen after close, idempotent concurrent opens, operations queued before or behind a failed open, and `sync()` as an ordering barrier with fsync disabled.
+- `FileRaftStorageRecoveryContractTest`: 36 cases covering append/truncate/replay semantics, torn-tail fixtures, and lifecycle races: close draining accepted work, immediate reopen after close, idempotent concurrent opens, operations queued before or behind a failed open, and `sync()` as an ordering barrier with fsync disabled. Also the Raft invariant checks: contiguous appends, term regression, vote change within a term, truncation bounds, the replay-before-write precondition, and `AppendPlan` position arithmetic after prefix compaction.
 - `FileRaftStorageFencingTest`: 13 cases covering fencing after a failed WAL, metadata or directory force, and the replay classification of torn tails versus corruption inside the committed region.
 
 Replay policy since this change: only a structurally incomplete EOF fragment is treated as a torn write and truncated. A complete record with a bad CRC, a malformed header, arbitrary garbage, or an invalid record followed by a valid record is reported as `CorruptLogException`; the file is left untouched and the instance is fenced.
@@ -208,7 +208,7 @@ Adversarial tests that attempt to break the storage implementation through corru
 
 | Test | Description |
 |------|-------------|
-| `maxIndexValue` | `Long.MAX_VALUE` index works |
+| `maxIndexValue` | `Long.MAX_VALUE` index works as the continuation of a log compacted through `Long.MAX_VALUE - 1` |
 | `maxTermValue` | `Long.MAX_VALUE` term works |
 | `zeroIndex` | Index 0 is valid |
 | `zeroTerm` | Term 0 is valid |
@@ -303,15 +303,16 @@ Tests for race conditions, deadlocks, and concurrent access patterns.
 
 | Test | Description | Validation |
 |------|-------------|------------|
-| `Concurrent Writer Storm` | 20 threads × 100 entries all writing simultaneously | All 2,000 entries written without corruption or data loss |
-| `Concurrent Metadata Thrashing` | 50 threads rapidly updating metadata | Final metadata readable and consistent |
-| `Mixed Operations Chaos` | 10 threads performing random append/truncate/metadata/sync ops | Log replays successfully after chaos |
-| `Rapid Open/Close Cycles` | 50 cycles of open, write single entry, close immediately | All 50 entries survive across restarts |
+| `Concurrent Writer Storm` | 20 threads × 100 entries racing to append indices from a shared counter | Only appends that continue the tail are accepted; every other one is refused with `INDEX_NOT_CONTIGUOUS`; accepted + refused = 2,000; replay returns exactly the accepted entries, contiguous, with intact payloads |
+| `Concurrent Metadata Thrashing` | 50 threads persisting unordered terms | Lower terms refused with `TERM_REGRESSION`; persisted term is the highest accepted one with its own vote |
+| `Mixed Operations Chaos` | 10 threads performing random append/truncate/metadata/sync ops | Every ordering violation refused with a reason, nothing else fails; surviving log is contiguous |
+| `Rapid Open/Close Cycles` | 50 cycles of open, write single entry, close immediately | Writing before replay is refused with `LOG_STATE_UNKNOWN`; after replay all 50 entries survive across restarts |
 | `Concurrent Replay During Writes` | Writer thread and replay thread running in parallel for 2 seconds | No crashes, deadlocks, or corruption |
-| `Thread Interrupt Storm` | 10 threads writing while being randomly interrupted | Log survives with partial data intact |
+| `Thread Interrupt Storm` | 10 threads racing to write while being randomly interrupted | Out-of-order appends refused; log survives contiguous |
 
 **What these tests catch:**
 - Race conditions between concurrent writers
+- Silent reordering or duplication when the caller breaks Raft's single-writer rule
 - Deadlocks in internal synchronization
 - Data interleaving between writers
 - Resource cleanup issues during interrupts
@@ -350,7 +351,7 @@ Tests for extreme values and boundary conditions.
 | `Empty Payload` | Store 3 entries with zero-length payloads | All 3 entries with `payload.length == 0` |
 | `Binary Payload (All Bytes 0x00-0xFF)` | Store payload containing all 256 possible byte values | Exact byte-for-byte match on replay |
 | `Unicode Payload Storm` | 10 entries with various Unicode (Chinese, Arabic, Cyrillic, Emoji, control chars, supplementary) | All UTF-8 encoded strings survive intact |
-| `Max Long Index` | Entry with `index = Long.MAX_VALUE` | Index preserved exactly |
+| `Max Long Index` | Entry with `index = Long.MAX_VALUE` after compaction through `Long.MAX_VALUE - 1` | Refused on a fresh log; accepted after compaction and preserved across restart via the persisted boundary |
 | `Max Long Term` | Entry and metadata with `term = Long.MAX_VALUE` | Term preserved in both entry and metadata |
 | `Very Long VotedFor String` | 10,000+ character node ID in votedFor | String preserved exactly |
 | `Null-like Payloads` | Payloads: `{0}`, `{0,0,0,0}`, `"null"`, `"NULL"`, `"\0\0\0\0"`, `{0xFF,0xFF,0xFF,0xFF}` | Each preserved exactly |
@@ -393,19 +394,19 @@ Tests for subtle protocol violations and API misuse.
 | `Double Open Same Directory` | Open two FileRaftStorage instances on same directory | Second instance blocked by file lock |
 | `Double Close` | Call `close()` twice on same instance | No exception thrown (idempotent close); `close()` returns only after the lock is released |
 | `Operations After Close` | Attempt append after `close()` | Operation rejected with appropriate exception |
-| `Negative Index (Protocol Violation)` | Store entry with `index = -1` | Value stored as-is (storage doesn't validate) |
-| `Negative Term (Protocol Violation)` | Store entry with `term = -1` | Value stored as-is |
-| `Non-Sequential Indices` | Batch with indices [1, 5, 3, 100] (gaps and out-of-order) | All 4 entries stored as-is |
-| `Duplicate Indices in Batch` | Batch with 3 entries all having `index = 1` | All 3 entries stored (dedup is protocol layer's job) |
+| `Negative Index (Protocol Violation)` | Append entry with `index = -1` | Refused with `INDEX_NOT_CONTIGUOUS`; nothing written |
+| `Negative Term (Protocol Violation)` | Append entry with `term = -1` | Refused with `TERM_REGRESSION`; nothing written |
+| `Non-Sequential Indices` | Batch with indices [1, 5, 3, 100] (gaps and out-of-order) | Whole batch refused with `INDEX_NOT_CONTIGUOUS`; entry 1 not written either |
+| `Duplicate Indices in Batch` | Batch with 3 entries all having `index = 1`; then re-send of an existing index | Both refused with `INDEX_NOT_CONTIGUOUS`; only the one valid append survives |
 | `Empty Batch Append` | Append empty `List.of()` followed by real entry | No-op for empty, real entry stored |
-| `Truncate to Negative` | `truncateSuffix(-1)` after writing 2 entries | All entries removed (truncate everything) |
-| `Truncate Beyond Log` | `truncateSuffix(1000)` on 2-entry log | No-op (both entries preserved) |
+| `Truncate to Negative` | `truncateSuffix(-1)` and `truncateSuffix(0)` after writing 2 entries | Both refused with `INVALID_TRUNCATION`; both entries preserved |
+| `Truncate Beyond Log` | `truncateSuffix(1000)` on 2-entry log, then `truncateSuffix(3)` | 1000 refused with `INVALID_TRUNCATION`; 3 (exactly at the tail) is a legal no-op |
 
 **What these tests catch:**
 - File locking mechanism effectiveness
 - Resource cleanup on close
 - Idempotent operations
-- Storage layer vs protocol layer responsibility separation
+- Storage layer refusing sequences that are not a valid Raft log
 - Edge cases in truncation logic
 - Handling of invalid/malicious input
 
@@ -538,7 +539,7 @@ Tests for integer overflow in batch size calculations.
 | `largeBatchSizeHandled` | Batch with total size near Integer.MAX_VALUE handled |
 | `manySmallEntriesBatch` | 10,000 small entries in single batch doesn't overflow |
 | `payloadLengthOverflowRejected` | Negative payload length (overflow) rejected |
-| `indexWrapAround` | Index at Long.MAX_VALUE handled correctly |
+| `indexWrapAround` | Index at Long.MAX_VALUE handled correctly after compaction through `Long.MAX_VALUE - 1` |
 
 ### Middle-of-the-Log Corruption (5 tests)
 

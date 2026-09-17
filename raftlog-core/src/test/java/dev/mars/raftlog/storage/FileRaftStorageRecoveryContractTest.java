@@ -62,6 +62,14 @@ class FileRaftStorageRecoveryContractTest {
         plan.applyTo(memory);
     }
 
+    private static FileRaftStorage.WriteRejectedException assertRejected(
+            CompletableFuture<?> future, WriteRejectionReason reason) {
+        var failure = assertThrows(java.util.concurrent.ExecutionException.class, () -> await(future));
+        var rejected = assertInstanceOf(FileRaftStorage.WriteRejectedException.class, failure.getCause());
+        assertEquals(reason, rejected.reason());
+        return rejected;
+    }
+
     private static List<LogEntryData> recover(Path dir) throws Exception {
         FileRaftStorage storage = open(dir);
         try { return await(storage.replayLog()); }
@@ -302,8 +310,19 @@ class FileRaftStorageRecoveryContractTest {
         assertEntries(expected, recover(tempDir));
     }
 
+    @Test void suffixTruncationBeyondTheTailIsRejectedWithoutWriting() throws Exception {
+        FileRaftStorage storage = open(tempDir);
+        try {
+            await(storage.appendEntries(List.of(entry(1, 1), entry(2, 1))));
+            long before = Files.size(tempDir.resolve("raft.log"));
+            assertRejected(storage.truncateSuffix(99), WriteRejectionReason.INVALID_TRUNCATION);
+            assertEquals(before, Files.size(tempDir.resolve("raft.log")));
+        } finally { close(storage, tempDir); }
+        assertEntries(List.of(entry(1, 1), entry(2, 1)), recover(tempDir));
+    }
+
     @ParameterizedTest
-    @ValueSource(longs = {1, 2, 4, 5, 99})
+    @ValueSource(longs = {1, 2, 4, 5})
     void suffixBoundaryIsInclusiveAndRepeatedTruncationAllowsContinuedAppend(long from) throws Exception {
         List<LogEntryData> original = List.of(entry(1, 1), entry(2, 1), entry(3, 1), entry(4, 1));
         List<LogEntryData> expected = new ArrayList<>(original.stream().filter(e -> e.index() < from).toList());
@@ -317,6 +336,7 @@ class FileRaftStorageRecoveryContractTest {
         assertEntries(expected, recover(tempDir));
         storage = open(tempDir);
         try {
+            await(storage.replayLog());
             LogEntryData next = entry(expected.size() + 1L, 2);
             await(storage.appendEntries(List.of(next)));
             await(storage.sync());
@@ -325,15 +345,124 @@ class FileRaftStorageRecoveryContractTest {
         assertEntries(expected, recover(tempDir));
     }
 
-    @Test void suffixTruncationRemovesEveryDuplicateAtAndBeyondBoundary() throws Exception {
+    @Test void batchWithDuplicateIndexIsRejectedWholeAndTruncationThenContinues() throws Exception {
         FileRaftStorage storage = open(tempDir);
         try {
-            await(storage.appendEntries(List.of(entry(1, 1), entry(2, 1), entry(3, 1), entry(2, 2))));
+            assertRejected(storage.appendEntries(List.of(entry(1, 1), entry(2, 1), entry(3, 1), entry(2, 2))),
+                    WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            assertEquals(0, Files.size(tempDir.resolve("raft.log")), "a rejected batch writes nothing");
+            await(storage.appendEntries(List.of(entry(1, 1), entry(2, 1), entry(3, 1))));
             await(storage.truncateSuffix(2));
             await(storage.appendEntries(List.of(entry(2, 3))));
             await(storage.sync());
         } finally { close(storage, tempDir); }
         assertEntries(List.of(entry(1, 1), entry(2, 3)), recover(tempDir));
+    }
+
+    @Test void writesBeforeReplayOnExistingLogAreRejected() throws Exception {
+        FileRaftStorage storage = open(tempDir);
+        try {
+            await(storage.appendEntries(List.of(entry(1, 1))));
+            await(storage.sync());
+        } finally { close(storage, tempDir); }
+        storage = open(tempDir);
+        try {
+            assertRejected(storage.appendEntries(List.of(entry(2, 1))), WriteRejectionReason.LOG_STATE_UNKNOWN);
+            assertRejected(storage.truncateSuffix(1), WriteRejectionReason.LOG_STATE_UNKNOWN);
+            await(storage.replayLog());
+            await(storage.appendEntries(List.of(entry(2, 1))));
+            await(storage.sync());
+        } finally { close(storage, tempDir); }
+        assertEntries(List.of(entry(1, 1), entry(2, 1)), recover(tempDir));
+    }
+
+    @Test void freshLogMustStartAtIndexOne() throws Exception {
+        FileRaftStorage storage = open(tempDir);
+        try {
+            assertRejected(storage.appendEntries(List.of(entry(2, 1))), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            assertRejected(storage.appendEntries(List.of(entry(7, 1))), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            assertEquals(0, Files.size(tempDir.resolve("raft.log")));
+            await(storage.appendEntries(List.of(entry(1, 1))));
+        } finally { close(storage, tempDir); }
+        assertEntries(List.of(entry(1, 1)), recover(tempDir));
+    }
+
+    @Test void compactionBoundarySurvivesRestartEvenWhenNothingIsRetained() throws Exception {
+        FileRaftStorage storage = open(tempDir);
+        try {
+            await(storage.appendEntries(List.of(entry(1, 1), entry(2, 1), entry(3, 1))));
+            await(storage.truncatePrefix(3));
+        } finally { close(storage, tempDir); }
+        storage = open(tempDir);
+        try {
+            assertEntries(List.of(), await(storage.replayLog()));
+            assertRejected(storage.appendEntries(List.of(entry(1, 1))), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            assertRejected(storage.appendEntries(List.of(entry(5, 1))), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            // Truncating into the compacted prefix is refused too.
+            assertRejected(storage.truncateSuffix(3), WriteRejectionReason.INVALID_TRUNCATION);
+            await(storage.appendEntries(List.of(entry(4, 1))));
+            await(storage.sync());
+        } finally { close(storage, tempDir); }
+        assertEntries(List.of(entry(4, 1)), recover(tempDir));
+    }
+
+    @Test void appendMustContinueAtTheTailAndTermsMustNotRegress() throws Exception {
+        FileRaftStorage storage = open(tempDir);
+        try {
+            await(storage.appendEntries(List.of(entry(1, 2), entry(2, 2))));
+            assertRejected(storage.appendEntries(List.of(entry(4, 2))), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            assertRejected(storage.appendEntries(List.of(entry(2, 2))), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            assertRejected(storage.appendEntries(List.of(entry(3, 1))), WriteRejectionReason.TERM_REGRESSION);
+            await(storage.appendEntries(List.of(entry(3, 2), entry(4, 5))));
+            await(storage.sync());
+        } finally { close(storage, tempDir); }
+        assertEntries(List.of(entry(1, 2), entry(2, 2), entry(3, 2), entry(4, 5)), recover(tempDir));
+    }
+
+    @Test void metadataTermCannotRegressAndVoteCannotChangeWithinTerm() throws Exception {
+        FileRaftStorage storage = open(tempDir);
+        try {
+            await(storage.updateMetadata(5, Optional.of("a")));
+            assertRejected(storage.updateMetadata(4, Optional.empty()), WriteRejectionReason.TERM_REGRESSION);
+            assertRejected(storage.updateMetadata(5, Optional.of("b")), WriteRejectionReason.VOTE_CHANGED);
+            assertRejected(storage.updateMetadata(5, Optional.empty()), WriteRejectionReason.VOTE_CHANGED);
+            await(storage.updateMetadata(5, Optional.of("a")));
+            await(storage.updateMetadata(6, Optional.empty()));
+            await(storage.updateMetadata(6, Optional.of("c")));
+        } finally { close(storage, tempDir); }
+        // The baseline survives a restart without an explicit loadMetadata().
+        storage = open(tempDir);
+        try {
+            assertRejected(storage.updateMetadata(5, Optional.of("c")), WriteRejectionReason.TERM_REGRESSION);
+            assertEquals(new RaftStorage.PersistentMeta(6, Optional.of("c")), await(storage.loadMetadata()));
+        } finally { close(storage, tempDir); }
+    }
+
+    @Test void appendPlanUsesTheLogsOwnIndicesAfterPrefixCompaction() throws Exception {
+        FileRaftStorage storage = open(tempDir);
+        List<LogEntryData> memory;
+        try {
+            List<LogEntryData> original = new ArrayList<>();
+            for (int i = 1; i <= 10; i++) original.add(entry(i, 1));
+            await(storage.appendEntries(original));
+            await(storage.truncatePrefix(6));
+            memory = new ArrayList<>(await(storage.replayLog()));
+            assertEquals(7, memory.getFirst().index());
+
+            // Leader's view diverged at index 9: a conflict the plan must find at position 2.
+            AppendPlan plan = AppendPlan.from(8, List.of(entry(8, 1), entry(9, 2), entry(10, 2)), memory);
+            assertEquals(9L, plan.truncateFromIndex());
+            assertEntries(List.of(entry(9, 2), entry(10, 2)), plan.entriesToAppend());
+            persist(storage, plan, memory);
+            await(storage.sync());
+
+            // Entries below the retained log are already in the snapshot and are skipped.
+            AppendPlan below = AppendPlan.from(5, List.of(entry(5, 1), entry(6, 1), entry(7, 1)), memory);
+            assertFalse(below.requiresPersistence());
+        } finally { close(storage, tempDir); }
+        List<LogEntryData> expected = List.of(entry(7, 1), entry(8, 1), entry(9, 2), entry(10, 2));
+        assertEntries(expected, memory);
+        assertEntries(expected, recover(tempDir));
     }
 
     @ParameterizedTest
@@ -381,6 +510,7 @@ class FileRaftStorageRecoveryContractTest {
         assertEntries(expected, recover(tempDir));
         storage = open(tempDir);
         try {
+            await(storage.replayLog());
             LogEntryData next = entry(expected.size() + 1L, 4);
             await(storage.appendEntries(List.of(next)));
             await(storage.sync());
@@ -410,13 +540,14 @@ class FileRaftStorageRecoveryContractTest {
             assertEntries(List.of(entry(1, 1), entry(2, 2)), memory);
             storage = open(dir);
             try {
+                await(storage.replayLog());
                 persist(storage, AppendPlan.from(2, List.of(entry(2, 2), entry(3, 2)), memory), memory);
             } finally { close(storage, dir); }
             assertEntries(List.of(entry(1, 1), entry(2, 2), entry(3, 2)), recover(dir));
         }
     }
 
-    @Test void rawAppendsReproduceBothReportedSequencesAfterReopen() throws Exception {
+    @Test void rawAppendOfAnAlreadyPresentIndexIsRefusedSoNoDuplicateSurvivesReopen() throws Exception {
         for (int count : List.of(2, 3)) {
             Path dir = tempDir.resolve("raw-" + count);
             List<LogEntryData> expected = new ArrayList<>();
@@ -424,9 +555,9 @@ class FileRaftStorageRecoveryContractTest {
             FileRaftStorage storage = open(dir);
             try {
                 await(storage.appendEntries(expected));
-                LogEntryData repeated = entry(count - 1, 2);
-                await(storage.appendEntries(List.of(repeated)));
-                expected.add(repeated);
+                // Re-sending an existing index without a preceding truncation is a node bug.
+                assertRejected(storage.appendEntries(List.of(entry(count - 1, 2))),
+                        WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
                 await(storage.sync());
             } finally { close(storage, dir); }
             storage = open(dir);
