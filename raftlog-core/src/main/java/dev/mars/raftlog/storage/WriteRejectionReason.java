@@ -28,5 +28,7 @@ public enum WriteRejectionReason {
     /** A vote was changed within the same term. */
     VOTE_CHANGED,
     /** A suffix truncation boundary is below 1 or beyond the end of the log. */
-    INVALID_TRUNCATION
+    INVALID_TRUNCATION,
+    /** meta.dat exists but cannot be read, so a term regression could not be detected. */
+    METADATA_UNREADABLE
 }

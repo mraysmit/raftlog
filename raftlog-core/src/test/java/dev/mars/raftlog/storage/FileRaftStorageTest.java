@@ -67,10 +67,13 @@ class FileRaftStorageTest {
         }
     }
 
-    private static FileRaftStorage.CorruptLogException assertCorruptReplay(FileRaftStorage storage) {
-        ExecutionException failure = assertThrows(ExecutionException.class,
-                () -> storage.replayLog().get(5, TimeUnit.SECONDS));
-        return assertInstanceOf(FileRaftStorage.CorruptLogException.class, failure.getCause());
+    private FileRaftStorage.CorruptLogException assertCorruptReplay(FileRaftStorage storage) {
+        // Reporting corruption must never modify the file it reports on.
+        try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> storage.replayLog().get(5, TimeUnit.SECONDS));
+            return assertInstanceOf(FileRaftStorage.CorruptLogException.class, failure.getCause());
+        }
     }
 
     // ========================================================================
@@ -223,10 +226,14 @@ class FileRaftStorageTest {
 
         LogEntryData entry = new LogEntryData(1, 1, hugePayload);
 
-        // Should fail with StorageException
-        var future = storage.appendEntries(List.of(entry));
-        
-        assertThrows(Exception.class, () -> future.get(5, TimeUnit.SECONDS));
+        // Should fail with StorageException, and must not have written any of it
+        try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+            var future = storage.appendEntries(List.of(entry));
+            assertThrows(Exception.class, () -> future.get(5, TimeUnit.SECONDS));
+        }
+
+        // Refused must also mean nothing is different after a reboot.
+        DurableState.assertRestartAgrees(storage, tempDir);
     }
 
     // ========================================================================

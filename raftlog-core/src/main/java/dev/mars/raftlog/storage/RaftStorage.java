@@ -64,7 +64,10 @@ public interface RaftStorage extends Closeable {
      * and a vote already cast in the persisted term cannot be changed within that
      * term. Either is a node bug that would allow double voting, and is refused with a
      * {@link WriteRejection} whose reason is {@link WriteRejectionReason#TERM_REGRESSION}
-     * or {@link WriteRejectionReason#VOTE_CHANGED} before anything is written.
+     * or {@link WriteRejectionReason#VOTE_CHANGED} before anything is written. If the
+     * metadata file exists but cannot be read, the persisted term is unknown and every
+     * update is refused with {@link WriteRejectionReason#METADATA_UNREADABLE} rather
+     * than risk overwriting a higher term.
      *
      * @param currentTerm the current Raft term
      * @param votedFor    the candidate ID voted for (empty if no vote cast)
@@ -109,8 +112,10 @@ public interface RaftStorage extends Closeable {
      * <p>
      * <b>Precondition:</b> a non-empty log must be replayed with {@link #replayLog()}
      * before the first write after open, so the tail is known. Until then writes are
-     * refused with {@link WriteRejectionReason#LOG_STATE_UNKNOWN}. A failed write also
-     * leaves the tail unknown until the next replay.
+     * refused with {@link WriteRejectionReason#LOG_STATE_UNKNOWN}. A write that fails
+     * part way, for any reason, also leaves the tail unknown until the next replay, so a
+     * blind retry cannot duplicate records that did reach the file. A null element fails
+     * the returned future with IllegalArgumentException; nothing is thrown synchronously.
      *
      * @param entries the log entries to append
      * @return a Future that completes when entries are written (but not necessarily synced)

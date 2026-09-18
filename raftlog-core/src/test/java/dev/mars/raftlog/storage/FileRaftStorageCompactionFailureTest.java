@@ -61,12 +61,20 @@ class FileRaftStorageCompactionFailureTest {
             assertThrows(Exception.class, () -> storage.truncatePrefix(2).get(10, TimeUnit.SECONDS));
             assertTrue(injected.get(), "Must exercise the requested real filesystem boundary");
             if (publicationAttempted) {
-                assertThrows(Exception.class, () -> storage.appendEntries(List.of(entry(4, 3))).get(10, TimeUnit.SECONDS));
-                assertThrows(Exception.class, () -> storage.truncateSuffix(1).get(10, TimeUnit.SECONDS));
-                assertThrows(Exception.class, () -> storage.updateMetadata(8, Optional.empty()).get(10, TimeUnit.SECONDS));
+                try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
+                    assertThrows(Exception.class, () -> storage.appendEntries(List.of(entry(4, 3))).get(10, TimeUnit.SECONDS));
+                }
+                try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
+                    assertThrows(Exception.class, () -> storage.truncateSuffix(1).get(10, TimeUnit.SECONDS));
+                }
+                try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
+                    assertThrows(Exception.class, () -> storage.updateMetadata(8, Optional.empty()).get(10, TimeUnit.SECONDS));
+                }
                 assertThrows(Exception.class, () -> storage.sync().get(10, TimeUnit.SECONDS));
                 assertThrows(Exception.class, () -> storage.replayLog().get(10, TimeUnit.SECONDS));
-                assertThrows(Exception.class, () -> storage.truncatePrefix(0).get(10, TimeUnit.SECONDS));
+                try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
+                    assertThrows(Exception.class, () -> storage.truncatePrefix(0).get(10, TimeUnit.SECONDS));
+                }
             } else {
                 assertEntries(ORIGINAL, await(storage.replayLog()));
                 await(storage.appendEntries(List.of(entry(4, 3))));
@@ -122,10 +130,14 @@ class FileRaftStorageCompactionFailureTest {
         byte[] before = Files.readAllBytes(dir.resolve("raft.log"));
         FileRaftStorage storage = open(dir);
         try {
+            DurableState untouchedAtLine125 = DurableState.expectUnchanged(dir);
             var failure = assertThrows(java.util.concurrent.ExecutionException.class,
                     () -> storage.truncatePrefix(-1).get(10, TimeUnit.SECONDS));
+            untouchedAtLine125.close();
             assertInstanceOf(IllegalArgumentException.class, failure.getCause());
             assertArrayEquals(before, Files.readAllBytes(dir.resolve("raft.log")));
+            // Refused must also mean nothing is different after a reboot.
+            assertEntries(ORIGINAL, DurableState.assertRestartAgrees(storage, dir));
         } finally { close(storage, dir); }
     }
 
@@ -135,8 +147,10 @@ class FileRaftStorageCompactionFailureTest {
         byte[] before = Files.readAllBytes(dir.resolve("raft.log"));
         FileRaftStorage storage = open(dir);
         try {
+            DurableState untouchedAtLine138 = DurableState.expectUnchanged(dir);
             var failure = assertThrows(java.util.concurrent.ExecutionException.class,
                     () -> storage.truncatePrefix(2).get(10, TimeUnit.SECONDS));
+            untouchedAtLine138.close();
             assertInstanceOf(FileRaftStorage.StorageException.class, failure.getCause());
             assertArrayEquals(before, Files.readAllBytes(dir.resolve("raft.log")));
             assertEntries(ORIGINAL, await(storage.replayLog()));

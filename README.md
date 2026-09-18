@@ -44,12 +44,24 @@ be a valid Raft log, before writing a byte, with a categorised `WriteRejectedExc
 | Entry terms must not decrease; a metadata term must not go below the persisted one | `TERM_REGRESSION` |
 | A vote cast in a term cannot be changed within that term | `VOTE_CHANGED` |
 | A suffix truncation must be at least 1 and not beyond the tail | `INVALID_TRUNCATION` |
-| A non-empty log must be replayed before it is written to | `LOG_STATE_UNKNOWN` |
+| A non-empty log must be replayed before it is written to, and again after any write that failed part way | `LOG_STATE_UNKNOWN` |
+| Metadata cannot be updated while `meta.dat` exists but is unreadable | `METADATA_UNREADABLE` |
 
 Replay likewise refuses a log that is not contiguous. A fresh log starts at index 1.
 Prefix compaction writes its boundary as the first record of the rewritten WAL, so a
 compacted log continues at the boundary plus one across restarts even when nothing was
-retained.
+retained. `FileRaftStorage.compactionBoundary()` reports it, and `AppendPlan.from` takes it
+so that entries already covered by the snapshot are skipped when the retained log is empty.
+
+The write path and the replay path are held to the same rules: anything the storage
+accepts must replay after a restart. A model-based test drives random operation
+sequences with restarts against a reference model to check exactly that.
+
+**Format versions.** `APPEND` and `TRUNCATE` records are format 1. The `PREFIX` record
+is format 2. A build that predates format 2 reports a compacted WAL as corrupt, so
+downgrading after a compaction is not supported. From this release on, an intact record
+with a newer format version is reported as `UnsupportedFormatException` rather than as
+corruption, and the file is left untouched.
 
 The point is loud failure over silent divergence. A node that appends out of order or
 regresses its term has a bug, and the storage reports it at the call site rather than

@@ -87,8 +87,10 @@ class EnhancedProtectionTest {
 
             // Second instance should fail
             FileRaftStorage storage2 = new FileRaftStorage(true);
+            DurableState untouchedAtLine90 = DurableState.expectUnchanged(tempDir);
             ExecutionException ex = assertThrows(ExecutionException.class, () ->
                     storage2.open(tempDir).get(5, TimeUnit.SECONDS));
+            untouchedAtLine90.close();
 
             assertTrue(ex.getCause() instanceof StorageException);
             assertTrue(ex.getCause().getMessage().contains("exclusive lock") ||
@@ -136,8 +138,10 @@ class EnhancedProtectionTest {
 
                 // Our storage should fail to open
                 storage = new FileRaftStorage(true);
+                DurableState untouchedAtLine139 = DurableState.expectUnchanged(tempDir);
                 ExecutionException ex = assertThrows(ExecutionException.class, () ->
                         storage.open(tempDir).get(5, TimeUnit.SECONDS));
+                untouchedAtLine139.close();
 
                 assertTrue(ex.getCause() instanceof StorageException);
             }
@@ -381,8 +385,10 @@ class EnhancedProtectionTest {
 
             // Second instance blocked
             FileRaftStorage blocked = new FileRaftStorage(true, true);
-            assertThrows(ExecutionException.class, () ->
-                    blocked.open(tempDir).get(5, TimeUnit.SECONDS));
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertThrows(ExecutionException.class, () ->
+                        blocked.open(tempDir).get(5, TimeUnit.SECONDS));
+            }
             blocked.close();
 
             // Close and reopen
@@ -410,8 +416,10 @@ class EnhancedProtectionTest {
 
             // Attempt second instance fails gracefully
             FileRaftStorage reader = new FileRaftStorage(true);
+            DurableState untouchedAtLine413 = DurableState.expectUnchanged(tempDir);
             ExecutionException ex = assertThrows(ExecutionException.class, () ->
                     reader.open(tempDir).get(5, TimeUnit.SECONDS));
+            untouchedAtLine413.close();
 
             // Error message should be helpful
             String message = ex.getCause().getMessage();

@@ -130,6 +130,7 @@ storage checks the following before it writes anything and refuses violations wi
 | `updateMetadata` | Term not below the persisted term | `TERM_REGRESSION` |
 | `updateMetadata` | Vote in the persisted term not changed once cast | `VOTE_CHANGED` |
 | any write | A non-empty log has been replayed since open, and no write has failed since | `LOG_STATE_UNKNOWN` |
+| `updateMetadata` | `meta.dat` is absent or readable; an unreadable file hides a term the node may have voted in | `METADATA_UNREADABLE` |
 
 Replay applies the same shape check to the reconstructed log and fails on a gap, a
 term regression, or a first entry that does not follow the compaction boundary. The
@@ -138,6 +139,23 @@ tail state is owned by the WAL executor and is established by `open()` on an emp
 boundary as a `PREFIX` record at the head of the rewritten WAL, so after a restart the
 log continues at the boundary plus one even when nothing was retained, and a suffix
 truncation cannot reach into the compacted prefix.
+
+Two properties keep these checks honest:
+
+- **The write path and the replay path agree.** Anything accepted at write time must
+  replay after a restart, and anything replay would refuse must be refused at write
+  time. To make that possible the storage remembers the term of every retained entry
+  as a short list of term runs (one element per term change), so a suffix truncation
+  restores the term of the new last entry instead of forgetting it.
+- **A refused operation writes nothing, and a failed one is never trusted.** Validation
+  and the disk space check run for the whole batch before the first byte. If a write
+  fails part way for any reason, checked or unchecked, the tail is marked unknown and
+  the next write is refused until `replayLog()` has re-read the file.
+
+The tail is tracked as the last index rather than the next one, so no comparison ever
+computes `Long.MAX_VALUE + 1`. A log whose last index is `Long.MAX_VALUE` is full.
+
+Two records are never repaired even when structurally incomplete. A torn `PREFIX` marker is reported as corruption, because compaction publishes it atomically after a force, so a crash cannot tear it, and truncating it away would silently restart the index space at 1. A fragment that declares a newer format or an unknown type is likewise reported, since this build cannot know how long such a record is. A historical `TRUNCATE` record with a boundary at or below the compaction boundary, which older builds accepted, empties the replayed log back to that boundary.
 
 Refusal, not repair, is deliberate. Concurrent appenders, a leader that resends an
 index without truncating first, or a node that regresses its term are all bugs. The
@@ -577,6 +595,8 @@ A simple, robust binary record:
 static final byte TYPE_TRUNCATE = 1;
 static final byte TYPE_APPEND   = 2;
 static final byte TYPE_PREFIX   = 3; // compaction boundary; first record of a compacted WAL, INDEX = inclusive boundary
+// VERSION is 1 for APPEND and TRUNCATE and 2 for PREFIX. An intact record with a higher version
+// is reported as UnsupportedFormatException, not corruption, and fences the instance.
 ```
 
 ### 15.4 meta.dat (term + vote)

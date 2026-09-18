@@ -56,10 +56,13 @@ class HighCoverageTest {
     @TempDir
     Path tempDir;
 
-    private static FileRaftStorage.CorruptLogException assertCorruptReplay(FileRaftStorage storage) {
-        ExecutionException failure = assertThrows(ExecutionException.class,
-                () -> storage.replayLog().get(5, TimeUnit.SECONDS));
-        return assertInstanceOf(FileRaftStorage.CorruptLogException.class, failure.getCause());
+    private FileRaftStorage.CorruptLogException assertCorruptReplay(FileRaftStorage storage) {
+        // Reporting corruption must never modify the file it reports on.
+        try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> storage.replayLog().get(5, TimeUnit.SECONDS));
+            return assertInstanceOf(FileRaftStorage.CorruptLogException.class, failure.getCause());
+        }
     }
 
     // ========================================================================
@@ -882,15 +885,18 @@ class HighCoverageTest {
             // Create payload larger than max (2MB)
             byte[] tooLarge = new byte[2 * 1024 * 1024];
 
+            DurableState untouchedAtLine885 = DurableState.expectUnchanged(tempDir);
             ExecutionException ex = assertThrows(ExecutionException.class, () ->
                     storage.appendEntries(List.of(new LogEntryData(1, 1, tooLarge))).get(5, TimeUnit.SECONDS));
+            untouchedAtLine885.close();
 
             assertTrue(ex.getCause() instanceof StorageException);
             WriteRejection rejection = assertInstanceOf(WriteRejection.class, ex.getCause());
             assertEquals(WriteRejectionReason.PAYLOAD_TOO_LARGE, rejection.reason());
             assertTrue(ex.getCause().getMessage().contains("Payload too large"));
 
-            storage.close();
+            // Refused must also mean nothing is different after a reboot.
+            DurableState.assertRestartAgrees(storage, tempDir);
         }
     }
 
