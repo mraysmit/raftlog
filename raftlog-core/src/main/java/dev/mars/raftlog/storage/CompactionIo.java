@@ -44,6 +44,40 @@ class CompactionIo {
         LOG.trace("Completed write to channel {}", channel);
     }
 
+    /** Writes one record to the live WAL. A seam so tests can tear a record at a real write boundary. */
+    void writeRecord(FileChannel channel, ByteBuffer record) throws IOException {
+        while (record.hasRemaining()) channel.write(record);
+    }
+
+    /**
+     * Opens the WAL a second time for replay, which reads it and may truncate a torn tail.
+     * Kept apart from {@link #reopen(Path)}, which is the reopen that follows publication of a
+     * compacted WAL, so that failing one in a test never disturbs the other.
+     */
+    FileChannel openForReplay(Path path) throws IOException {
+        return FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE);
+    }
+
+    /** Opens the live WAL, creating it if needed. A seam so tests can make open fail after the channel exists. */
+    FileChannel openLog(Path path) throws IOException {
+        return FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE);
+    }
+
+    /** Removes an unpublished compaction output. A seam so tests can make cleanup fail. */
+    void discard(Path path) throws IOException {
+        Files.deleteIfExists(path);
+    }
+
+    /** Closes a channel held by the storage. A seam so tests can make resource release fail. */
+    void closeChannel(FileChannel channel) throws IOException {
+        channel.close();
+    }
+
+    /** Releases the directory lock. A seam so tests can make resource release fail. */
+    void releaseLock(java.nio.channels.FileLock lock) throws IOException {
+        lock.release();
+    }
+
     /** Forces the compaction output file. */
     void force(FileChannel channel) throws IOException {
         LOG.trace("Forcing compaction output channel {}", channel);
@@ -74,6 +108,11 @@ class CompactionIo {
             channel.force(true);
             LOG.trace("Directory force complete for {}", directory);
         }
+    }
+
+    /** Usable bytes on the store holding {@code directory}. A seam so tests can simulate a filling disk. */
+    long usableSpace(Path directory) throws IOException {
+        return Files.getFileStore(directory).getUsableSpace();
     }
 
     FileChannel reopen(Path path) throws IOException {

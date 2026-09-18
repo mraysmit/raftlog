@@ -121,29 +121,49 @@ class FileRaftStorageRecoveryContractTest {
         // Hold the directory lock so the open fails, then queue work behind it.
         FileRaftStorage holder = open(tempDir);
         try {
-            FileRaftStorage storage = new FileRaftStorage(true);
-            CompletableFuture<Void> opening = storage.open(tempDir);
-            CompletableFuture<Void> append = storage.appendEntries(List.of(entry(1, 1)));
-            CompletableFuture<List<LogEntryData>> replay = storage.replayLog();
-            CompletableFuture<Void> sync = storage.sync();
+            // Real state, so "untouched" is a claim about something. A leftover compaction
+            // file is included because a successful open deletes it and a failed one must not.
+            await(holder.appendEntries(List.of(entry(1, 1), entry(2, 1))));
+            await(holder.updateMetadata(3, Optional.of("holder")));
+            await(holder.sync());
+            Files.write(tempDir.resolve("raft.log.tmp"), new byte[]{1, 2, 3});
 
-            assertThrows(java.util.concurrent.ExecutionException.class, () -> await(opening));
-            for (CompletableFuture<?> future : List.of(append, replay, sync)) {
-                Throwable cause = assertThrows(java.util.concurrent.ExecutionException.class,
-                        () -> await(future)).getCause();
-                assertInstanceOf(FileRaftStorage.StorageException.class, cause);
-                assertTrue(cause.getMessage().startsWith("Storage is not open"), cause.getMessage());
+            // The holder is idle from here on, so the failed open and everything queued
+            // behind it must leave the directory byte-for-byte as it was.
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                FileRaftStorage storage = new FileRaftStorage(true);
+                CompletableFuture<Void> opening = storage.open(tempDir);
+                CompletableFuture<Void> append = storage.appendEntries(List.of(entry(3, 1)));
+                CompletableFuture<Void> truncate = storage.truncateSuffix(1);
+                CompletableFuture<Void> metadata = storage.updateMetadata(9, Optional.of("intruder"));
+                CompletableFuture<Void> compact = storage.truncatePrefix(1);
+                CompletableFuture<List<LogEntryData>> replay = storage.replayLog();
+                CompletableFuture<Void> sync = storage.sync();
+
+                assertThrows(java.util.concurrent.ExecutionException.class, () -> await(opening));
+                for (CompletableFuture<?> future : List.of(append, truncate, metadata, compact, replay, sync)) {
+                    Throwable cause = assertThrows(java.util.concurrent.ExecutionException.class,
+                            () -> await(future)).getCause();
+                    assertInstanceOf(FileRaftStorage.StorageException.class, cause);
+                    assertTrue(cause.getMessage().startsWith("Storage is not open"), cause.getMessage());
+                }
+                await(storage.closeAsync());
             }
-            await(storage.closeAsync());
+            // The holder still owns a working log.
+            await(holder.appendEntries(List.of(entry(3, 1))));
+            await(holder.sync());
         } finally {
             await(holder.closeAsync());
         }
+        assertEntries(List.of(entry(1, 1), entry(2, 1), entry(3, 1)), recover(tempDir));
     }
 
     @Test void operationsBeforeOpenFailWithStorageException() throws Exception {
         FileRaftStorage storage = new FileRaftStorage(true);
+        DurableState untouchedAtLine145 = DurableState.expectUnchanged(tempDir);
         Throwable cause = assertThrows(java.util.concurrent.ExecutionException.class,
                 () -> await(storage.appendEntries(List.of(entry(1, 1))))).getCause();
+        untouchedAtLine145.close();
         assertInstanceOf(FileRaftStorage.StorageException.class, cause);
         assertTrue(cause.getMessage().startsWith("Storage is not open"), cause.getMessage());
         await(storage.closeAsync());
@@ -315,7 +335,9 @@ class FileRaftStorageRecoveryContractTest {
         try {
             await(storage.appendEntries(List.of(entry(1, 1), entry(2, 1))));
             long before = Files.size(tempDir.resolve("raft.log"));
-            assertRejected(storage.truncateSuffix(99), WriteRejectionReason.INVALID_TRUNCATION);
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertRejected(storage.truncateSuffix(99), WriteRejectionReason.INVALID_TRUNCATION);
+            }
             assertEquals(before, Files.size(tempDir.resolve("raft.log")));
         } finally { close(storage, tempDir); }
         assertEntries(List.of(entry(1, 1), entry(2, 1)), recover(tempDir));
@@ -348,8 +370,10 @@ class FileRaftStorageRecoveryContractTest {
     @Test void batchWithDuplicateIndexIsRejectedWholeAndTruncationThenContinues() throws Exception {
         FileRaftStorage storage = open(tempDir);
         try {
-            assertRejected(storage.appendEntries(List.of(entry(1, 1), entry(2, 1), entry(3, 1), entry(2, 2))),
-                    WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertRejected(storage.appendEntries(List.of(entry(1, 1), entry(2, 1), entry(3, 1), entry(2, 2))),
+                        WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            }
             assertEquals(0, Files.size(tempDir.resolve("raft.log")), "a rejected batch writes nothing");
             await(storage.appendEntries(List.of(entry(1, 1), entry(2, 1), entry(3, 1))));
             await(storage.truncateSuffix(2));
@@ -367,8 +391,12 @@ class FileRaftStorageRecoveryContractTest {
         } finally { close(storage, tempDir); }
         storage = open(tempDir);
         try {
-            assertRejected(storage.appendEntries(List.of(entry(2, 1))), WriteRejectionReason.LOG_STATE_UNKNOWN);
-            assertRejected(storage.truncateSuffix(1), WriteRejectionReason.LOG_STATE_UNKNOWN);
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertRejected(storage.appendEntries(List.of(entry(2, 1))), WriteRejectionReason.LOG_STATE_UNKNOWN);
+            }
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertRejected(storage.truncateSuffix(1), WriteRejectionReason.LOG_STATE_UNKNOWN);
+            }
             await(storage.replayLog());
             await(storage.appendEntries(List.of(entry(2, 1))));
             await(storage.sync());
@@ -379,8 +407,12 @@ class FileRaftStorageRecoveryContractTest {
     @Test void freshLogMustStartAtIndexOne() throws Exception {
         FileRaftStorage storage = open(tempDir);
         try {
-            assertRejected(storage.appendEntries(List.of(entry(2, 1))), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
-            assertRejected(storage.appendEntries(List.of(entry(7, 1))), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertRejected(storage.appendEntries(List.of(entry(2, 1))), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            }
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertRejected(storage.appendEntries(List.of(entry(7, 1))), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            }
             assertEquals(0, Files.size(tempDir.resolve("raft.log")));
             await(storage.appendEntries(List.of(entry(1, 1))));
         } finally { close(storage, tempDir); }
@@ -396,10 +428,16 @@ class FileRaftStorageRecoveryContractTest {
         storage = open(tempDir);
         try {
             assertEntries(List.of(), await(storage.replayLog()));
-            assertRejected(storage.appendEntries(List.of(entry(1, 1))), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
-            assertRejected(storage.appendEntries(List.of(entry(5, 1))), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertRejected(storage.appendEntries(List.of(entry(1, 1))), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            }
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertRejected(storage.appendEntries(List.of(entry(5, 1))), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            }
             // Truncating into the compacted prefix is refused too.
-            assertRejected(storage.truncateSuffix(3), WriteRejectionReason.INVALID_TRUNCATION);
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertRejected(storage.truncateSuffix(3), WriteRejectionReason.INVALID_TRUNCATION);
+            }
             await(storage.appendEntries(List.of(entry(4, 1))));
             await(storage.sync());
         } finally { close(storage, tempDir); }
@@ -410,9 +448,15 @@ class FileRaftStorageRecoveryContractTest {
         FileRaftStorage storage = open(tempDir);
         try {
             await(storage.appendEntries(List.of(entry(1, 2), entry(2, 2))));
-            assertRejected(storage.appendEntries(List.of(entry(4, 2))), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
-            assertRejected(storage.appendEntries(List.of(entry(2, 2))), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
-            assertRejected(storage.appendEntries(List.of(entry(3, 1))), WriteRejectionReason.TERM_REGRESSION);
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertRejected(storage.appendEntries(List.of(entry(4, 2))), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            }
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertRejected(storage.appendEntries(List.of(entry(2, 2))), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            }
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertRejected(storage.appendEntries(List.of(entry(3, 1))), WriteRejectionReason.TERM_REGRESSION);
+            }
             await(storage.appendEntries(List.of(entry(3, 2), entry(4, 5))));
             await(storage.sync());
         } finally { close(storage, tempDir); }
@@ -423,9 +467,15 @@ class FileRaftStorageRecoveryContractTest {
         FileRaftStorage storage = open(tempDir);
         try {
             await(storage.updateMetadata(5, Optional.of("a")));
-            assertRejected(storage.updateMetadata(4, Optional.empty()), WriteRejectionReason.TERM_REGRESSION);
-            assertRejected(storage.updateMetadata(5, Optional.of("b")), WriteRejectionReason.VOTE_CHANGED);
-            assertRejected(storage.updateMetadata(5, Optional.empty()), WriteRejectionReason.VOTE_CHANGED);
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertRejected(storage.updateMetadata(4, Optional.empty()), WriteRejectionReason.TERM_REGRESSION);
+            }
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertRejected(storage.updateMetadata(5, Optional.of("b")), WriteRejectionReason.VOTE_CHANGED);
+            }
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertRejected(storage.updateMetadata(5, Optional.empty()), WriteRejectionReason.VOTE_CHANGED);
+            }
             await(storage.updateMetadata(5, Optional.of("a")));
             await(storage.updateMetadata(6, Optional.empty()));
             await(storage.updateMetadata(6, Optional.of("c")));
@@ -433,7 +483,9 @@ class FileRaftStorageRecoveryContractTest {
         // The baseline survives a restart without an explicit loadMetadata().
         storage = open(tempDir);
         try {
-            assertRejected(storage.updateMetadata(5, Optional.of("c")), WriteRejectionReason.TERM_REGRESSION);
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertRejected(storage.updateMetadata(5, Optional.of("c")), WriteRejectionReason.TERM_REGRESSION);
+            }
             assertEquals(new RaftStorage.PersistentMeta(6, Optional.of("c")), await(storage.loadMetadata()));
         } finally { close(storage, tempDir); }
     }
@@ -498,8 +550,10 @@ class FileRaftStorageRecoveryContractTest {
             assertEquals(corruptTruncate ? 3 : 1, corrupt.entriesBeforeCorruption());
             assertArrayEquals(bytes, Files.readAllBytes(tempDir.resolve("raft.log")));
             // Fenced: the damaged log cannot be appended to by this instance.
-            assertThrows(java.util.concurrent.ExecutionException.class,
-                    () -> await(damaged.appendEntries(List.of(entry(9, 9)))));
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertThrows(java.util.concurrent.ExecutionException.class,
+                        () -> await(damaged.appendEntries(List.of(entry(9, 9)))));
+            }
         } finally { close(damaged, tempDir); }
         assertArrayEquals(bytes, Files.readAllBytes(tempDir.resolve("raft.log")));
         // An operator who knows the tail was unacknowledged truncates at the reported offset.
@@ -556,8 +610,10 @@ class FileRaftStorageRecoveryContractTest {
             try {
                 await(storage.appendEntries(expected));
                 // Re-sending an existing index without a preceding truncation is a node bug.
-                assertRejected(storage.appendEntries(List.of(entry(count - 1, 2))),
-                        WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+                try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                    assertRejected(storage.appendEntries(List.of(entry(count - 1, 2))),
+                            WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+                }
                 await(storage.sync());
             } finally { close(storage, dir); }
             storage = open(dir);

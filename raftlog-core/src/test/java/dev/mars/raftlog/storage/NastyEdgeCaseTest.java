@@ -353,9 +353,12 @@ class NastyEdgeCaseTest {
         }
 
         private FileRaftStorage.CorruptLogException replayFails() {
-            ExecutionException failure = assertThrows(ExecutionException.class,
-                    () -> storage.replayLog().get(5, TimeUnit.SECONDS));
-            return assertInstanceOf(FileRaftStorage.CorruptLogException.class, failure.getCause());
+            // Reporting corruption must never modify the file it reports on.
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                ExecutionException failure = assertThrows(ExecutionException.class,
+                        () -> storage.replayLog().get(5, TimeUnit.SECONDS));
+                return assertInstanceOf(FileRaftStorage.CorruptLogException.class, failure.getCause());
+            }
         }
 
         @Test
@@ -397,8 +400,10 @@ class NastyEdgeCaseTest {
             replayFails();
 
             // Every later operation fails with the corruption; nothing is written.
+            DurableState untouchedAtLine400 = DurableState.expectUnchanged(tempDir);
             ExecutionException appendFailure = assertThrows(ExecutionException.class, () ->
                     storage.appendEntries(List.of(new LogEntryData(5, 2, "new-5".getBytes()))).get(5, TimeUnit.SECONDS));
+            untouchedAtLine400.close();
             assertInstanceOf(FileRaftStorage.CorruptLogException.class, appendFailure.getCause());
             assertThrows(ExecutionException.class, () -> storage.sync().get(5, TimeUnit.SECONDS));
             assertThrows(ExecutionException.class, () -> storage.replayLog().get(5, TimeUnit.SECONDS));

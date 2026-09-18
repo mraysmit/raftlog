@@ -81,10 +81,13 @@ class FileRaftStorageAdversarialTest {
         }
     }
 
-    private static FileRaftStorage.CorruptLogException assertCorruptReplay(FileRaftStorage storage) {
-        ExecutionException failure = assertThrows(ExecutionException.class,
-                () -> storage.replayLog().get(5, TimeUnit.SECONDS));
-        return assertInstanceOf(FileRaftStorage.CorruptLogException.class, failure.getCause());
+    private FileRaftStorage.CorruptLogException assertCorruptReplay(FileRaftStorage storage) {
+        // Reporting corruption must never modify the file it reports on.
+        try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> storage.replayLog().get(5, TimeUnit.SECONDS));
+            return assertInstanceOf(FileRaftStorage.CorruptLogException.class, failure.getCause());
+        }
     }
 
     // ========================================================================
@@ -402,8 +405,10 @@ class FileRaftStorageAdversarialTest {
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
-            assertThrows(Exception.class, () ->
-                    storage.loadMetadata().get(5, TimeUnit.SECONDS));
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertThrows(Exception.class, () ->
+                        storage.loadMetadata().get(5, TimeUnit.SECONDS));
+            }
         }
 
         @Test
@@ -464,8 +469,10 @@ class FileRaftStorageAdversarialTest {
             storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
-            assertThrows(Exception.class, () ->
-                    storage.loadMetadata().get(5, TimeUnit.SECONDS));
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertThrows(Exception.class, () ->
+                        storage.loadMetadata().get(5, TimeUnit.SECONDS));
+            }
         }
 
         @Test
@@ -523,10 +530,15 @@ class FileRaftStorageAdversarialTest {
         @DisplayName("Zero index is rejected: Raft log indices start at 1")
         void zeroIndex() throws Exception {
             LogEntryData entry = new LogEntryData(0, 1, "data".getBytes());
-            assertRejected(storage.appendEntries(List.of(entry)), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertRejected(storage.appendEntries(List.of(entry)), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            }
 
             List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
             assertEquals(0, replayed.size(), "a rejected append writes nothing");
+
+            // Refused must also mean nothing is different after a reboot.
+            DurableState.assertRestartAgrees(storage, tempDir);
         }
 
         @Test
@@ -545,16 +557,26 @@ class FileRaftStorageAdversarialTest {
         @DisplayName("Negative index is rejected")
         void negativeIndex() throws Exception {
             LogEntryData entry = new LogEntryData(-1, 1, "data".getBytes());
-            assertRejected(storage.appendEntries(List.of(entry)), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertRejected(storage.appendEntries(List.of(entry)), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            }
             assertEquals(0, storage.replayLog().get(5, TimeUnit.SECONDS).size());
+
+            // Refused must also mean nothing is different after a reboot.
+            DurableState.assertRestartAgrees(storage, tempDir);
         }
 
         @Test
         @DisplayName("Negative term is rejected")
         void negativeTerm() throws Exception {
             LogEntryData entry = new LogEntryData(1, -1, "data".getBytes());
-            assertRejected(storage.appendEntries(List.of(entry)), WriteRejectionReason.TERM_REGRESSION);
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertRejected(storage.appendEntries(List.of(entry)), WriteRejectionReason.TERM_REGRESSION);
+            }
             assertEquals(0, storage.replayLog().get(5, TimeUnit.SECONDS).size());
+
+            // Refused must also mean nothing is different after a reboot.
+            DurableState.assertRestartAgrees(storage, tempDir);
         }
 
         @Test
@@ -627,12 +649,17 @@ class FileRaftStorageAdversarialTest {
         void truncateToZero() throws Exception {
             writeValidEntries(5);
 
-            assertRejected(storage.truncateSuffix(0), WriteRejectionReason.INVALID_TRUNCATION);
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertRejected(storage.truncateSuffix(0), WriteRejectionReason.INVALID_TRUNCATION);
+            }
             assertEquals(5, storage.replayLog().get(5, TimeUnit.SECONDS).size());
 
             storage.truncateSuffix(1).get(5, TimeUnit.SECONDS);
             storage.sync().get(5, TimeUnit.SECONDS);
             assertEquals(0, storage.replayLog().get(5, TimeUnit.SECONDS).size());
+
+            // Refused must also mean nothing is different after a reboot.
+            DurableState.assertRestartAgrees(storage, tempDir);
         }
 
         @Test
@@ -640,8 +667,13 @@ class FileRaftStorageAdversarialTest {
         void truncateToNegative() throws Exception {
             writeValidEntries(5);
 
-            assertRejected(storage.truncateSuffix(-1), WriteRejectionReason.INVALID_TRUNCATION);
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertRejected(storage.truncateSuffix(-1), WriteRejectionReason.INVALID_TRUNCATION);
+            }
             assertEquals(5, storage.replayLog().get(5, TimeUnit.SECONDS).size());
+
+            // Refused must also mean nothing is different after a reboot.
+            DurableState.assertRestartAgrees(storage, tempDir);
         }
 
         @Test
@@ -650,12 +682,17 @@ class FileRaftStorageAdversarialTest {
             writeValidEntries(3);
 
             // A node never truncates past its own tail; doing so is a bug worth surfacing.
-            assertRejected(storage.truncateSuffix(100), WriteRejectionReason.INVALID_TRUNCATION);
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertRejected(storage.truncateSuffix(100), WriteRejectionReason.INVALID_TRUNCATION);
+            }
             // Truncating exactly at the tail is a legal no-op.
             storage.truncateSuffix(4).get(5, TimeUnit.SECONDS);
             storage.sync().get(5, TimeUnit.SECONDS);
 
             assertEquals(3, storage.replayLog().get(5, TimeUnit.SECONDS).size());
+
+            // Refused must also mean nothing is different after a reboot.
+            DurableState.assertRestartAgrees(storage, tempDir);
         }
     }
 
@@ -679,6 +716,7 @@ class FileRaftStorageAdversarialTest {
             AtomicInteger accepted = new AtomicInteger();
             AtomicInteger rejected = new AtomicInteger();
             AtomicInteger unexpected = new AtomicInteger();
+            var written = new java.util.concurrent.ConcurrentLinkedQueue<WalRecords.Raw>();
 
             try {
                 for (int t = 0; t < numThreads; t++) {
@@ -687,11 +725,11 @@ class FileRaftStorageAdversarialTest {
                             startLatch.await();
                             for (int i = 0; i < entriesPerThread; i++) {
                                 int idx = nextIndex.getAndIncrement();
+                                LogEntryData entry = new LogEntryData(idx, 1, ("data-" + idx).getBytes());
                                 try {
-                                    storage.appendEntries(List.of(
-                                            new LogEntryData(idx, 1, ("data-" + idx).getBytes())
-                                    )).get(5, TimeUnit.SECONDS);
+                                    storage.appendEntries(List.of(entry)).get(5, TimeUnit.SECONDS);
                                     accepted.incrementAndGet();
+                                    written.add(WalRecords.append(entry));
                                 } catch (ExecutionException e) {
                                     if (e.getCause() instanceof FileRaftStorage.WriteRejectedException r
                                             && r.reason() == WriteRejectionReason.INDEX_NOT_CONTIGUOUS) {
@@ -713,6 +751,10 @@ class FileRaftStorageAdversarialTest {
                 doneLatch.await(60, TimeUnit.SECONDS);
 
                 storage.sync().get(5, TimeUnit.SECONDS);
+                // Every byte in the WAL must belong to an accepted append: a refusal that
+                // wrote anything would leave a record nobody accepted.
+                WalRecords.assertExactly(tempDir.resolve("raft.log"), written);
+                WalRecords.assertNoStrayFiles(tempDir);
                 List<LogEntryData> replayed = storage.replayLog().get(10, TimeUnit.SECONDS);
 
                 // Every append either extended the log at its tail or was refused; the
@@ -723,6 +765,7 @@ class FileRaftStorageAdversarialTest {
                 for (int i = 0; i < replayed.size(); i++) {
                     assertEquals(i + 1, replayed.get(i).index(), "log must be contiguous from 1");
                 }
+                assertEquals(accepted.get(), DurableState.assertRestartAgrees(storage, tempDir).size());
             } finally {
                 executor.shutdown();
             }
@@ -823,9 +866,11 @@ class FileRaftStorageAdversarialTest {
             storage.close();
 
             // These should fail but not crash
-            assertThrows(Exception.class, () ->
-                    storage.appendEntries(List.of(new LogEntryData(1, 1, "x".getBytes())))
-                            .get(5, TimeUnit.SECONDS));
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertThrows(Exception.class, () ->
+                        storage.appendEntries(List.of(new LogEntryData(1, 1, "x".getBytes())))
+                                .get(5, TimeUnit.SECONDS));
+            }
         }
 
         @Test
@@ -838,15 +883,20 @@ class FileRaftStorageAdversarialTest {
 
         @Test
         @DisplayName("Append list with null entry")
-        void appendListWithNullEntry() {
+        void appendListWithNullEntry() throws Exception {
             List<LogEntryData> entries = new ArrayList<>();
             entries.add(new LogEntryData(1, 1, "a".getBytes()));
             entries.add(null);
             entries.add(new LogEntryData(3, 1, "c".getBytes()));
 
             // Should throw
-            assertThrows(Exception.class, () ->
-                    storage.appendEntries(entries).get(5, TimeUnit.SECONDS));
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertThrows(Exception.class, () ->
+                        storage.appendEntries(entries).get(5, TimeUnit.SECONDS));
+            }
+
+            // Refused must also mean nothing is different after a reboot.
+            DurableState.assertRestartAgrees(storage, tempDir);
         }
 
         @Test
@@ -863,8 +913,10 @@ class FileRaftStorageAdversarialTest {
                 storage.truncateSuffix(4).get(5, TimeUnit.SECONDS);
 
                 // Re-sending from index 1 would duplicate retained entries: refused.
-                assertRejected(storage.appendEntries(List.of(
-                        new LogEntryData(1, cycle + 1, "dup".getBytes()))), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+                try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                    assertRejected(storage.appendEntries(List.of(
+                            new LogEntryData(1, cycle + 1, "dup".getBytes()))), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+                }
 
                 for (int i = 4; i <= 10; i++) {
                     storage.appendEntries(List.of(
@@ -881,32 +933,45 @@ class FileRaftStorageAdversarialTest {
                 assertEquals(i + 1, replayed.get(i).index());
                 assertEquals(i < 3 ? 1 : 10, replayed.get(i).term());
             }
+
+            // Refused must also mean nothing is different after a reboot.
+            DurableState.assertRestartAgrees(storage, tempDir);
         }
 
         @Test
         @DisplayName("Non-sequential indices within a batch are rejected without writing anything")
         void nonSequentialIndices() throws Exception {
-            assertRejected(storage.appendEntries(List.of(
-                    new LogEntryData(1, 1, "a".getBytes()),
-                    new LogEntryData(5, 1, "b".getBytes()),  // Gap!
-                    new LogEntryData(3, 1, "c".getBytes())   // Out of order!
-            )), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertRejected(storage.appendEntries(List.of(
+                        new LogEntryData(1, 1, "a".getBytes()),
+                        new LogEntryData(5, 1, "b".getBytes()),  // Gap!
+                        new LogEntryData(3, 1, "c".getBytes())   // Out of order!
+                )), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            }
             storage.sync().get(5, TimeUnit.SECONDS);
 
             // Validation runs before the first byte is written, so entry 1 is not there either.
             assertEquals(0, storage.replayLog().get(5, TimeUnit.SECONDS).size());
+
+            // Refused must also mean nothing is different after a reboot.
+            DurableState.assertRestartAgrees(storage, tempDir);
         }
 
         @Test
         @DisplayName("Duplicate indices in a single append are rejected without writing anything")
         void duplicateIndicesInSingleAppend() throws Exception {
-            assertRejected(storage.appendEntries(List.of(
-                    new LogEntryData(1, 1, "first".getBytes()),
-                    new LogEntryData(1, 1, "second".getBytes())  // Same index!
-            )), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertRejected(storage.appendEntries(List.of(
+                        new LogEntryData(1, 1, "first".getBytes()),
+                        new LogEntryData(1, 1, "second".getBytes())  // Same index!
+                )), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            }
             storage.sync().get(5, TimeUnit.SECONDS);
 
             assertEquals(0, storage.replayLog().get(5, TimeUnit.SECONDS).size());
+
+            // Refused must also mean nothing is different after a reboot.
+            DurableState.assertRestartAgrees(storage, tempDir);
         }
     }
 

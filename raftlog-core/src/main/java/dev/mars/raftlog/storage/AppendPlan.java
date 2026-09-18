@@ -96,6 +96,23 @@ public record AppendPlan(
     public static AppendPlan from(long startIndex,
                                    List<LogEntryData> incomingEntries,
                                    List<LogEntryData> currentLog) {
+        return from(startIndex, incomingEntries, currentLog, 0L);
+    }
+
+    /**
+     * As {@link #from(long, List, List)}, for a log that has been prefix compacted.
+     * <p>
+     * When compaction retained nothing the in-memory log is empty and cannot say where it
+     * begins, so the boundary has to be supplied. Incoming entries at or below it are
+     * already covered by the snapshot and are skipped.
+     *
+     * @param compactionBoundary inclusive prefix compaction boundary, or 0 if never compacted;
+     *                           see {@code FileRaftStorage.compactionBoundary()}
+     */
+    public static AppendPlan from(long startIndex,
+                                   List<LogEntryData> incomingEntries,
+                                   List<LogEntryData> currentLog,
+                                   long compactionBoundary) {
         if (incomingEntries == null || incomingEntries.isEmpty()) {
             LOG.debug("from() called with empty incoming entries: returning empty plan");
             return empty();
@@ -114,7 +131,9 @@ public record AppendPlan(
             long logIndex = startIndex + i;
             long logPos = logIndex - baseIndex;
 
-            if (logPos < 0) {
+            // A boundary of 0 means the log was never compacted, so it excludes nothing.
+            boolean inSnapshot = compactionBoundary > 0 && logIndex <= compactionBoundary;
+            if (inSnapshot || logPos < 0) {
                 // Below the retained log: already covered by the snapshot, nothing to do
                 firstNewEntryIdx = i + 1;
                 LOG.debug("Incoming entry [{}] at index {} precedes the retained log (first index {}); skipping",

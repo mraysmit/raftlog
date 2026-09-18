@@ -259,9 +259,11 @@ class CoverageBoostTest {
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             // Raft log indices start at 1; index 0 is refused before anything is written
+            DurableState untouchedAtLine262 = DurableState.expectUnchanged(tempDir);
             var failure = assertThrows(java.util.concurrent.ExecutionException.class, () ->
                     storage.appendEntries(List.of(new LogEntryData(0, 1, "zero".getBytes())))
                             .get(5, TimeUnit.SECONDS));
+            untouchedAtLine262.close();
             var rejected = assertInstanceOf(FileRaftStorage.WriteRejectedException.class, failure.getCause());
             assertEquals(WriteRejectionReason.INDEX_NOT_CONTIGUOUS, rejected.reason());
             storage.sync().get(5, TimeUnit.SECONDS);
@@ -269,7 +271,8 @@ class CoverageBoostTest {
             List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
             assertEquals(0, replayed.size());
 
-            storage.close();
+            // Refused must also mean nothing is different after a reboot.
+            DurableState.assertRestartAgrees(storage, tempDir);
         }
 
         @Test
@@ -355,8 +358,10 @@ class CoverageBoostTest {
             storage.sync().get(5, TimeUnit.SECONDS);
 
             // Truncating from index 0 is refused; from index 1 removes everything
+            DurableState untouchedAtLine358 = DurableState.expectUnchanged(tempDir);
             var failure = assertThrows(java.util.concurrent.ExecutionException.class, () ->
                     storage.truncateSuffix(0).get(5, TimeUnit.SECONDS));
+            untouchedAtLine358.close();
             var rejected = assertInstanceOf(FileRaftStorage.WriteRejectedException.class, failure.getCause());
             assertEquals(WriteRejectionReason.INVALID_TRUNCATION, rejected.reason());
             storage.truncateSuffix(1).get(5, TimeUnit.SECONDS);

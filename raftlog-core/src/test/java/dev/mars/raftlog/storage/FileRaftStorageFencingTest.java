@@ -97,13 +97,20 @@ class FileRaftStorageFencingTest {
         }
     }
 
+    /**
+     * A fenced instance fails every operation with the one original failure. Checking only the
+     * exception type is not enough: an ordinary refusal such as LOG_STATE_UNKNOWN is also a
+     * StorageException, and would let this pass on an instance that was never fenced.
+     */
     private void assertFenced(FileRaftStorage storage, Class<? extends Throwable> cause) {
-        assertInstanceOf(cause, failureOf(storage.appendEntries(List.of(entry(9, 9)))));
-        assertInstanceOf(cause, failureOf(storage.truncateSuffix(1)));
-        assertInstanceOf(cause, failureOf(storage.sync()));
-        assertInstanceOf(cause, failureOf(storage.updateMetadata(9, Optional.empty())));
-        assertInstanceOf(cause, failureOf(storage.replayLog()));
-        assertInstanceOf(cause, failureOf(storage.truncatePrefix(1)));
+        Throwable fence = failureOf(storage.appendEntries(List.of(entry(9, 9))));
+        assertInstanceOf(cause, fence);
+        assertFalse(fence instanceof WriteRejection, "refused for an ordinary reason, not fenced: " + fence);
+        assertSame(fence, failureOf(storage.truncateSuffix(1)));
+        assertSame(fence, failureOf(storage.sync()));
+        assertSame(fence, failureOf(storage.updateMetadata(9, Optional.empty())));
+        assertSame(fence, failureOf(storage.replayLog()));
+        assertSame(fence, failureOf(storage.truncatePrefix(1)));
     }
 
     // ------------------------------------------------------------------
@@ -134,7 +141,9 @@ class FileRaftStorageFencingTest {
             assertEquals("Injected fsync failure", cause.getCause().getMessage());
 
             // No later call may re-force: the page cache state is undefined.
-            assertFenced(storage, FileRaftStorage.StorageException.class);
+            try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
+                assertFenced(storage, FileRaftStorage.StorageException.class);
+            }
             assertEquals(1, io.calls.get(), "sync must not be retried after a failure");
         } finally { close(storage, dir); }
 
@@ -163,7 +172,9 @@ class FileRaftStorageFencingTest {
         try {
             assertInstanceOf(FileRaftStorage.StorageException.class,
                     failureOf(storage.updateMetadata(6, Optional.of("node-b"))));
-            assertFenced(storage, FileRaftStorage.StorageException.class);
+            try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
+                assertFenced(storage, FileRaftStorage.StorageException.class);
+            }
         } finally { close(storage, dir); }
 
         FileRaftStorage fresh = new FileRaftStorage(true);
@@ -190,7 +201,9 @@ class FileRaftStorageFencingTest {
             assertEquals("Injected directory fsync failure", cause.getCause().getMessage());
             // The rename itself completed; the directory entry is not known to be durable.
             // The instance must not carry on as if it were.
-            assertFenced(storage, FileRaftStorage.StorageException.class);
+            try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
+                assertFenced(storage, FileRaftStorage.StorageException.class);
+            }
         } finally { close(storage, dir); }
     }
 
@@ -215,9 +228,15 @@ class FileRaftStorageFencingTest {
         FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().verifyWrites(true).build(), io);
         await(storage.open(dir));
         try {
-            assertInstanceOf(FileRaftStorage.StorageException.class,
-                    failureOf(storage.appendEntries(List.of(entry(4, 2)))));
-            assertFenced(storage, FileRaftStorage.StorageException.class);
+            await(storage.replayLog());
+            Throwable cause = failureOf(storage.appendEntries(List.of(entry(4, 2))));
+            assertInstanceOf(FileRaftStorage.StorageException.class, cause);
+            assertEquals("Injected fsync failure", cause.getCause().getMessage(),
+                    "the append must fail because the verification force failed, not for any other reason");
+            assertEquals(1, io.calls.get());
+            try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
+                assertFenced(storage, FileRaftStorage.StorageException.class);
+            }
         } finally { close(storage, dir); }
     }
 
@@ -270,7 +289,9 @@ class FileRaftStorageFencingTest {
             assertEquals(1, corrupt.entriesBeforeCorruption());
             assertEquals(before.length, corrupt.fileSize());
             assertEquals(dir.resolve("raft.log"), corrupt.logPath());
-            assertFenced(storage, FileRaftStorage.CorruptLogException.class);
+            try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
+                assertFenced(storage, FileRaftStorage.CorruptLogException.class);
+            }
         } finally { close(storage, dir); }
         assertArrayEquals(before, Files.readAllBytes(dir.resolve("raft.log")), "WAL must be unchanged");
     }
@@ -288,7 +309,9 @@ class FileRaftStorageFencingTest {
                     failureOf(storage.replayLog()));
             assertEquals(third, corrupt.corruptOffset());
             assertEquals(2, corrupt.entriesBeforeCorruption());
-            assertFenced(storage, FileRaftStorage.CorruptLogException.class);
+            try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
+                assertFenced(storage, FileRaftStorage.CorruptLogException.class);
+            }
         } finally { close(storage, dir); }
         assertArrayEquals(before, Files.readAllBytes(dir.resolve("raft.log")));
     }
@@ -360,9 +383,13 @@ class FileRaftStorageFencingTest {
         FileRaftStorage storage = new FileRaftStorage(true);
         await(storage.open(dir));
         try {
-            assertInstanceOf(FileRaftStorage.CorruptLogException.class, failureOf(storage.truncatePrefix(1)));
+            try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
+                assertInstanceOf(FileRaftStorage.CorruptLogException.class, failureOf(storage.truncatePrefix(1)));
+            }
             assertFalse(Files.exists(dir.resolve("raft.log.tmp")));
-            assertFenced(storage, FileRaftStorage.CorruptLogException.class);
+            try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
+                assertFenced(storage, FileRaftStorage.CorruptLogException.class);
+            }
         } finally { close(storage, dir); }
         assertArrayEquals(before, Files.readAllBytes(dir.resolve("raft.log")));
     }

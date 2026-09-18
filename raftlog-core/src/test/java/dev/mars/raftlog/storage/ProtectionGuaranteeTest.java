@@ -98,10 +98,17 @@ class ProtectionGuaranteeTest {
 
     private FileRaftStorage storage;
 
-    private static FileRaftStorage.CorruptLogException assertCorruptReplay(FileRaftStorage storage) {
-        ExecutionException failure = assertThrows(ExecutionException.class,
-                () -> storage.replayLog().get(5, TimeUnit.SECONDS));
-        return assertInstanceOf(FileRaftStorage.CorruptLogException.class, failure.getCause());
+    /** Records of the operations the storage accepted, for exact accounting of the WAL afterwards. */
+    private final java.util.concurrent.ConcurrentLinkedQueue<WalRecords.Raw> written =
+            new java.util.concurrent.ConcurrentLinkedQueue<>();
+
+    private FileRaftStorage.CorruptLogException assertCorruptReplay(FileRaftStorage storage) {
+        // Reporting corruption must never modify the file it reports on.
+        try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> storage.replayLog().get(5, TimeUnit.SECONDS));
+            return assertInstanceOf(FileRaftStorage.CorruptLogException.class, failure.getCause());
+        }
     }
 
     @BeforeEach
@@ -145,11 +152,11 @@ class ProtectionGuaranteeTest {
                         barrier.await(); // Start all threads simultaneously
                         for (int i = 0; i < entriesPerThread; i++) {
                             int idx = indexCounter.getAndIncrement();
+                            LogEntryData entry = new LogEntryData(idx, 1, ("thread-data-" + idx).getBytes());
                             try {
-                                storage.appendEntries(List.of(
-                                        new LogEntryData(idx, 1, ("thread-data-" + idx).getBytes())
-                                )).get(5, TimeUnit.SECONDS);
+                                storage.appendEntries(List.of(entry)).get(5, TimeUnit.SECONDS);
                                 accepted.incrementAndGet();
+                                written.add(WalRecords.append(entry));
                             } catch (ExecutionException e) {
                                 if (isRejection(e, WriteRejectionReason.INDEX_NOT_CONTIGUOUS)) rejected.incrementAndGet();
                                 else failures.incrementAndGet();
@@ -170,6 +177,10 @@ class ProtectionGuaranteeTest {
 
             storage.sync().get(5, TimeUnit.SECONDS);
 
+            // Every byte in the WAL must belong to an accepted operation: a refusal that
+            // wrote anything would leave a record nobody accepted.
+            WalRecords.assertExactly(tempDir.resolve("raft.log"), written);
+            WalRecords.assertNoStrayFiles(tempDir);
             // Verify: whichever appends won the race, the log is a contiguous Raft log
             List<LogEntryData> replayed = storage.replayLog().get(10, TimeUnit.SECONDS);
 
@@ -212,11 +223,11 @@ class ProtectionGuaranteeTest {
                             for (int j = 0; j < payloadSize; j++) {
                                 payload[j] = marker;
                             }
+                            LogEntryData entry = new LogEntryData(idx, 1, payload);
                             try {
-                                storage.appendEntries(List.of(
-                                        new LogEntryData(idx, 1, payload)
-                                )).get(5, TimeUnit.SECONDS);
+                                storage.appendEntries(List.of(entry)).get(5, TimeUnit.SECONDS);
                                 accepted.incrementAndGet();
+                                written.add(WalRecords.append(entry));
                             } catch (ExecutionException e) {
                                 // Losing the race for the tail is refused, never reordered.
                                 if (!isRejection(e, WriteRejectionReason.INDEX_NOT_CONTIGUOUS)) throw e;
@@ -234,6 +245,10 @@ class ProtectionGuaranteeTest {
             executor.shutdown();
             storage.sync().get(5, TimeUnit.SECONDS);
 
+            // Every byte in the WAL must belong to an accepted operation: a refusal that
+            // wrote anything would leave a record nobody accepted.
+            WalRecords.assertExactly(tempDir.resolve("raft.log"), written);
+            WalRecords.assertNoStrayFiles(tempDir);
             // Verify: each payload should be uniform (no interleaving)
             List<LogEntryData> replayed = storage.replayLog().get(10, TimeUnit.SECONDS);
             assertEquals(accepted.get(), replayed.size());
@@ -291,6 +306,17 @@ class ProtectionGuaranteeTest {
             }
             executor.shutdown();
 
+            // End on a refusal. An accepted update replaces the staging file, so a refusal
+            // that leaves one behind would be masked by any accepted update after it.
+            ExecutionException lastRefusal = assertThrows(ExecutionException.class,
+                    () -> storage.updateMetadata(-1, Optional.empty()).get(5, TimeUnit.SECONDS));
+            assertTrue(isRejection(lastRefusal, WriteRejectionReason.TERM_REGRESSION));
+
+            // Metadata updates never touch the WAL, and a refused one must not leave its
+            // staging file behind.
+            WalRecords.assertExactly(tempDir.resolve("raft.log"), List.of());
+            WalRecords.assertNoStrayFiles(tempDir);
+
             // Verify: the persisted term is the highest accepted one, with its own vote
             long highest = acceptedVotes.keySet().stream().mapToLong(Long::longValue).max().orElseThrow();
             PersistentMeta persisted = storage.loadMetadata().get(5, TimeUnit.SECONDS);
@@ -329,13 +355,14 @@ class ProtectionGuaranteeTest {
                                 switch (op) {
                                     case 0 -> {
                                         int idx = indexCounter.getAndIncrement();
-                                        storage.appendEntries(List.of(
-                                                new LogEntryData(idx, 1, ("mixed-" + idx).getBytes())
-                                        )).get(5, TimeUnit.SECONDS);
+                                        LogEntryData entry = new LogEntryData(idx, 1, ("mixed-" + idx).getBytes());
+                                        storage.appendEntries(List.of(entry)).get(5, TimeUnit.SECONDS);
+                                        written.add(WalRecords.append(entry));
                                     }
                                     case 1 -> {
-                                        storage.truncateSuffix(localRandom.nextInt(100) + 1)
-                                                .get(5, TimeUnit.SECONDS);
+                                        long from = localRandom.nextInt(100) + 1;
+                                        storage.truncateSuffix(from).get(5, TimeUnit.SECONDS);
+                                        written.add(WalRecords.truncate(from));
                                     }
                                     case 2 -> {
                                         storage.updateMetadata(localRandom.nextInt(100),
@@ -366,10 +393,15 @@ class ProtectionGuaranteeTest {
 
             storage.sync().get(5, TimeUnit.SECONDS);
 
+            // Every byte in the WAL must belong to an accepted operation: a refusal that
+            // wrote anything would leave a record nobody accepted.
+            WalRecords.assertExactly(tempDir.resolve("raft.log"), written);
+            WalRecords.assertNoStrayFiles(tempDir);
             // Verify: whatever was refused, what remains is a well-formed Raft log
             List<LogEntryData> replayed = storage.replayLog().get(10, TimeUnit.SECONDS);
             assertContiguous(replayed);
             assertDoesNotThrow(() -> storage.loadMetadata().get(5, TimeUnit.SECONDS));
+            assertEquals(replayed.size(), DurableState.assertRestartAgrees(storage, tempDir).size());
         }
 
         @RepeatedTest(5)
@@ -391,11 +423,11 @@ class ProtectionGuaranteeTest {
                         startLatch.await();
                         for (int i = 0; i < iterations; i++) {
                             int idx = index.getAndIncrement();
+                            LogEntryData entry = new LogEntryData(idx, 1, ("stress-" + idx).getBytes());
                             try {
-                                storage.appendEntries(List.of(
-                                        new LogEntryData(idx, 1, ("stress-" + idx).getBytes())
-                                )).get(5, TimeUnit.SECONDS);
+                                storage.appendEntries(List.of(entry)).get(5, TimeUnit.SECONDS);
                                 accepted.incrementAndGet();
+                                written.add(WalRecords.append(entry));
                             } catch (ExecutionException e) {
                                 if (!isRejection(e, WriteRejectionReason.INDEX_NOT_CONTIGUOUS)) errors.incrementAndGet();
                             }
@@ -415,9 +447,14 @@ class ProtectionGuaranteeTest {
             storage.sync().get(5, TimeUnit.SECONDS);
 
             assertEquals(0, errors.get());
+            // Every byte in the WAL must belong to an accepted operation: a refusal that
+            // wrote anything would leave a record nobody accepted.
+            WalRecords.assertExactly(tempDir.resolve("raft.log"), written);
+            WalRecords.assertNoStrayFiles(tempDir);
             List<LogEntryData> replayed = storage.replayLog().get(10, TimeUnit.SECONDS);
             assertEquals(accepted.get(), replayed.size());
             assertContiguous(replayed);
+            assertEquals(accepted.get(), DurableState.assertRestartAgrees(storage, tempDir).size());
         }
 
         private boolean isRejection(ExecutionException failure, WriteRejectionReason... reasons) {
@@ -545,8 +582,10 @@ class ProtectionGuaranteeTest {
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             // Should fail to load (corrupt) or return empty
-            assertThrows(Exception.class, () ->
-                    storage.loadMetadata().get(5, TimeUnit.SECONDS));
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertThrows(Exception.class, () ->
+                        storage.loadMetadata().get(5, TimeUnit.SECONDS));
+            }
         }
 
         @Test
