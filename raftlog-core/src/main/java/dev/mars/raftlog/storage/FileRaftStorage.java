@@ -768,7 +768,6 @@ public final class FileRaftStorage implements RaftStorage {
                                 acceptedEntries.getFirst().index(), acceptedEntries.getLast().index(),
                                 pathForLog(dataDir), e.getMessage());
                 // Part of the batch may be on disk. The tail is unknown until replay.
-                logStateKnown = false;
                 throw new StorageException("Failed to append entries", e);
             } catch (RuntimeException e) {
                 // Verification failures and fencing are unchecked. The same applies:
@@ -962,6 +961,7 @@ public final class FileRaftStorage implements RaftStorage {
     }
 
     private void validateAppend(List<LogEntryData> entries) {
+        requireKnownLogState();
         LogEntryData first = entries.getFirst();
         if (first.index() < 1) {
             throw new WriteRejectedException(WriteRejectionReason.INDEX_NOT_CONTIGUOUS,
