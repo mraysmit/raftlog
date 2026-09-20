@@ -489,22 +489,20 @@ class FileRaftStorageDiagnosticLoggingTest {
     }
 
     /**
-     * Nothing in the project writes to the console directly: not the library, not the demo, not the
-     * tests, not the scripts. Output that bypasses the logger has no level, no timestamp and no
-     * source, and cannot be turned up to DEBUG or down to ERROR. The one permitted reference is the
-     * scripts' own logger set-up, which has to name the stream it writes to.
+     * The library, demo, tests, and fixture generator do not write to the console directly.
+     * Output that bypasses the logger has no level, no timestamp and no source, and cannot be
+     * turned up to DEBUG or down to ERROR.
      */
     @Test void nothingInTheProjectWritesToTheConsoleDirectly() throws Exception {
         Path root = Path.of("..").toAbsolutePath().normalize();
         Pattern console = Pattern.compile("System\\s*\\.\\s*(out|err)\\b|\\.printStackTrace\\s*\\(");
         List<String> offenders = new ArrayList<>();
         int scanned = 0;
-        for (String tree : List.of("raftlog-core/src", "raftlog-demo/src", "scripts")) {
+        for (String tree : List.of("raftlog-core/src", "raftlog-demo/src")) {
             assertTrue(Files.isDirectory(root.resolve(tree)), "missing " + root.resolve(tree));
             try (Stream<Path> files = Files.walk(root.resolve(tree))) {
                 for (Path file : files.filter(f -> f.toString().endsWith(".java") || f.toString().endsWith(".java.txt")).toList()) {
                     scanned++;
-                    if (file.getFileName().toString().equals("ScriptLog.java")) continue;
                     String source = Files.readString(file);
                     Matcher m = console.matcher(source);
                     while (m.find()) offenders.add(root.relativize(file).toString().replace('\\', '/') + ":" + lineOf(source, m.start()));

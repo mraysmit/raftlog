@@ -110,16 +110,17 @@ mvn clean install
 mvn test
 ```
 
-That runs the unit tests of both modules, including the chaos suite. It is for working on
-something. To verify a change or a release, run everything:
+That runs the tests of both Maven modules, including the chaos suite. To build and run the
+tests with the coverage gate:
 
 ```bash
-java scripts/VerifyAll.java
+mvn -Pcoverage clean verify
 ```
 
-It runs every test under the coverage gate, every shipped program from the packaged jar, the
-model soak and the mutation gate, on this platform and again on Linux as an unprivileged user.
-It needs Docker and takes well over an hour. See `docs/RAFTLOG_TEST_DOCUMENTATION.md`.
+Release verification also includes running the packaged examples, the extended model soak,
+and the tests on Linux as an unprivileged user. These are separate steps; Maven does not run
+them all from one command. The former Java verification programs and mutation gate have been
+removed. See `docs/RAFTLOG_TEST_DOCUMENTATION.md` for the current checklist.
 
 ## Command style for captured test logs
 
@@ -284,18 +285,12 @@ The same state is reported where it is established and where it is lost:
 - `wal.compaction.completed` reports the `requestedIndex`, the `boundary` actually stored, and
   `bytesBefore` and `bytesAfter`.
 
-Nothing in the project writes to the console directly: not the library, the demo, the tests or
-the scripts. A test fails the build if a `System.out`, `System.err` or `printStackTrace` appears.
+The library, demo, and tests use logging rather than writing directly to the console. The
+diagnostic logging test scans Java sources for `System.out`, `System.err` and `printStackTrace`.
 
 - The demo programs log at INFO. At DEBUG the chaos program also reports what each scenario was
   set up with, the data directory it used, how long it took, and exactly what it damaged and
   where, including the randomly chosen offsets and bytes, so a failing run can be reproduced.
-- The programs under `scripts/` need only the JDK and log through `java.util.logging`, one line
-  per record. INFO is what a run reports. DEBUG adds what is needed to repeat a step by hand: the
-  exact command, the file its output went to, its exit code and its duration. Turn it on with
-  `java -Dscripts.log.level=DEBUG scripts/VerifyAll.java` or the environment variable
-  `SCRIPTS_LOG_LEVEL`; the level is passed on to the mutation gate and into the Linux container.
-  A level that is not DEBUG, INFO, WARN or ERROR is refused.
 
 ## Architecture
 
