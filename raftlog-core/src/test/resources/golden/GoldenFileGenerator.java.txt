@@ -1,0 +1,210 @@
+/*
+ * Generator for the golden compatibility fixtures in this directory.
+ *
+ * It is kept as a .txt file so the build never compiles it. It must be compiled and run against
+ * a PUBLISHED raftlog-core jar downloaded from Maven Central, never against the current sources:
+ * the point of the fixtures is to be what real users of that release have on disk.
+ *
+ *   V=1.2.0
+ *   curl -O https://repo1.maven.org/maven2/io/github/mraysmit/raftlog-core/$V/raftlog-core-$V.jar
+ *   (verify the jar against its published .sha1)
+ *   cp GoldenFileGenerator.java.txt GoldenFileGenerator.java
+ *   java -cp "raftlog-core-$V.jar;slf4j-api-2.0.9.jar" GoldenFileGenerator.java <outDir>/$V compaction
+ *
+ * Omit the last argument for releases that have no truncatePrefix (1.1.0).
+ *
+ * For every scenario it writes raft.log and, where used, meta.dat, exactly as that release left
+ * them, and expected.txt: what THAT RELEASE ITSELF replays from a copy of those files. The oracle
+ * is the old build's own behaviour, not anyone's expectation of it. Fixtures are never reopened in
+ * place, because replay may repair a torn tail and that would destroy the fixture.
+ */
+import dev.mars.raftlog.storage.FileRaftStorage;
+import dev.mars.raftlog.storage.RaftStorage.LogEntryData;
+import dev.mars.raftlog.storage.RaftStorage.PersistentMeta;
+
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.TimeUnit;
+
+public class GoldenFileGenerator {
+    interface Scenario { void write(FileRaftStorage storage) throws Exception; }
+
+    static Path out;
+
+    public static void main(String[] args) throws Exception {
+        out = Path.of(args[0]);
+        boolean compaction = args.length > 1 && args[1].equals("compaction");
+
+        byte[] allBytes = new byte[256];
+        for (int i = 0; i < 256; i++) allBytes[i] = (byte) i;
+        byte[] large = new byte[64 * 1024];
+        for (int i = 0; i < large.length; i++) large[i] = (byte) (i * 31);
+
+        scenario("basic", s -> {
+            await(s.updateMetadata(3, Optional.of("node-a")));
+            await(s.appendEntries(List.of(
+                    e(1, 1, "SET key1 value1".getBytes(StandardCharsets.UTF_8)),
+                    e(2, 1, new byte[0]),
+                    e(3, 2, allBytes))));
+            await(s.appendEntries(List.of(e(4, 2, "héllo 世界 😀".getBytes(StandardCharsets.UTF_8)))));
+            await(s.appendEntries(List.of(e(5, 3, large))));
+            await(s.sync());
+        });
+
+        scenario("suffix-truncate-and-rewrite", s -> {
+            await(s.appendEntries(List.of(e(1, 1, b("a")), e(2, 1, b("b")), e(3, 1, b("c")),
+                    e(4, 2, b("d")), e(5, 2, b("e")), e(6, 2, b("f")))));
+            await(s.truncateSuffix(4));
+            await(s.appendEntries(List.of(e(4, 3, b("d2")), e(5, 3, b("e2")))));
+            await(s.sync());
+        });
+
+        scenario("metadata-no-vote", s -> {
+            await(s.updateMetadata(7, Optional.of("first")));
+            await(s.updateMetadata(9, Optional.empty()));
+        });
+
+        scenario("metadata-long-vote", s -> await(s.updateMetadata(Long.MAX_VALUE, Optional.of("n".repeat(1000)))));
+
+        scenario("torn-tail", s -> {
+            await(s.appendEntries(List.of(e(1, 1, b("one")), e(2, 1, b("two")))));
+            await(s.sync());
+        }, dir -> {
+            // Half of a record header, as a crash in the middle of a write leaves it.
+            byte[] all = Files.readAllBytes(dir.resolve("raft.log"));
+            Files.write(dir.resolve("raft.log"), java.util.Arrays.copyOf(all, 10), StandardOpenOption.APPEND);
+        });
+
+        // ---- sequences these releases accepted that a Raft node should never have sent
+        scenario("permissive-starts-at-100", s -> {
+            await(s.appendEntries(List.of(e(100, 4, b("x")), e(101, 4, b("y")))));
+            await(s.sync());
+        });
+        scenario("permissive-gap", s -> {
+            await(s.appendEntries(List.of(e(1, 1, b("a")), e(2, 1, b("b")), e(5, 1, b("e")))));
+            await(s.sync());
+        });
+        scenario("permissive-duplicate-index", s -> {
+            await(s.appendEntries(List.of(e(1, 1, b("a")), e(2, 1, b("b")))));
+            await(s.appendEntries(List.of(e(2, 1, b("b-again")))));
+            await(s.sync());
+        });
+        scenario("permissive-term-regression", s -> {
+            await(s.appendEntries(List.of(e(1, 5, b("a")), e(2, 3, b("b")))));
+            await(s.sync());
+        });
+        scenario("permissive-truncate-from-zero", s -> {
+            await(s.appendEntries(List.of(e(1, 1, b("a")), e(2, 1, b("b")), e(3, 1, b("c")))));
+            await(s.truncateSuffix(0));
+            await(s.appendEntries(List.of(e(1, 2, b("a2")), e(2, 2, b("b2")))));
+            await(s.sync());
+        });
+        scenario("permissive-truncate-beyond-tail", s -> {
+            await(s.appendEntries(List.of(e(1, 1, b("a")), e(2, 1, b("b")))));
+            await(s.truncateSuffix(1000));
+            await(s.appendEntries(List.of(e(3, 1, b("c")))));
+            await(s.sync());
+        });
+
+        if (compaction) {
+            scenario("compacted-with-retained-entries", s -> {
+                List<LogEntryData> entries = new ArrayList<>();
+                for (int i = 1; i <= 8; i++) entries.add(e(i, i <= 4 ? 1 : 2, b("v" + i)));
+                await(s.appendEntries(entries));
+                compact(s, 5);
+                await(s.appendEntries(List.of(e(9, 2, b("v9")))));
+                await(s.sync());
+            });
+            scenario("compacted-to-empty", s -> {
+                await(s.updateMetadata(2, Optional.of("node-b")));
+                await(s.appendEntries(List.of(e(1, 1, b("a")), e(2, 1, b("b")), e(3, 2, b("c")))));
+                compact(s, 3);
+                await(s.sync());
+            });
+        }
+        System.out.println("GENERATED " + out);
+    }
+
+    interface Tamper { void apply(Path dir) throws Exception; }
+
+    static void scenario(String name, Scenario scenario) throws Exception { scenario(name, scenario, dir -> { }); }
+
+    static void scenario(String name, Scenario scenario, Tamper tamper) throws Exception {
+        Path dir = out.resolve(name);
+        Files.createDirectories(dir);
+        FileRaftStorage storage = new FileRaftStorage(true);
+        await(storage.open(dir));
+        scenario.write(storage);
+        storage.close();
+        awaitLockRelease(dir);
+        tamper.apply(dir);
+        Files.deleteIfExists(dir.resolve("raft.lock"));
+
+        // The oracle: what this release replays from a COPY of what it wrote.
+        Path copy = Files.createTempDirectory("golden-oracle");
+        for (String f : List.of("raft.log", "meta.dat")) {
+            if (Files.exists(dir.resolve(f))) Files.copy(dir.resolve(f), copy.resolve(f), StandardCopyOption.REPLACE_EXISTING);
+        }
+        StringBuilder expected = new StringBuilder();
+        FileRaftStorage reader = new FileRaftStorage(true);
+        await(reader.open(copy));
+        try {
+            List<LogEntryData> entries = await(reader.replayLog());
+            expected.append("replay=OK\n").append("entries=").append(entries.size()).append('\n');
+            for (int i = 0; i < entries.size(); i++) {
+                LogEntryData x = entries.get(i);
+                expected.append("entry.").append(i).append('=').append(x.index()).append(',').append(x.term()).append(',')
+                        .append(Base64.getEncoder().encodeToString(x.payload())).append('\n');
+            }
+        } catch (Exception failure) {
+            Throwable cause = failure.getCause() == null ? failure : failure.getCause();
+            expected.append("replay=FAILED ").append(cause.getClass().getSimpleName()).append('\n');
+        }
+        try {
+            PersistentMeta meta = await(reader.loadMetadata());
+            expected.append("meta.term=").append(meta.currentTerm()).append('\n');
+            expected.append("meta.vote=").append(meta.votedFor()
+                    .map(v -> "B64:" + Base64.getEncoder().encodeToString(v.getBytes(StandardCharsets.UTF_8))).orElse("NONE")).append('\n');
+        } catch (Exception failure) {
+            expected.append("meta=FAILED\n");
+        }
+        reader.close();
+        awaitLockRelease(copy);
+        Files.writeString(dir.resolve("expected.txt"), expected.toString());
+        System.out.println("  " + name + ": " + expected.toString().lines().findFirst().orElse(""));
+    }
+
+    /** close() in these releases returns before the lock is released. */
+    static void awaitLockRelease(Path dir) throws Exception {
+        Path lock = dir.resolve("raft.lock");
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        while (System.nanoTime() < deadline) {
+            try (FileChannel ch = FileChannel.open(lock, StandardOpenOption.WRITE); FileLock held = ch.tryLock()) {
+                if (held != null) return;
+            } catch (OverlappingFileLockException stillHeld) { /* retry */ }
+            Thread.sleep(20);
+        }
+        throw new IllegalStateException("lock not released: " + dir);
+    }
+
+    /** Reflective, so this one source also compiles against releases without prefix compaction. */
+    @SuppressWarnings("unchecked")
+    static void compact(FileRaftStorage storage, long toIndex) throws Exception {
+        Object future = FileRaftStorage.class.getMethod("truncatePrefix", long.class).invoke(storage, toIndex);
+        await((java.util.concurrent.CompletableFuture<Void>) future);
+    }
+
+    static LogEntryData e(long index, long term, byte[] payload) { return new LogEntryData(index, term, payload); }
+    static byte[] b(String s) { return s.getBytes(StandardCharsets.UTF_8); }
+    static <T> T await(java.util.concurrent.CompletableFuture<T> f) throws Exception { return f.get(30, TimeUnit.SECONDS); }
+}

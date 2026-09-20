@@ -53,7 +53,7 @@ class ConfigResolverTest {
         void testDataDirSystemProperty() {
             Path customDir = tempDir.resolve("custom-data");
             System.setProperty("raftlog.dataDir", customDir.toString());
-            
+
             RaftStorageConfig config = RaftStorageConfig.builder().build();
             assertEquals(customDir, config.dataDir());
         }
@@ -71,7 +71,7 @@ class ConfigResolverTest {
         @DisplayName("System property syncEnabled=true is respected")
         void testSyncEnabledSystemPropertyTrue() {
             System.setProperty("raftlog.syncEnabled", "true");
-            
+
             RaftStorageConfig config = RaftStorageConfig.builder().build();
             assertTrue(config.syncEnabled());
         }
@@ -80,7 +80,7 @@ class ConfigResolverTest {
         @DisplayName("System property verifyWrites=true is respected")
         void testVerifyWritesSystemPropertyTrue() {
             System.setProperty("raftlog.verifyWrites", "true");
-            
+
             RaftStorageConfig config = RaftStorageConfig.builder().build();
             assertTrue(config.verifyWrites());
         }
@@ -89,7 +89,7 @@ class ConfigResolverTest {
         @DisplayName("System property verifyWrites=false is respected")
         void testVerifyWritesSystemPropertyFalse() {
             System.setProperty("raftlog.verifyWrites", "false");
-            
+
             RaftStorageConfig config = RaftStorageConfig.builder().build();
             assertFalse(config.verifyWrites());
         }
@@ -98,7 +98,7 @@ class ConfigResolverTest {
         @DisplayName("System property minFreeSpaceMb is respected")
         void testMinFreeSpaceMbSystemProperty() {
             System.setProperty("raftlog.minFreeSpaceMb", "128");
-            
+
             RaftStorageConfig config = RaftStorageConfig.builder().build();
             assertEquals(128, config.minFreeSpaceMb());
         }
@@ -107,25 +107,24 @@ class ConfigResolverTest {
         @DisplayName("System property maxPayloadSizeMb is respected")
         void testMaxPayloadSizeMbSystemProperty() {
             System.setProperty("raftlog.maxPayloadSizeMb", "32");
-            
+
             RaftStorageConfig config = RaftStorageConfig.builder().build();
             assertEquals(32, config.maxPayloadSizeMb());
         }
 
         @Test
-        @DisplayName("Invalid integer system property falls back to default")
+        @DisplayName("Invalid integer system property is refused, not replaced by the default")
         void testInvalidIntSystemProperty() {
             System.setProperty("raftlog.minFreeSpaceMb", "not-a-number");
-            
-            RaftStorageConfig config = RaftStorageConfig.builder().build();
-            assertEquals(64, config.minFreeSpaceMb()); // default
+
+            assertThrows(IllegalArgumentException.class, () -> RaftStorageConfig.builder().build());
         }
 
         @Test
         @DisplayName("Blank system property falls back to default")
         void testBlankSystemProperty() {
             System.setProperty("raftlog.dataDir", "   ");
-            
+
             RaftStorageConfig config = RaftStorageConfig.builder().build();
             // Should use default ~/.raftlog/data
             assertNotNull(config.dataDir());
@@ -135,7 +134,7 @@ class ConfigResolverTest {
         @DisplayName("Empty string system property falls back to default")
         void testEmptySystemProperty() {
             System.setProperty("raftlog.syncEnabled", "");
-            
+
             RaftStorageConfig config = RaftStorageConfig.builder().build();
             // Default syncEnabled is true
             assertTrue(config.syncEnabled());
@@ -162,11 +161,11 @@ class ConfigResolverTest {
             Path sysPropDir = tempDir.resolve("sys-prop");
             Path programmaticDir = tempDir.resolve("programmatic");
             System.setProperty("raftlog.dataDir", sysPropDir.toString());
-            
+
             RaftStorageConfig config = RaftStorageConfig.builder()
                     .dataDir(programmaticDir)
                     .build();
-            
+
             assertEquals(programmaticDir, config.dataDir());
         }
 
@@ -185,7 +184,7 @@ class ConfigResolverTest {
             RaftStorageConfig config = RaftStorageConfig.builder()
                     .verifyWrites(true)
                     .build();
-            
+
             assertTrue(config.verifyWrites());
         }
 
@@ -195,7 +194,7 @@ class ConfigResolverTest {
             RaftStorageConfig config = RaftStorageConfig.builder()
                     .minFreeSpaceMb(256)
                     .build();
-            
+
             assertEquals(256, config.minFreeSpaceMb());
         }
 
@@ -205,7 +204,7 @@ class ConfigResolverTest {
             RaftStorageConfig config = RaftStorageConfig.builder()
                     .maxPayloadSizeMb(64)
                     .build();
-            
+
             assertEquals(64, config.maxPayloadSizeMb());
         }
 
@@ -213,11 +212,11 @@ class ConfigResolverTest {
         @DisplayName("dataDir String overload works correctly")
         void testDataDirStringOverload() {
             String dirPath = tempDir.resolve("string-path").toString();
-            
+
             RaftStorageConfig config = RaftStorageConfig.builder()
                     .dataDir(dirPath)
                     .build();
-            
+
             assertEquals(Path.of(dirPath), config.dataDir());
         }
     }
@@ -244,19 +243,19 @@ class ConfigResolverTest {
         @DisplayName("Default config values are correct")
         void testDefaultValues() {
             RaftStorageConfig config = RaftStorageConfig.builder().build();
-            
+
             // Default dataDir is ~/.raftlog/data
             assertTrue(config.dataDir().endsWith(Path.of("data")));
-            
+
             // Default syncEnabled is true
             assertTrue(config.syncEnabled());
-            
+
             // Default verifyWrites is false
             assertFalse(config.verifyWrites());
-            
+
             // Default minFreeSpaceMb is 64
             assertEquals(64, config.minFreeSpaceMb());
-            
+
             // Default maxPayloadSizeMb is 16
             assertEquals(16, config.maxPayloadSizeMb());
         }
@@ -265,7 +264,7 @@ class ConfigResolverTest {
         @DisplayName("Config getters return correct values")
         void testConfigGetters() {
             Path customDir = tempDir.resolve("custom");
-            
+
             RaftStorageConfig config = RaftStorageConfig.builder()
                     .dataDir(customDir)
                     .syncEnabled(true)
@@ -273,7 +272,7 @@ class ConfigResolverTest {
                     .minFreeSpaceMb(128)
                     .maxPayloadSizeMb(32)
                     .build();
-            
+
             assertEquals(customDir, config.dataDir());
             assertTrue(config.syncEnabled());
             assertTrue(config.verifyWrites());
@@ -305,7 +304,7 @@ class ConfigResolverTest {
             RaftStorageConfig config = RaftStorageConfig.builder()
                     .minFreeSpaceMb(0)
                     .build();
-            
+
             assertEquals(0, config.minFreeSpaceMb());
         }
 
@@ -315,7 +314,7 @@ class ConfigResolverTest {
             RaftStorageConfig config = RaftStorageConfig.builder()
                     .maxPayloadSizeMb(1024)
                     .build();
-            
+
             assertEquals(1024, config.maxPayloadSizeMb());
         }
 
@@ -323,7 +322,7 @@ class ConfigResolverTest {
         @DisplayName("System property with only whitespace for boolean")
         void testWhitespaceOnlyBooleanProperty() {
             System.setProperty("raftlog.verifyWrites", "   ");
-            
+
             RaftStorageConfig config = RaftStorageConfig.builder().build();
             // Should use default (false)
             assertFalse(config.verifyWrites());
@@ -334,7 +333,7 @@ class ConfigResolverTest {
         void testWhitespaceAroundValue() {
             // Note: System.getProperty returns the value as-is including whitespace
             System.setProperty("raftlog.minFreeSpaceMb", "100");
-            
+
             RaftStorageConfig config = RaftStorageConfig.builder().build();
             assertEquals(100, config.minFreeSpaceMb());
         }
@@ -344,12 +343,12 @@ class ConfigResolverTest {
         void testMultipleBuilds() {
             RaftStorageConfig.Builder builder = RaftStorageConfig.builder()
                     .dataDir(tempDir.resolve("first"));
-            
+
             RaftStorageConfig config1 = builder.build();
-            
+
             builder.dataDir(tempDir.resolve("second"));
             RaftStorageConfig config2 = builder.build();
-            
+
             assertEquals(tempDir.resolve("first"), config1.dataDir());
             assertEquals(tempDir.resolve("second"), config2.dataDir());
         }
@@ -364,7 +363,7 @@ class ConfigResolverTest {
                     .minFreeSpaceMb(100)
                     .maxPayloadSizeMb(50)
                     .build();
-            
+
             assertEquals(tempDir, config.dataDir());
             assertTrue(config.syncEnabled());
             assertTrue(config.verifyWrites());
@@ -373,52 +372,48 @@ class ConfigResolverTest {
         }
 
         @Test
-        @DisplayName("Negative values are accepted by builder")
+        @DisplayName("Negative values are refused by the builder")
         void testNegativeValues() {
-            RaftStorageConfig config = RaftStorageConfig.builder()
-                    .minFreeSpaceMb(-1)
-                    .maxPayloadSizeMb(-1)
-                    .build();
-            
-            assertEquals(-1, config.minFreeSpaceMb());
-            assertEquals(-1, config.maxPayloadSizeMb());
+            // A negative payload limit would make every payload too large; a negative reserve is meaningless.
+            assertThrows(IllegalArgumentException.class, () -> RaftStorageConfig.builder().minFreeSpaceMb(-1).build());
+            assertThrows(IllegalArgumentException.class, () -> RaftStorageConfig.builder().maxPayloadSizeMb(-1).build());
         }
 
         @Test
         @DisplayName("System property with negative int")
         void testNegativeIntSystemProperty() {
             System.setProperty("raftlog.minFreeSpaceMb", "-50");
-            
-            RaftStorageConfig config = RaftStorageConfig.builder().build();
-            assertEquals(-50, config.minFreeSpaceMb());
+
+            // Parseable but out of range: refused, not silently replaced by the default.
+            assertThrows(IllegalArgumentException.class, () -> RaftStorageConfig.builder().build());
         }
 
         @Test
         @DisplayName("System property with max int")
         void testMaxIntSystemProperty() {
             System.setProperty("raftlog.maxPayloadSizeMb", String.valueOf(Integer.MAX_VALUE));
-            
-            RaftStorageConfig config = RaftStorageConfig.builder().build();
-            assertEquals(Integer.MAX_VALUE, config.maxPayloadSizeMb());
+
+            // Its size in bytes does not fit the 32-bit payload length of a record.
+            assertThrows(IllegalArgumentException.class, () -> RaftStorageConfig.builder().build());
+            System.setProperty("raftlog.maxPayloadSizeMb", "2047");
+            assertEquals(2047, RaftStorageConfig.builder().build().maxPayloadSizeMb());
         }
 
         @Test
-        @DisplayName("System property overflow falls back to default")
+        @DisplayName("System property too large for an int is refused")
         void testIntOverflowSystemProperty() {
-            // Value too large for int should fail parse and use default
             System.setProperty("raftlog.minFreeSpaceMb", "9999999999999999999");
-            
-            RaftStorageConfig config = RaftStorageConfig.builder().build();
-            assertEquals(64, config.minFreeSpaceMb()); // default
+
+            // The operator asked for an enormous reserve. Quietly giving them 64 MB is not an answer.
+            assertThrows(IllegalArgumentException.class, () -> RaftStorageConfig.builder().build());
         }
 
         @Test
-        @DisplayName("System property with double value falls back to default")
+        @DisplayName("System property with a fractional value is refused")
         void testDoubleValueSystemProperty() {
             System.setProperty("raftlog.minFreeSpaceMb", "64.5");
-            
-            RaftStorageConfig config = RaftStorageConfig.builder().build();
-            assertEquals(64, config.minFreeSpaceMb()); // default (parse fails)
+
+            assertThrows(IllegalArgumentException.class, () -> RaftStorageConfig.builder().build());
         }
 
         @Test
@@ -427,26 +422,26 @@ class ConfigResolverTest {
             // "true" should be true
             System.setProperty("raftlog.verifyWrites", "true");
             assertTrue(RaftStorageConfig.builder().build().verifyWrites());
-            
+
             // "TRUE" should be true
             System.setProperty("raftlog.verifyWrites", "TRUE");
             assertTrue(RaftStorageConfig.builder().build().verifyWrites());
-            
+
             // "True" should be true
             System.setProperty("raftlog.verifyWrites", "True");
             assertTrue(RaftStorageConfig.builder().build().verifyWrites());
-            
+
             // "false" should be false
             System.setProperty("raftlog.verifyWrites", "false");
             assertFalse(RaftStorageConfig.builder().build().verifyWrites());
-            
-            // "yes" should be false (not "true")
+
+            // "yes" and "1" are neither true nor false. Reading them as false would leave an
+            // operator who meant "on" with write verification silently off.
             System.setProperty("raftlog.verifyWrites", "yes");
-            assertFalse(RaftStorageConfig.builder().build().verifyWrites());
-            
-            // "1" should be false (not "true")
+            assertThrows(IllegalArgumentException.class, () -> RaftStorageConfig.builder().build());
+
             System.setProperty("raftlog.verifyWrites", "1");
-            assertFalse(RaftStorageConfig.builder().build().verifyWrites());
+            assertThrows(IllegalArgumentException.class, () -> RaftStorageConfig.builder().build());
         }
     }
 
@@ -480,17 +475,17 @@ class ConfigResolverTest {
                     .syncEnabled(true)
                     .verifyWrites(true)
                     .build();
-            
+
             FileRaftStorage storage = new FileRaftStorage(config);
             storage.open(tempDir).get(5, java.util.concurrent.TimeUnit.SECONDS);
-            
+
             try {
                 // Append with verification
                 storage.appendEntries(java.util.List.of(
                         new RaftStorage.LogEntryData(1, 1, "test".getBytes())
                 )).get(5, java.util.concurrent.TimeUnit.SECONDS);
                 storage.sync().get(5, java.util.concurrent.TimeUnit.SECONDS);
-                
+
                 // Replay and verify
                 var entries = storage.replayLog().get(5, java.util.concurrent.TimeUnit.SECONDS);
                 assertEquals(1, entries.size());
@@ -510,10 +505,10 @@ class ConfigResolverTest {
                     .minFreeSpaceMb(10) // Low for testing
                     .maxPayloadSizeMb(1)
                     .build();
-            
+
             FileRaftStorage storage = new FileRaftStorage(config);
             storage.open(tempDir).get(5, java.util.concurrent.TimeUnit.SECONDS);
-            
+
             try {
                 // Small payload should work
                 byte[] smallPayload = new byte[1000]; // 1KB, well under 1MB

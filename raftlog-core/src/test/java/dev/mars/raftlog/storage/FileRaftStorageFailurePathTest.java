@@ -912,6 +912,249 @@ class FileRaftStorageFailurePathTest {
         } finally { await(storage.closeAsync()); }
     }
 
+    // ------------------------------------------------------------------ reads that come back short
+
+    /**
+     * Makes one positional read behave as though the file had shrunk underneath the reader
+     * (end of file) or the device made no progress (zero bytes). Chosen by file position and
+     * by which read of that position it is, because replay reads some positions twice.
+     */
+    private static final class AnomalousRead extends CompactionIo {
+        final long position;
+        final int occurrence;
+        final int result;
+        final AtomicInteger seen = new AtomicInteger();
+        AnomalousRead(long position, int occurrence, int result) {
+            this.position = position;
+            this.occurrence = occurrence;
+            this.result = result;
+        }
+        @Override int read(FileChannel channel, ByteBuffer buffer, long pos) throws IOException {
+            if (pos == position && seen.incrementAndGet() == occurrence) return result;
+            return super.read(channel, buffer, pos);
+        }
+    }
+
+    private static final int END_OF_FILE = -1;
+    private static final int NO_PROGRESS = 0;
+    private static final int RECORD = 32;                       // append(index, term): 27 + 1 + 4
+
+    /**
+     * A read that ends early inside the known length of the file means the file is changing
+     * while it is being read. Nothing about its contents can be concluded, so the only safe
+     * outcome is an I/O failure: no corruption verdict, no fence, and above all no truncation.
+     */
+    private void assertReplayFailsWithoutVerdictOrDamage(CompactionIo io, List<LogEntryData> afterwards) throws Exception {
+        FileRaftStorage storage = open(dir, io);
+        try {
+            try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
+                Throwable cause = failureOf(storage.replayLog());
+                assertEquals("Failed to replay log", cause.getMessage(), String.valueOf(cause));
+                assertInstanceOf(IOException.class, cause.getCause());
+                assertFalse(cause instanceof FileRaftStorage.CorruptLogException, "an unreadable file is not a corrupt one");
+            }
+            // The anomaly was transient. The instance is not fenced and a second replay sees the truth.
+            if (afterwards != null) assertEntries(afterwards, await(storage.replayLog()));
+        } finally { await(storage.closeAsync()); }
+    }
+
+    @Test void recordHeaderReadThatEndsEarlyIsAnIoFailureNotCorruption() throws Exception {
+        writeWal(append(1, 1), append(2, 1));
+        assertReplayFailsWithoutVerdictOrDamage(new AnomalousRead(RECORD, 1, END_OF_FILE),
+                List.of(new LogEntryData(1, 1, new byte[]{1}), new LogEntryData(2, 1, new byte[]{1})));
+    }
+
+    @Test void shortReadWhileClassifyingTheTailNeverTruncatesACompleteRecordWithABadChecksum() throws Exception {
+        // Record 2 is complete but its checksum is wrong. Policy: it may be acknowledged data
+        // damaged later, so it is reported and preserved. A short read while deciding whether
+        // it is a torn write must not turn that verdict into "incomplete, truncate it".
+        byte[] damaged = append(2, 1);
+        damaged[damaged.length - 1] ^= 1;
+        writeWal(append(1, 1), damaged);
+        assertReplayFailsWithoutVerdictOrDamage(new AnomalousRead(RECORD, 2, END_OF_FILE), null);
+
+        // With no anomaly the same file gets the correct verdict, and is still untouched.
+        FileRaftStorage storage = open(dir);
+        try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
+            assertInstanceOf(FileRaftStorage.CorruptLogException.class, failureOf(storage.replayLog()));
+        } finally { await(storage.closeAsync()); }
+    }
+
+    @Test void shortReadWhileScanningForLaterRecordsNeverTruncatesAValidRecordAway() throws Exception {
+        // Record 2 looks torn because its length field is damaged. Record 3 is intact beyond it.
+        // If the scan that looks for record 3 gives up on a short read, the file is truncated
+        // at record 2 and an entry that may have been acknowledged is destroyed.
+        ByteArrayOutputStream wal = new ByteArrayOutputStream();
+        wal.write(append(1, 1));
+        wal.write(tornHeader(2, 900_000, new byte[150_000]));
+        wal.write(append(3, 1));
+        Files.write(dir.resolve("raft.log"), wal.toByteArray());
+        assertReplayFailsWithoutVerdictOrDamage(new AnomalousRead(RECORD + 1, 1, END_OF_FILE), null);
+    }
+
+    @Test void readThatMakesNoProgressIsAnIoFailure() throws Exception {
+        writeWal(append(1, 1), append(2, 1));
+        assertReplayFailsWithoutVerdictOrDamage(new AnomalousRead(0, 1, NO_PROGRESS),
+                List.of(new LogEntryData(1, 1, new byte[]{1}), new LogEntryData(2, 1, new byte[]{1})));
+    }
+
+    @Test void shortReadDuringCompactionLeavesTheWalAloneAndDoesNotFence() throws Exception {
+        writeWal(append(1, 1), append(2, 1), append(3, 1));
+        FileRaftStorage storage = open(dir, new AnomalousRead(RECORD, 1, END_OF_FILE));
+        try {
+            try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
+                Throwable cause = failureOf(storage.truncatePrefix(1));
+                assertEquals("Prefix compaction failed", cause.getMessage());
+                assertInstanceOf(IOException.class, cause.getCause());
+            }
+            WalRecords.assertNoStrayFiles(dir);
+            // Publication never began, so nothing is fenced and the compaction can simply be retried.
+            await(storage.truncatePrefix(1));
+            assertEquals(1L, await(storage.compactionBoundary()));
+        } finally { await(storage.closeAsync()); }
+        assertEntries(List.of(new LogEntryData(2, 1, new byte[]{1}), new LogEntryData(3, 1, new byte[]{1})),
+                DurableState.replayAfterRestart(dir));
+    }
+
+    // ------------------------------------------------------------------ the write limit is not a read limit
+
+    @Test void loweringThePayloadLimitDoesNotMakeExistingRecordsUnreadable() throws Exception {
+        byte[] big = new byte[2 * 1024 * 1024];
+        for (int i = 0; i < big.length; i++) big[i] = (byte) (i * 7);
+        FileRaftStorage generous = new FileRaftStorage(RaftStorageConfig.builder().maxPayloadSizeMb(4).build());
+        await(generous.open(dir));
+        try {
+            await(generous.appendEntries(List.of(new LogEntryData(1, 1, big), entry(2, 1))));
+            await(generous.sync());
+        } finally { await(generous.closeAsync()); }
+
+        // An operator lowers the limit. The log is healthy; it must not be reported as corrupt.
+        FileRaftStorage strict = new FileRaftStorage(RaftStorageConfig.builder().maxPayloadSizeMb(1).build());
+        await(strict.open(dir));
+        try {
+            List<LogEntryData> replayed;
+            try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
+                replayed = await(strict.replayLog());
+            }
+            assertEquals(2, replayed.size());
+            assertArrayEquals(big, replayed.get(0).payload());
+
+            // The lower limit governs what may be written from now on.
+            try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
+                assertRejected(strict.appendEntries(List.of(new LogEntryData(3, 1, big))), WriteRejectionReason.PAYLOAD_TOO_LARGE);
+            }
+            await(strict.appendEntries(List.of(entry(3, 1))));
+            // Compaction reads the log too, and must keep the large entry it retains.
+            await(strict.truncatePrefix(0));
+            await(strict.sync());
+        } finally { await(strict.closeAsync()); }
+
+        FileRaftStorage again = new FileRaftStorage(RaftStorageConfig.builder().maxPayloadSizeMb(1).build());
+        await(again.open(dir));
+        try {
+            List<LogEntryData> replayed = await(again.replayLog());
+            assertEquals(3, replayed.size());
+            assertArrayEquals(big, replayed.get(0).payload());
+        } finally { await(again.closeAsync()); }
+    }
+
+    @Test void tornRecordDeclaringMoreThanTheLimitIsStillReportedRatherThanRepaired() throws Exception {
+        // The limit stays in force as a plausibility check on torn writes: this build never writes
+        // a record larger than its limit, so a fragment claiming to be one was not torn by a crash.
+        writeWal(append(1, 1), tornHeader(2, 40 * 1024 * 1024, new byte[64]));
+        FileRaftStorage storage = open(dir);
+        try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
+            assertInstanceOf(FileRaftStorage.CorruptLogException.class, failureOf(storage.replayLog()));
+        } finally { await(storage.closeAsync()); }
+    }
+
+    // ------------------------------------------------------------------ the scanner decodes quietly
+
+    private static byte[] header(int version, int type, long index, long term, int declaredPayload) {
+        return ByteBuffer.allocate(27).putInt(0x52414654).putShort((short) version).put((byte) type)
+                .putLong(index).putLong(term).putInt(declaredPayload).array();
+    }
+
+    /**
+     * A torn record whose surviving payload is full of things that begin like records and are
+     * not: every way a candidate can fail to decode. The scan for later valid records must
+     * reject each of them without being fooled, so the tail is still just a torn write.
+     */
+    private void assertTornTailIsRepairedDespite(byte[]... impostors) throws Exception {
+        ByteArrayOutputStream payload = new ByteArrayOutputStream();
+        for (byte[] impostor : impostors) {
+            payload.write(new byte[11]);
+            payload.write(impostor);
+        }
+        byte[] first = append(1, 1);
+        writeWal(first, tornHeader(2, 100_000, payload.toByteArray()));
+        FileRaftStorage storage = open(dir);
+        try {
+            assertEntries(List.of(new LogEntryData(1, 1, new byte[]{1})), await(storage.replayLog()));
+            assertEquals(first.length, Files.size(dir.resolve("raft.log")), "only the torn record is removed");
+            await(storage.appendEntries(List.of(entry(2, 1))));
+        } finally { await(storage.closeAsync()); }
+        assertEquals(2, DurableState.replayAfterRestart(dir).size());
+    }
+
+    @Test void scanRejectsEveryKindOfImpostorRecordInsideATornPayload() throws Exception {
+        byte[] badChecksum = record(1, 2, 9, 1, new byte[]{7});
+        badChecksum[badChecksum.length - 1] ^= 1;
+        byte[] unknownType = ByteBuffer.allocate(31).put(header(1, 9, 9, 1, 0)).putInt(0).array();
+        byte[] checksumCutShort = ByteBuffer.allocate(29).put(header(1, 2, 9, 1, 0)).array();
+        assertTornTailIsRepairedDespite(
+                header(1, 2, 9, 1, -5),              // a negative payload length
+                header(1, 2, 9, 1, Integer.MAX_VALUE), // a length beyond the configured maximum
+                unknownType,
+                badChecksum,
+                header(1, 2, 9, 1, 5_000),           // a payload that runs past the end of the file
+                checksumCutShort);                   // last: its checksum runs past the end of the file
+    }
+
+    @Test void scanRejectsAMagicNumberTooCloseToTheEndToHoldAHeader() throws Exception {
+        assertTornTailIsRepairedDespite("RAFT".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+    }
+
+    // ------------------------------------------------------------------ defensive code, stated as tests
+
+    @Test void staleFailedOpenCallbackCannotResetAnOpenThatSucceededLater() throws Exception {
+        FileRaftStorage storage = open(dir);
+        try {
+            CompletableFuture<Void> current = storage.open(dir);
+            // A callback from some earlier, failed attempt arrives late.
+            storage.resetFailedOpen(CompletableFuture.failedFuture(new IOException("an older attempt")));
+            assertSame(current, storage.open(dir), "the live open must not have been forgotten");
+            await(storage.appendEntries(List.of(entry(1, 1))));
+        } finally { await(storage.closeAsync()); }
+    }
+
+    @Test void schedulingFailureReportsClosureOrFencingInPreferenceToTheExecutor() throws Exception {
+        java.util.concurrent.RejectedExecutionException refused = new java.util.concurrent.RejectedExecutionException("refused");
+        FileRaftStorage healthy = open(dir.resolve("healthy"));
+        try {
+            FileRaftStorage.StorageException failure = healthy.schedulingFailure("append", refused);
+            assertTrue(failure.getMessage().startsWith("Storage operation could not be scheduled"), failure.getMessage());
+            assertSame(refused, failure.getCause());
+
+            // Once fenced, the fencing cause is the truth, whatever the executor said.
+            FileRaftStorage.StorageException fence = healthy.fence("Injected", new IOException("device gone"));
+            assertSame(fence, healthy.schedulingFailure("append", refused));
+        } finally { await(healthy.closeAsync()); }
+        assertTrue(healthy.schedulingFailure("append", refused).getMessage().startsWith("Storage is closed"));
+    }
+
+    @Test void firstFencingFailureIsKeptWhenASecondOneFollows() throws Exception {
+        FileRaftStorage storage = open(dir);
+        try {
+            FileRaftStorage.StorageException first = storage.fence("First", new IOException("the real cause"));
+            FileRaftStorage.StorageException second = storage.fence("Second", new IOException("a consequence"));
+            assertNotSame(first, second);
+            // Callers must keep seeing the original cause, not whatever failed afterwards.
+            assertSame(first, failureOf(storage.appendEntries(List.of(entry(1, 1)))));
+            assertSame(first, failureOf(storage.replayLog()));
+        } finally { await(storage.closeAsync()); }
+    }
+
     // ------------------------------------------------------------------ close racing a failing open
 
     /** Holds open() at the point where it opens the WAL, then fails it. */

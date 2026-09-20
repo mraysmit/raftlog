@@ -54,9 +54,10 @@ class CoverageBoostTest {
     class AppendPlanBranchTests {
 
         @Test
-        @DisplayName("Constructor with null entries creates empty list")
+        @DisplayName("Constructor refuses null entries; a truncation-only plan takes an empty list")
         void testConstructorNullEntries() {
-            AppendPlan plan = new AppendPlan(5L, null);
+            assertThrows(NullPointerException.class, () -> new AppendPlan(5L, null));
+            AppendPlan plan = new AppendPlan(5L, List.of());
 
             assertEquals(5L, plan.truncateFromIndex());
             assertNotNull(plan.entriesToAppend());
@@ -95,15 +96,12 @@ class CoverageBoostTest {
         }
 
         @Test
-        @DisplayName("from() with null incoming entries returns empty")
+        @DisplayName("from() refuses null incoming entries")
         void testFromNullEntries() {
             List<LogEntryData> log = new ArrayList<>();
             log.add(new LogEntryData(1, 1, "a".getBytes()));
 
-            AppendPlan plan = AppendPlan.from(1, null, log);
-
-            assertFalse(plan.requiresPersistence());
-            assertTrue(plan.entriesToAppend().isEmpty());
+            assertThrows(NullPointerException.class, () -> AppendPlan.from(1, null, log));
         }
 
         @Test
@@ -118,7 +116,7 @@ class CoverageBoostTest {
         }
 
         @Test
-        @DisplayName("from() with negative index treats all as new")
+        @DisplayName("from() refuses a start index that disagrees with the entries or is below 1")
         void testFromNegativeIndex() {
             List<LogEntryData> incoming = List.of(
                     new LogEntryData(1, 1, "a".getBytes()),
@@ -126,11 +124,10 @@ class CoverageBoostTest {
             );
             List<LogEntryData> log = new ArrayList<>();
 
-            // startIndex = 0 means logPos = -1 (invalid)
-            AppendPlan plan = AppendPlan.from(0, incoming, log);
-
-            assertEquals(2, plan.entriesToAppend().size());
-            assertFalse(plan.requiresTruncation());
+            // The entries say they begin at 1. A start index of 0 contradicts them, and is not a log index.
+            assertThrows(IllegalArgumentException.class, () -> AppendPlan.from(0, incoming, log));
+            assertThrows(IllegalArgumentException.class, () -> AppendPlan.from(2, incoming, log));
+            assertEquals(2, AppendPlan.from(1, incoming, log).entriesToAppend().size());
         }
 
         @Test
@@ -140,12 +137,14 @@ class CoverageBoostTest {
             log.add(new LogEntryData(1, 1, "a".getBytes()));
             log.add(new LogEntryData(2, 1, "b".getBytes()));
 
-            // Truncate from index 10 (beyond log size)
-            AppendPlan plan = new AppendPlan(10L, List.of(new LogEntryData(3, 1, "c".getBytes())));
-            plan.applyTo(log);
+            // A replacement must begin where the truncation does, or it leaves a hole.
+            assertThrows(IllegalArgumentException.class,
+                    () -> new AppendPlan(10L, List.of(new LogEntryData(3, 1, "c".getBytes()))));
 
-            // Truncation should be no-op, just append
-            assertEquals(3, log.size());
+            // A truncation beyond the end of the log is not a no-op: the plan was made for another log.
+            AppendPlan plan = new AppendPlan(10L, List.of(new LogEntryData(10, 1, "c".getBytes())));
+            assertThrows(IllegalArgumentException.class, () -> plan.applyTo(log));
+            assertEquals(2, log.size(), "a refused plan leaves the log untouched");
         }
 
         @Test
@@ -154,12 +153,10 @@ class CoverageBoostTest {
             List<LogEntryData> log = new ArrayList<>();
             log.add(new LogEntryData(1, 1, "a".getBytes()));
 
-            // truncateFromIndex = 0 means fromPos = -1 (invalid)
-            AppendPlan plan = new AppendPlan(0L, List.of(new LogEntryData(2, 1, "b".getBytes())));
-            plan.applyTo(log);
-
-            // Truncation should be no-op, just append
-            assertEquals(2, log.size());
+            // Log indices start at 1, so a plan cannot truncate from 0.
+            assertThrows(IllegalArgumentException.class,
+                    () -> new AppendPlan(0L, List.of(new LogEntryData(2, 1, "b".getBytes()))));
+            assertEquals(1, log.size());
         }
 
         @Test
@@ -237,10 +234,9 @@ class CoverageBoostTest {
                     new LogEntryData(4, 1, "d".getBytes())
             );
 
-            AppendPlan plan = AppendPlan.from(3, incoming, log);
-
-            assertFalse(plan.requiresTruncation());
-            assertEquals(2, plan.entriesToAppend().size());
+            // Entry 2 is missing. The previous-entry check of AppendEntries should have refused the
+            // request; a plan that appended 3 and 4 anyway would put a hole in the log.
+            assertThrows(IllegalArgumentException.class, () -> AppendPlan.from(3, incoming, log));
         }
     }
 
@@ -620,10 +616,8 @@ class CoverageBoostTest {
             try {
                 System.setProperty("raftlog.minFreeSpaceMb", "not-a-number");
 
-                RaftStorageConfig config = RaftStorageConfig.builder().build();
-
-                // Should fall back to default
-                assertEquals(64, config.minFreeSpaceMb());
+                // Refused, not replaced by the default.
+                assertThrows(IllegalArgumentException.class, () -> RaftStorageConfig.builder().build());
             } finally {
                 restoreProperty("raftlog.minFreeSpaceMb", original);
             }

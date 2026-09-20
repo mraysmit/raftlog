@@ -41,14 +41,11 @@ class AppendPlanTest {
     // ========================================================================
 
     @Test
-    void testFrom_NullEntries_ReturnsEmptyPlan() {
+    void testFrom_NullEntries_AreRefused() {
         List<LogEntryData> currentLog = new ArrayList<>();
 
-        AppendPlan plan = AppendPlan.from(1, null, currentLog);
-
-        assertFalse(plan.requiresTruncation());
-        assertFalse(plan.hasEntriesToAppend());
-        assertFalse(plan.requiresPersistence());
+        // A heartbeat is an empty list. Null is a caller bug and is not quietly read as one.
+        assertThrows(NullPointerException.class, () -> AppendPlan.from(1, null, currentLog));
     }
 
     @Test

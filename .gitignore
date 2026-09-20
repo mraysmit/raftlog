@@ -140,3 +140,12 @@ secrets/
 # -----------------------------------------------------------------------------
 public-key*.asc
 maven-central-public-key.asc
+
+# -----------------------------------------------------------------------------
+# Golden compatibility fixtures
+# -----------------------------------------------------------------------------
+# Data directories written by published releases. They ARE raft.log and meta.dat
+# files, which the rules above exist to keep out of the repository, so they must be
+# re-included here or GoldenFileCompatibilityTest fails on every fresh checkout.
+!raftlog-core/src/test/resources/golden/**/raft.log
+!raftlog-core/src/test/resources/golden/**/meta.dat

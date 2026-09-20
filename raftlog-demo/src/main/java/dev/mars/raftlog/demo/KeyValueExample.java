@@ -46,7 +46,7 @@ import java.util.concurrent.TimeUnit;
  * <h2>Usage</h2>
  * <pre>
  * mvn package -pl raftlog-demo -am
- * java -cp raftlog-demo/target/raftlog-demo-1.3.0.jar \
+ * java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar \
  *     dev.mars.raftlog.demo.KeyValueExample [data-directory]
  * </pre>
  */

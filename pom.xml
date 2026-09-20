@@ -4,7 +4,7 @@
 
     <groupId>io.github.mraysmit</groupId>
     <artifactId>raftlog</artifactId>
-    <version>1.3.0</version>
+    <version>1.4.0</version>
     <packaging>pom</packaging>
 
     <name>RaftLog</name>
@@ -344,6 +344,31 @@
                             </goals>
                             <configuration>
                                 <rules>
+                                    <!--
+                                        The storage package is held to a far higher bar than the bundle.
+                                        Every line and branch of it is executed across Windows and Linux; the
+                                        little that one platform cannot reach is the other platform's half of
+                                        CompactionIo.forceDirectory. A new refusal or failure path without a
+                                        test fails the build here instead of waiting for someone to look.
+                                    -->
+                                    <rule>
+                                        <element>PACKAGE</element>
+                                        <includes>
+                                            <include>dev.mars.raftlog.storage</include>
+                                        </includes>
+                                        <limits>
+                                            <limit>
+                                                <counter>LINE</counter>
+                                                <value>COVEREDRATIO</value>
+                                                <minimum>0.99</minimum>
+                                            </limit>
+                                            <limit>
+                                                <counter>BRANCH</counter>
+                                                <value>COVEREDRATIO</value>
+                                                <minimum>0.99</minimum>
+                                            </limit>
+                                        </limits>
+                                    </rule>
                                     <rule>
                                         <element>BUNDLE</element>
                                         <limits>

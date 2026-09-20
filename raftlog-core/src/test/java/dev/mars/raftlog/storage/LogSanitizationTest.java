@@ -49,6 +49,10 @@ class LogSanitizationTest {
         assertEquals("bell\\u0007nul\\u0000del\\u007f", clean("bell\u0007nul\u0000del\u007f", 64));
     }
 
+    @Test void limitOfZeroKeepsNothingButStillReportsTheLength() {
+        assertEquals("…[3 chars]", clean("abc", 0));
+    }
+
     @Test void valueAtExactlyTheLimitIsNotMarkedAsTruncated() {
         assertEquals("abcd", clean("abcd", 4));
     }
