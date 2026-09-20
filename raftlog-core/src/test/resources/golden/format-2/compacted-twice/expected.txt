@@ -1,0 +1,7 @@
+replay=OK
+entries=3
+entry.0=5,1,dzU=
+entry.1=6,1,dzY=
+entry.2=7,3,dzctcmV3cml0dGVu
+meta.term=0
+meta.vote=NONE

@@ -962,7 +962,6 @@ public final class FileRaftStorage implements RaftStorage {
     }
 
     private void validateAppend(List<LogEntryData> entries) {
-        requireKnownLogState();
         LogEntryData first = entries.getFirst();
         if (first.index() < 1) {
             throw new WriteRejectedException(WriteRejectionReason.INDEX_NOT_CONTIGUOUS,
@@ -1400,7 +1399,7 @@ public final class FileRaftStorage implements RaftStorage {
                     int beforeSize = entries.size();
                     entries.removeIf(e -> e.index() >= truncateFrom);
                     // A boundary at or below the compacted prefix (including the 0 and negative
-                    // values that older builds accepted) empties the log back to the prefix.
+                    // values an existing format-1 log may hold) empties the log back to the prefix.
                     // Otherwise truncateFrom is at least 1, so truncateFrom - 1 cannot underflow.
                     long lastAfterTruncate = truncateFrom <= boundary ? boundary : truncateFrom - 1;
                     if (lastAfterTruncate < last) last = lastAfterTruncate;

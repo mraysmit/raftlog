@@ -59,20 +59,20 @@ mvn package -DskipTests                 # Build without tests
 mvn package -pl raftlog-demo -am -DskipTests
 
 # Default config (~/.raftlog/data)
-java -jar raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar
+java -jar raftlog-demo/target/raftlog-demo-1.4.0.jar
 
 # Custom data directory
-java -jar raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar /tmp/wal-demo
+java -jar raftlog-demo/target/raftlog-demo-1.4.0.jar /tmp/wal-demo
 
 # With system properties
-java -Draftlog.dataDir=/tmp/wal -Draftlog.verifyWrites=true -jar raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar
+java -Draftlog.dataDir=/tmp/wal -Draftlog.verifyWrites=true -jar raftlog-demo/target/raftlog-demo-1.4.0.jar
 ```
 
 ### Running Chaos Tests (interactive stress testing)
 ```bash
-java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos
-java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos concurrent
-java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos corruption
+java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos
+java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos concurrent
+java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos corruption
 ```
 
 ## Test Class Reference

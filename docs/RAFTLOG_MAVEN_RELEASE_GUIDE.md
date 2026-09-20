@@ -2,13 +2,15 @@
 
 This document provides the exact, repo-specific process for publishing RaftLog to Maven Central via Sonatype Central Portal.
 
-## 1.2.0 capability release
+## 1.4.0 release
 
-This release introduces [prefix compaction](RAFTLOG_RAFT_WAL_DESIGN.md#139-prefix-compaction-implementation-notes), with unchanged raw append/replay semantics and WAL format. It is a new implementation on base `872a8c0`, not the previously unverified `db59859` artifact. Parent, core and demo must all use 1.2.0. The Windows reactor, Linux/JDK 21 reactor and focused downstream integration tests have passed; preserve their local TDD/release evidence under Git-ignored `test-output/prefix-compaction/`.
+This release makes the storage refuse anything that is not a valid Raft log, before writing a byte. The rules are listed under [Invariants the storage enforces](RAFTLOG_RAFT_WAL_DESIGN.md#invariants-the-storage-enforces). [Prefix compaction](RAFTLOG_RAFT_WAL_DESIGN.md#139-prefix-compaction-implementation-notes) persists its boundary in the WAL as a `PREFIX` record, which is record format 2. `AppendPlan` and configuration are strict: inconsistent arguments and values that cannot be parsed are errors, not things to work around. Parent, core and demo must all use 1.4.0.
+
+`java scripts/VerifyAll.java` must pass before anything is published. It runs every test of every module under the coverage gate, every shipped program from the packaged jar, the chaos suite, the model soak and the mutation gate, on this platform and again on Linux as an unprivileged user.
 
 Prepare signatures and source/Javadoc artifacts with `mvn -B -Prelease -DskipTests verify` after the test runs. Publish the same reviewed source with `mvn -B -Prelease -DskipTests deploy`. The configured plugin automatically publishes and waits for `published`; an upload or local install alone is not success. Confirm the parent/core/demo POMs and JARs from Central and compare hashes, then publish the release Git tag and source revision. Follow the [Central Portal Maven documentation](https://central.sonatype.org/publish/publish-portal-maven/).
 
-Keep historical evidence intact and distinguish this release from earlier claims. Application snapshot coordination and deployment-filesystem power-loss acceptance remain the consuming project's responsibility.
+Application snapshot coordination and deployment-filesystem power-loss acceptance remain the consuming project's responsibility.
 
 ## Table of Contents
 
@@ -151,25 +153,25 @@ Note: For local-only testing you can keep the passphrase out of settings and use
 Use this exact sequence for publishing a new release.
 
 ```bash
-# 1) Ensure clean branch and verify build
+# 1) Ensure clean branch and verify everything
 git status
-mvn clean verify
+java scripts/VerifyAll.java
 
-# 2) Set release version (example: 1.1.1)
-mvn versions:set -DnewVersion=1.1.1
+# 2) Set release version
+mvn versions:set -DnewVersion=1.4.0
 mvn versions:commit
 
 # 3) Commit version bump
 git add -A
-git commit -m "Release 1.1.1"
+git commit -m "Release 1.4.0"
 
 # 4) Publish to Central Portal
 mvn -Prelease -DskipTests clean deploy
 
 # 5) Tag and push after successful publish
-git tag v1.1.1
+git tag v1.4.0
 git push origin main
-git push origin v1.1.1
+git push origin v1.4.0
 ```
 
 ### Windows Pre-Deploy Cleanup (Recommended)
@@ -183,7 +185,7 @@ Remove-Item -Force -Recurse ".\target" -ErrorAction SilentlyContinue
 
 ### Important Central Portal Rules
 
-1. Artifact versions are immutable. If `1.1.0` exists, publish `1.1.1`.
+1. Artifact versions are immutable. Once `1.4.0` is in Central it cannot be replaced or withdrawn, so a correction needs a new version number.
 2. Do not use legacy OSSRH `distributionManagement` URLs in this project.
 3. The Central publishing plugin must be active in main build plugins, not hidden in an inactive profile.
 4. If Central says your key is missing, verify key publication and UID email format first.
@@ -330,10 +332,9 @@ mvn --encrypt-password your-central-token-password
 
 Before releasing, verify:
 
-- [ ] All tests pass: `mvn clean verify`
+- [ ] Everything passes: `java scripts/VerifyAll.java`. This is every test of every module under the coverage gate, every shipped program from the packaged jar, the chaos suite, the model soak and the mutation gate, on this platform and again on Linux as an unprivileged user. `mvn clean verify` alone is not sufficient
 - [ ] No SNAPSHOT dependencies: `mvn dependency:tree` shows no `SNAPSHOT` artifacts
 - [ ] Documentation is updated
-- [ ] CHANGELOG is updated
 - [ ] Version numbers are correct
 - [ ] Git working directory is clean
 - [ ] GPG key is available and not expired

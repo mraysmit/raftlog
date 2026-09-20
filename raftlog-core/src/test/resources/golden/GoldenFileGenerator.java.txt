@@ -1,22 +1,30 @@
 /*
  * Generator for the golden compatibility fixtures in this directory.
  *
- * It is kept as a .txt file so the build never compiles it. It must be compiled and run against
- * a PUBLISHED raftlog-core jar downloaded from Maven Central, never against the current sources:
- * the point of the fixtures is to be what real users of that release have on disk.
+ * It is kept as a .txt file so the build never compiles it. Fixtures are organised by WAL record
+ * format, because the format is what decides whether a file can be read:
  *
- *   V=1.2.0
- *   curl -O https://repo1.maven.org/maven2/io/github/mraysmit/raftlog-core/$V/raftlog-core-$V.jar
- *   (verify the jar against its published .sha1)
+ *   format-1   APPEND and TRUNCATE records only; a compacted log has no boundary record. These
+ *              must be written by a PUBLISHED raftlog-core jar downloaded from Maven Central and
+ *              verified against its published .sha1, never by the current sources: the point is
+ *              to hold what users really have on disk. That jar accepts sequences that are not
+ *              valid Raft logs, and those fixtures (permissive-*) exist to pin how they are refused.
+ *
+ *   format-2   the current format; a compacted log begins with a PREFIX record. Written by the
+ *              current build. It refuses the permissive sequences, so pass "strict" to leave
+ *              them out.
+ *
  *   cp GoldenFileGenerator.java.txt GoldenFileGenerator.java
- *   java -cp "raftlog-core-$V.jar;slf4j-api-2.0.9.jar" GoldenFileGenerator.java <outDir>/$V compaction
+ *   java -cp "<raftlog-core jar>;<slf4j-api jar>" GoldenFileGenerator.java <outDir>/format-1 compaction
+ *   java -cp "<raftlog-core jar>;<slf4j-api jar>" GoldenFileGenerator.java <outDir>/format-2 compaction strict
  *
- * Omit the last argument for releases that have no truncatePrefix (1.1.0).
+ * Omit "compaction" for a jar that has no truncatePrefix. Afterwards regenerate SHA256SUMS over
+ * every raft.log and meta.dat, and add fixtures for a new format in the change that introduces it.
  *
- * For every scenario it writes raft.log and, where used, meta.dat, exactly as that release left
- * them, and expected.txt: what THAT RELEASE ITSELF replays from a copy of those files. The oracle
- * is the old build's own behaviour, not anyone's expectation of it. Fixtures are never reopened in
- * place, because replay may repair a torn tail and that would destroy the fixture.
+ * For every scenario it writes raft.log and, where used, meta.dat, exactly as that jar left them,
+ * and expected.txt: what THAT JAR ITSELF replays from a copy of those files. The oracle is recorded
+ * behaviour, not anyone's expectation of it. Fixtures are never reopened in place, because replay
+ * may repair a torn tail and that would destroy the fixture.
  */
 import dev.mars.raftlog.storage.FileRaftStorage;
 import dev.mars.raftlog.storage.RaftStorage.LogEntryData;
@@ -43,7 +51,9 @@ public class GoldenFileGenerator {
 
     public static void main(String[] args) throws Exception {
         out = Path.of(args[0]);
-        boolean compaction = args.length > 1 && args[1].equals("compaction");
+        List<String> options = List.of(args).subList(1, args.length);
+        boolean compaction = options.contains("compaction");
+        boolean strict = options.contains("strict");
 
         byte[] allBytes = new byte[256];
         for (int i = 0; i < 256; i++) allBytes[i] = (byte) i;
@@ -85,7 +95,8 @@ public class GoldenFileGenerator {
             Files.write(dir.resolve("raft.log"), java.util.Arrays.copyOf(all, 10), StandardOpenOption.APPEND);
         });
 
-        // ---- sequences these releases accepted that a Raft node should never have sent
+        // ---- sequences that are not valid Raft logs; a strict build refuses to write them
+        if (!strict) {
         scenario("permissive-starts-at-100", s -> {
             await(s.appendEntries(List.of(e(100, 4, b("x")), e(101, 4, b("y")))));
             await(s.sync());
@@ -115,6 +126,7 @@ public class GoldenFileGenerator {
             await(s.appendEntries(List.of(e(3, 1, b("c")))));
             await(s.sync());
         });
+        }
 
         if (compaction) {
             scenario("compacted-with-retained-entries", s -> {
@@ -131,6 +143,20 @@ public class GoldenFileGenerator {
                 compact(s, 3);
                 await(s.sync());
             });
+            if (strict) {
+                // Compacting an already compacted log: the boundary record is rewritten, never duplicated.
+                scenario("compacted-twice", s -> {
+                    List<LogEntryData> entries = new ArrayList<>();
+                    for (int i = 1; i <= 6; i++) entries.add(e(i, 1, b("w" + i)));
+                    await(s.appendEntries(entries));
+                    compact(s, 2);
+                    await(s.appendEntries(List.of(e(7, 2, b("w7")))));
+                    compact(s, 4);
+                    await(s.truncateSuffix(7));
+                    await(s.appendEntries(List.of(e(7, 3, b("w7-rewritten")))));
+                    await(s.sync());
+                });
+            }
         }
         System.out.println("GENERATED " + out);
     }

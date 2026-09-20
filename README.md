@@ -51,21 +51,19 @@ Replay likewise refuses a log that is not contiguous. A fresh log starts at inde
 Prefix compaction writes its boundary as the first record of the rewritten WAL, so a
 compacted log continues at the boundary plus one across restarts even when nothing was
 retained. `FileRaftStorage.compactionBoundary()` reports it, and `AppendPlan.from` takes it
-so that entries already covered by the snapshot are skipped. A log compacted by 1.2.0, which
-wrote no boundary, has it inferred from its first entry.
+so that entries already covered by the snapshot are skipped. A compacted log that carries no
+boundary record has the boundary inferred from its first entry.
 
 `AppendPlan` is as strict as the storage. It throws on any inconsistency in its arguments
-rather than producing a plan the storage would refuse later: see `CHANGELOG.md`.
+rather than producing a plan the storage would refuse later.
 
 The write path and the replay path are held to the same rules: anything the storage
 accepts must replay after a restart. A model-based test drives random operation
 sequences with restarts against a reference model to check exactly that.
 
 **Format versions.** `APPEND` and `TRUNCATE` records are format 1. The `PREFIX` record
-is format 2. A build that predates format 2 reports a compacted WAL as corrupt, so
-downgrading after a compaction is not supported. From this release on, an intact record
-with a newer format version is reported as `UnsupportedFormatException` rather than as
-corruption, and the file is left untouched.
+is format 2. An intact record with a format version this build does not know is reported
+as `UnsupportedFormatException` rather than as corruption, and the file is left untouched.
 
 The point is loud failure over silent divergence. A node that appends out of order or
 regresses its term has a bug, and the storage reports it at the call site rather than
