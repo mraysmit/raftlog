@@ -1,0 +1,8 @@
+replay=OK
+entries=4
+entry.0=6,2,djY=
+entry.1=7,2,djc=
+entry.2=8,2,djg=
+entry.3=9,2,djk=
+meta.term=0
+meta.vote=NONE

@@ -170,10 +170,8 @@ class HighCoverageTest {
             try {
                 System.setProperty("raftlog.minFreeSpaceMb", "not-a-number");
 
-                RaftStorageConfig config = RaftStorageConfig.builder().build();
-
-                // Should fall back to default (64)
-                assertEquals(64, config.minFreeSpaceMb());
+                // Refused, not replaced by the default.
+                assertThrows(IllegalArgumentException.class, () -> RaftStorageConfig.builder().build());
             } finally {
                 restoreProperty("raftlog.minFreeSpaceMb", original);
             }

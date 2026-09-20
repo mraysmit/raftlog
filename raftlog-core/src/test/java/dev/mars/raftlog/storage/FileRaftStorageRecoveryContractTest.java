@@ -502,14 +502,19 @@ class FileRaftStorageRecoveryContractTest {
             assertEquals(7, memory.getFirst().index());
 
             // Leader's view diverged at index 9: a conflict the plan must find at position 2.
-            AppendPlan plan = AppendPlan.from(8, List.of(entry(8, 1), entry(9, 2), entry(10, 2)), memory);
+            // A compacted log must be planned with its boundary; without it the plan is refused.
+            assertThrows(IllegalArgumentException.class,
+                    () -> AppendPlan.from(8, List.of(entry(8, 1), entry(9, 2), entry(10, 2)), memory));
+            long boundary = await(storage.compactionBoundary());
+            assertEquals(6L, boundary);
+            AppendPlan plan = AppendPlan.from(8, List.of(entry(8, 1), entry(9, 2), entry(10, 2)), memory, boundary);
             assertEquals(9L, plan.truncateFromIndex());
             assertEntries(List.of(entry(9, 2), entry(10, 2)), plan.entriesToAppend());
             persist(storage, plan, memory);
             await(storage.sync());
 
             // Entries below the retained log are already in the snapshot and are skipped.
-            AppendPlan below = AppendPlan.from(5, List.of(entry(5, 1), entry(6, 1), entry(7, 1)), memory);
+            AppendPlan below = AppendPlan.from(5, List.of(entry(5, 1), entry(6, 1), entry(7, 1)), memory, boundary);
             assertFalse(below.requiresPersistence());
         } finally { close(storage, tempDir); }
         List<LogEntryData> expected = List.of(entry(7, 1), entry(8, 1), entry(9, 2), entry(10, 2));

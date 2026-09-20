@@ -51,7 +51,11 @@ Replay likewise refuses a log that is not contiguous. A fresh log starts at inde
 Prefix compaction writes its boundary as the first record of the rewritten WAL, so a
 compacted log continues at the boundary plus one across restarts even when nothing was
 retained. `FileRaftStorage.compactionBoundary()` reports it, and `AppendPlan.from` takes it
-so that entries already covered by the snapshot are skipped when the retained log is empty.
+so that entries already covered by the snapshot are skipped. A log compacted by 1.2.0, which
+wrote no boundary, has it inferred from its first entry.
+
+`AppendPlan` is as strict as the storage. It throws on any inconsistency in its arguments
+rather than producing a plan the storage would refuse later: see `CHANGELOG.md`.
 
 The write path and the replay path are held to the same rules: anything the storage
 accepts must replay after a restart. A model-based test drives random operation
@@ -80,20 +84,20 @@ handing back a log that replays into something `AppendPlan` cannot reason about.
 <dependency>
     <groupId>io.github.mraysmit</groupId>
     <artifactId>raftlog-core</artifactId>
-    <version>1.3.0</version>
+    <version>1.4.0</version>
 </dependency>
 ```
 
 ### Gradle (Groovy)
 
 ```groovy
-implementation 'io.github.mraysmit:raftlog-core:1.3.0'
+implementation 'io.github.mraysmit:raftlog-core:1.4.0'
 ```
 
 ### Gradle (Kotlin)
 
 ```kotlin
-implementation("io.github.mraysmit:raftlog-core:1.3.0")
+implementation("io.github.mraysmit:raftlog-core:1.4.0")
 ```
 
 ## Building
@@ -107,6 +111,17 @@ mvn clean install
 ```bash
 mvn test
 ```
+
+That runs the unit tests of both modules, including the chaos suite. It is for working on
+something. To verify a change or a release, run everything:
+
+```bash
+java scripts/VerifyAll.java
+```
+
+It runs every test under the coverage gate, every shipped program from the packaged jar, the
+model soak and the mutation gate, on this platform and again on Linux as an unprivileged user.
+It needs Docker and takes well over an hour. See `docs/RAFTLOG_TEST_DOCUMENTATION.md`.
 
 ## Command style for captured test logs
 
@@ -182,8 +197,16 @@ RaftLog uses `RaftStorageConfig` for configuration with the following resolution
 1. **Programmatic** (builder pattern)
 2. **System property** (`-Draftlog.dataDir=/path`)
 3. **Environment variable** (`RAFTLOG_DATA_DIR=/path`)
-4. **Properties file** (`raftlog.properties` in classpath)
+4. **Properties file** (`raftlog.properties` on the classpath, then in the working directory)
 5. **Default value**
+
+Configuration is never guessed. A value that cannot be parsed (`32MB`, `ture`, `1.5`) throws an
+`IllegalArgumentException` naming the setting, the source it came from and the offending value; it
+is not replaced by the default. That holds for every source that supplies the setting, including
+one that a higher-priority source overrides, so a bad value cannot wait unnoticed for the day the
+override is removed. Booleans are `true` or `false` in any letter case, and nothing else. A
+properties file that exists but cannot be read is an error; a missing one is not. A blank value
+means the setting is absent from that source, and surrounding whitespace is ignored.
 
 ### Configuration Properties
 
@@ -192,8 +215,8 @@ RaftLog uses `RaftStorageConfig` for configuration with the following resolution
 | `dataDir` | `raftlog.dataDir` | `RAFTLOG_DATA_DIR` | `~/.raftlog/data` | Storage directory |
 | `syncEnabled` | `raftlog.syncEnabled` | `RAFTLOG_SYNC_ENABLED` | `true` | Must remain `true`; public configuration rejects `false` |
 | `verifyWrites` | `raftlog.verifyWrites` | `RAFTLOG_VERIFY_WRITES` | `false` | Read-after-write verification |
-| `minFreeSpaceMb` | `raftlog.minFreeSpaceMb` | `RAFTLOG_MIN_FREE_SPACE_MB` | `64` | Minimum free disk space (MB) |
-| `maxPayloadSizeMb` | `raftlog.maxPayloadSizeMb` | `RAFTLOG_MAX_PAYLOAD_SIZE_MB` | `16` | Maximum payload size (MB) |
+| `minFreeSpaceMb` | `raftlog.minFreeSpaceMb` | `RAFTLOG_MIN_FREE_SPACE_MB` | `64` | Minimum free disk space (MB). Must not be negative |
+| `maxPayloadSizeMb` | `raftlog.maxPayloadSizeMb` | `RAFTLOG_MAX_PAYLOAD_SIZE_MB` | `16` | Maximum payload size (MB) for new writes, 1 to 2047. Lowering it never makes existing entries unreadable |
 
 ### Example Properties File
 
@@ -270,16 +293,16 @@ raftlog/
 mvn clean package -DskipTests
 
 # Run with default config (~/.raftlog/data)
-java -jar raftlog-demo/target/raftlog-demo-1.3.0.jar
+java -jar raftlog-demo/target/raftlog-demo-1.4.0.jar
 
 # Run with custom data directory
-java -Draftlog.dataDir=/tmp/wal-demo -jar raftlog-demo/target/raftlog-demo-1.3.0.jar
+java -Draftlog.dataDir=/tmp/wal-demo -jar raftlog-demo/target/raftlog-demo-1.4.0.jar
 ```
 
 Run the separate key/value replay example:
 
 ```bash
-java -cp raftlog-demo/target/raftlog-demo-1.3.0.jar \
+java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar \
   dev.mars.raftlog.demo.KeyValueExample /tmp/raftlog-key-values
 ```
 

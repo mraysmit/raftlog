@@ -95,7 +95,35 @@ public class WalChaos {
         this.baseDir = baseDir;
     }
 
+    /** How many scenarios passed and failed. */
+    public record Summary(int passed, int failed) { }
+
     public static void main(String[] args) throws Exception {
+        try {
+            Summary summary = run(args.length > 0 ? args[0] : "all");
+            System.exit(summary.failed() > 0 ? 1 : 0);
+        } catch (IllegalArgumentException unknownCategory) {
+            LOG.error("{}", unknownCategory.getMessage());
+            System.exit(1);
+        }
+    }
+
+    /**
+     * Runs one category of scenarios, or all of them, and reports how many passed and failed.
+     * This is what the build runs, through WalChaosTest, so the chaos scenarios are tests in fact
+     * and not only in name. {@link #main} adds nothing but an exit code.
+     *
+     * @param category concurrent, corruption, boundary, stress, nasty or all, in any letter case
+     * @throws IllegalArgumentException for any other category: running nothing and reporting
+     *                                  success would be worse than refusing
+     */
+    public static Summary run(String category) throws Exception {
+        String testFilter = category == null ? "" : category.toLowerCase();
+        if (!java.util.Set.of("concurrent", "corruption", "boundary", "stress", "nasty", "all").contains(testFilter)) {
+            throw new IllegalArgumentException("Unknown chaos category '" + category
+                    + "'. Available: concurrent, corruption, boundary, stress, nasty, all");
+        }
+
         LOG.info("╔═══════════════════════════════════════════════════════════════╗");
         LOG.info("║              WAL CHAOS TESTING SUITE                          ║");
         LOG.info("║  \"If it survives this, it survives anything\"                  ║");
@@ -107,26 +135,19 @@ public class WalChaos {
         LOG.info("");
 
         WalChaos chaos = new WalChaos(chaosDir);
-
-        String testFilter = args.length > 0 ? args[0].toLowerCase() : "all";
-
         try {
             switch (testFilter) {
                 case "concurrent" -> chaos.runConcurrencyTests();
                 case "corruption" -> chaos.runCorruptionTests();
                 case "boundary" -> chaos.runBoundaryTests();
                 case "stress" -> chaos.runStressTests();
-                case "all" -> {
+                case "nasty" -> chaos.runNastyEdgeCases();
+                default -> {
                     chaos.runConcurrencyTests();
                     chaos.runCorruptionTests();
                     chaos.runBoundaryTests();
                     chaos.runStressTests();
                     chaos.runNastyEdgeCases();
-                }
-                default -> {
-                    LOG.error("Unknown test filter: {}", testFilter);
-                    LOG.error("Available: concurrent, corruption, boundary, stress, all");
-                    System.exit(1);
                 }
             }
         } finally {
@@ -139,8 +160,7 @@ public class WalChaos {
             // Cleanup
             deleteRecursively(chaosDir);
         }
-
-        System.exit(chaos.testsFailed.get() > 0 ? 1 : 0);
+        return new Summary(chaos.testsPassed.get(), chaos.testsFailed.get());
     }
 
     // =========================================================================

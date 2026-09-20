@@ -509,6 +509,9 @@ class FileRaftStorageInvariantEdgeCaseTest {
             Path seedDir = Files.createDirectory(dir.resolve("seed-" + seed));
             runAgainstModel(seed, seedDir);
         }
+        // Said out loud, because a soak that was given no seeds passes instantly and proves nothing.
+        System.out.println("MODEL SOAK: ran " + seeds + " seeds"
+                + (seeds == 0 ? " (disabled; pass -Draftlog.model.soakSeeds=N as a Maven property)" : ""));
     }
 
     private static void runAgainstModel(long seed, Path dir) throws Exception {

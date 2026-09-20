@@ -1,0 +1,6 @@
+replay=OK
+entries=2
+entry.0=100,4,eA==
+entry.1=101,4,eQ==
+meta.term=0
+meta.vote=NONE

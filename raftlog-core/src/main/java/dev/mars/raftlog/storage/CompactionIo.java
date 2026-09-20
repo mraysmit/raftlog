@@ -58,6 +58,14 @@ class CompactionIo {
         return FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE);
     }
 
+    /**
+     * One positional read of the WAL during replay. A seam so tests can make a read come back
+     * short, as it does when the file shrinks underneath the reader, or make no progress.
+     */
+    int read(FileChannel channel, ByteBuffer buffer, long position) throws IOException {
+        return channel.read(buffer, position);
+    }
+
     /** Opens the live WAL, creating it if needed. A seam so tests can make open fail after the channel exists. */
     FileChannel openLog(Path path) throws IOException {
         return FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE);

@@ -157,6 +157,14 @@ computes `Long.MAX_VALUE + 1`. A log whose last index is `Long.MAX_VALUE` is ful
 
 Two records are never repaired even when structurally incomplete. A torn `PREFIX` marker is reported as corruption, because compaction publishes it atomically after a force, so a crash cannot tear it, and truncating it away would silently restart the index space at 1. A fragment that declares a newer format or an unknown type is likewise reported, since this build cannot know how long such a record is. A historical `TRUNCATE` record with a boundary at or below the compaction boundary, which older builds accepted, empties the replayed log back to that boundary.
 
+A read that ends early inside the known length of the file means the file is changing while replay reads it. Nothing can be concluded about its contents, so it is reported as an I/O failure: no corruption verdict, no fence, and no truncation. It must never be read as "structurally incomplete", because that verdict is what authorises repair.
+
+Releases before format 2 compacted without writing a boundary marker, so their compacted logs simply begin above index 1. Replay infers the boundary from the first entry: a log that starts at N was compacted through N - 1. That range is protected from suffix truncation and rewriting exactly as if the marker were present, and the next compaction writes the marker.
+
+The configured payload limit governs what may be written, never what can be read. A record being read is bounded by the file that holds it, and its CRC decides whether it is genuine, so lowering the limit cannot make entries already in the log unreadable. The limit remains a plausibility check on torn writes: a fragment that declares more than this build would ever write was not torn by a crash, and is reported rather than repaired.
+
+`AppendPlan` holds its arguments to the same rules as the storage and throws on any inconsistency, including two entries with the same index and term but different payloads. Every sample in this document that calls `AppendPlan.from` passes the compaction boundary, which is 0 for a log that has never been compacted and otherwise comes from `FileRaftStorage.compactionBoundary()`.
+
 Refusal, not repair, is deliberate. Concurrent appenders, a leader that resends an
 index without truncating first, or a node that regresses its term are all bugs. The
 storage reports them at the call site rather than recording a log that replays into
@@ -953,7 +961,7 @@ To maintain Raft safety, a follower must never acknowledge an entry until it is 
 long startIndex = request.getPrevLogIndex() + 1;
 
 // build plan WITHOUT mutating log
-AppendPlan plan = AppendPlan.from(startIndex, request.getEntriesList(), log);
+AppendPlan plan = AppendPlan.from(startIndex, request.getEntriesList(), log, compactionBoundary);
 
 // persist first
 CompletableFuture<Void> f = CompletableFuture.completedFuture(null);
@@ -1542,7 +1550,7 @@ By using the plan, the `AppendEntries` handler follows a clear **"Prepare → Pe
 
 ```java
 // Inside RaftNode.handleAppendEntriesRequest
-AppendPlan plan = AppendPlan.from(startIndex, request.getEntriesList(), log);
+AppendPlan plan = AppendPlan.from(startIndex, request.getEntriesList(), log, compactionBoundary);
 
 // Step 1: WAL Persistence
 CompletableFuture<Void> persistence = CompletableFuture.completedFuture(null);
@@ -2645,7 +2653,7 @@ public class RaftNode {
 
         // Step 3: Prepare the plan (Section 19.11 - AppendPlan)
         long startIndex = request.getPrevLogIndex() + 1;
-        AppendPlan plan = AppendPlan.from(startIndex, request.getEntriesList(), log);
+        AppendPlan plan = AppendPlan.from(startIndex, request.getEntriesList(), log, compactionBoundary);
         
         LOG.debug("AppendPlan: truncateFrom={}, entriesToAppend={}",
                   plan.truncateFromIndex(), plan.entriesToAppend().size());

@@ -216,6 +216,8 @@ public final class FileRaftStorage implements RaftStorage {
     private FileChannel logChannel;
     private FileChannel lockChannel;
     private FileLock exclusiveLock;
+    /** Where the lock file is, recorded when the lock is taken, for reporting release failures. */
+    private Path lockPath;
     private volatile boolean closed = false;
     private Path openPath;
     private CompletableFuture<Void> openFuture;
@@ -306,7 +308,7 @@ public final class FileRaftStorage implements RaftStorage {
      * @param syncEnabled must be true; false is rejected
      * @throws IllegalArgumentException if {@code syncEnabled} is false
      */
-    @Deprecated(since = "1.3.0", forRemoval = true)
+    @Deprecated(since = "1.4.0", forRemoval = true)
     public FileRaftStorage(boolean syncEnabled) {
         this(RaftStorageConfig.builder().syncEnabled(syncEnabled).build());
     }
@@ -320,7 +322,7 @@ public final class FileRaftStorage implements RaftStorage {
      * @param verifyWrites  if true, perform read-after-write verification
      * @throws IllegalArgumentException if {@code syncEnabled} is false
      */
-    @Deprecated(since = "1.3.0", forRemoval = true)
+    @Deprecated(since = "1.4.0", forRemoval = true)
     public FileRaftStorage(boolean syncEnabled, boolean verifyWrites) {
         this(RaftStorageConfig.builder()
                 .syncEnabled(syncEnabled)
@@ -436,7 +438,8 @@ public final class FileRaftStorage implements RaftStorage {
         releaseExclusiveLock();
     }
 
-    private synchronized void resetFailedOpen(CompletableFuture<Void> failedOpen) {
+    /** Package-private so the stale-callback guard can be tested directly. */
+    synchronized void resetFailedOpen(CompletableFuture<Void> failedOpen) {
         if (!closed && openFuture == failedOpen) {
             openFuture = null;
             openPath = null;
@@ -1118,7 +1121,8 @@ public final class FileRaftStorage implements RaftStorage {
         }
     }
 
-    private StorageException schedulingFailure(String operation, RuntimeException cause) {
+    /** Package-private so both outcomes can be tested directly. */
+    StorageException schedulingFailure(String operation, RuntimeException cause) {
         StorageException rejection = rejectionForNewOperation();
         return rejection != null ? rejection : new StorageException(
                 "Storage operation could not be scheduled: " + operation, cause);
@@ -1171,7 +1175,7 @@ public final class FileRaftStorage implements RaftStorage {
      * Records a fatal failure so that every later operation fails with it, and
      * returns the exception for the caller to throw. Called only on the WAL executor.
      */
-    private StorageException fence(String message, Throwable cause) {
+    StorageException fence(String message, Throwable cause) {
         String detail = String.valueOf(cause.getMessage()).replaceFirst("\\.+$", "");
         LOG.atError().addKeyValue("event", "storage.fenced").setCause(cause)
                 .log("{}: {}. Storage instance is now fenced; close it and open a fresh instance",
@@ -1218,11 +1222,11 @@ public final class FileRaftStorage implements RaftStorage {
      * forward scan stays quiet. Replay separately classifies whether the bytes are a
      * structurally incomplete EOF fragment or ambiguous corruption.
      */
-    private DecodedRecord decodeRecord(FileChannel ch, long pos, boolean warn) throws IOException {
+    private DecodedRecord decodeRecord(FileChannel ch, long pos, long fileSize, boolean warn) throws IOException {
         ByteBuffer headerBuf = ByteBuffer.allocate(HEADER_SIZE);
-        int headerRead = readFully(ch, headerBuf, pos);
+        int headerRead = readFully(ch, headerBuf, pos, fileSize);
         if (headerRead < HEADER_SIZE) {
-            if (warn && headerRead > 0) {
+            if (warn) {
                 LOG.debug("Incomplete header at pos {}: read {} bytes, expected {}", pos, headerRead, HEADER_SIZE);
             }
             return null;
@@ -1240,8 +1244,17 @@ public final class FileRaftStorage implements RaftStorage {
             if (warn) LOG.warn("Invalid header at pos {}: magic=0x{}, version={}", pos, Integer.toHexString(magic), version);
             return null;
         }
-        if (payloadLen < 0 || payloadLen > maxPayloadSize) {
+        if (payloadLen < 0) {
             if (warn) LOG.warn("Invalid payload length at pos {}: {}", pos, payloadLen);
+            return null;
+        }
+        // The configured payload limit governs what may be WRITTEN. It must not decide what can be
+        // read: an operator who lowers it below the size of an entry already in the log would
+        // otherwise see a healthy log reported as corrupt. A record being read is bounded by the
+        // file that holds it, which also bounds the allocation below. Whether the bytes are a
+        // genuine record is then for the CRC to say.
+        if (payloadLen > fileSize - pos - HEADER_SIZE - CRC_SIZE) {
+            if (warn) LOG.debug("Record at pos {} declares {} payload bytes, which runs past the end of the file", pos, payloadLen);
             return null;
         }
         // A newer format may define types this build does not know, so the type is only
@@ -1253,20 +1266,14 @@ public final class FileRaftStorage implements RaftStorage {
             return null;
         }
 
+        // The whole record is known to lie inside the file, so these reads either complete or
+        // throw because the file is shrinking underneath replay. Neither can come back short.
         ByteBuffer payloadBuf = ByteBuffer.allocate(payloadLen);
-        int payloadRead = readFully(ch, payloadBuf, pos + HEADER_SIZE);
-        if (payloadRead < payloadLen) {
-            if (warn) LOG.debug("Incomplete payload at pos {}: read {} bytes, expected {}", pos, payloadRead, payloadLen);
-            return null;
-        }
+        readFully(ch, payloadBuf, pos + HEADER_SIZE, fileSize);
         payloadBuf.flip();
 
         ByteBuffer crcBuf = ByteBuffer.allocate(CRC_SIZE);
-        int crcRead = readFully(ch, crcBuf, pos + HEADER_SIZE + payloadLen);
-        if (crcRead < CRC_SIZE) {
-            if (warn) LOG.debug("Incomplete CRC at pos {}", pos);
-            return null;
-        }
+        readFully(ch, crcBuf, pos + HEADER_SIZE + payloadLen, fileSize);
         crcBuf.flip();
         int expectedCrc = crcBuf.getInt();
 
@@ -1303,13 +1310,14 @@ public final class FileRaftStorage implements RaftStorage {
         long scanPos = from;
         while (scanPos + HEADER_SIZE + CRC_SIZE <= fileSize) {
             buf.clear();
-            int read = readFully(ch, buf, scanPos);
-            if (read < magicBytes.length) break;
+            // The loop condition guarantees a whole minimal record remains, so this read
+            // returns at least that many bytes or fails.
+            int read = readFully(ch, buf, scanPos, fileSize);
             byte[] bytes = buf.array();
             for (int i = 0; i + magicBytes.length <= read; i++) {
                 if (bytes[i] != magicBytes[0] || bytes[i + 1] != magicBytes[1]
                         || bytes[i + 2] != magicBytes[2] || bytes[i + 3] != magicBytes[3]) continue;
-                if (decodeRecord(ch, scanPos + i, false) != null) return true;
+                if (decodeRecord(ch, scanPos + i, fileSize, false) != null) return true;
             }
             // Overlap by three bytes so a magic straddling the window edge is still seen.
             scanPos += read - (magicBytes.length - 1);
@@ -1329,7 +1337,7 @@ public final class FileRaftStorage implements RaftStorage {
         if (remaining < HEADER_SIZE) return true;
 
         ByteBuffer header = ByteBuffer.allocate(HEADER_SIZE);
-        if (readFully(ch, header, pos) < HEADER_SIZE) return true;
+        readFully(ch, header, pos, fileSize);
         header.flip();
 
         int magic = header.getInt();
@@ -1375,7 +1383,7 @@ public final class FileRaftStorage implements RaftStorage {
 
             long pos = 0;
             while (pos < fileSize) {
-                DecodedRecord record = decodeRecord(ch, pos, true);
+                DecodedRecord record = decodeRecord(ch, pos, fileSize, true);
                 if (record == null) break;
 
                 if (record.type() == TYPE_PREFIX) {
@@ -1431,7 +1439,11 @@ public final class FileRaftStorage implements RaftStorage {
 
         validateReplayedLog(entries, boundary, logPath);
         logStateKnown = true;
-        prefixBoundary = boundary;
+        // Releases before format 2 compacted without writing a marker, so their compacted logs
+        // simply start above index 1. A log whose first entry is N was compacted through N - 1,
+        // and that range must be protected from truncation and rewriting exactly as if the
+        // marker were there. With a marker the two agree, because validation just checked it.
+        prefixBoundary = entries.isEmpty() ? boundary : entries.getFirst().index() - 1;
         lastIndex = entries.isEmpty() ? last : entries.getLast().index();
         rebuildTermRuns(entries);
 
@@ -1444,11 +1456,27 @@ public final class FileRaftStorage implements RaftStorage {
         return entries;
     }
 
-    private static int readFully(FileChannel channel, ByteBuffer buffer, long position) throws IOException {
+    /**
+     * Reads until the buffer is full or the file ends, and returns the number of bytes read.
+     * <p>
+     * A short result is legitimate only when the requested range runs past {@code fileSize},
+     * which is how a torn tail looks. If the file ends inside a range that {@code fileSize}
+     * says exists, the file is shrinking while it is being read. Nothing can be concluded
+     * about its contents then, and in particular it must not be classified as a torn write,
+     * because that verdict leads to truncation. It is reported as an I/O failure instead.
+     */
+    private int readFully(FileChannel channel, ByteBuffer buffer, long position, long fileSize) throws IOException {
+        int requested = buffer.remaining();
         int total = 0;
         while (buffer.hasRemaining()) {
-            int count = channel.read(buffer, position + total);
-            if (count < 0) break;
+            int count = compactionIo.read(channel, buffer, position + total);
+            if (count < 0) {
+                if (position + requested <= fileSize) {
+                    throw new IOException("WAL ended at byte " + (position + total) + " while reading " + requested
+                            + " bytes at " + position + " of a " + fileSize + "-byte file; it is changing underneath replay");
+                }
+                break;
+            }
             if (count == 0) throw new IOException("No progress reading WAL");
             total += count;
         }
@@ -1468,7 +1496,7 @@ public final class FileRaftStorage implements RaftStorage {
         int recordSize = HEADER_SIZE + payloadLen + CRC_SIZE;
 
         LOG.trace("Writing record: type={}, index={}, term={}, payloadLen={}, recordSize={}",
-                type == TYPE_APPEND ? "APPEND" : type == TYPE_TRUNCATE ? "TRUNCATE" : "PREFIX",
+                type == TYPE_APPEND ? "APPEND" : "TRUNCATE",
                 index, term, payloadLen, recordSize);
 
         ByteBuffer buf = encodeRecord(type, index, term, payload);
@@ -1524,7 +1552,7 @@ public final class FileRaftStorage implements RaftStorage {
      * @throws StorageException if lock cannot be acquired (another process holds it)
      */
     private void acquireExclusiveLock() throws IOException {
-        Path lockPath = dataDir.resolve(LOCK_FILE);
+        lockPath = dataDir.resolve(LOCK_FILE);
         LOG.debug("Acquiring exclusive lock: {}", pathForLog(lockPath));
 
         lockChannel = FileChannel.open(lockPath,
@@ -1562,7 +1590,7 @@ public final class FileRaftStorage implements RaftStorage {
             }
         } catch (IOException e) {
             succeeded = false;
-            LOG.warn("Could not release lock at {}: {}", pathForLog(dataDir == null ? null : dataDir.resolve(LOCK_FILE)),
+            LOG.warn("Could not release lock at {}: {}", pathForLog(lockPath),
                     e.getMessage(), e);
         }
         try {
@@ -1573,7 +1601,7 @@ public final class FileRaftStorage implements RaftStorage {
         } catch (IOException e) {
             succeeded = false;
             LOG.warn("Could not close lock channel at {}: {}",
-                    pathForLog(dataDir == null ? null : dataDir.resolve(LOCK_FILE)), e.getMessage(), e);
+                    pathForLog(lockPath), e.getMessage(), e);
         }
         return succeeded;
     }
