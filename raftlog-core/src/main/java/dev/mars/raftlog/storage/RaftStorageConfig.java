@@ -286,7 +286,8 @@ public final class RaftStorageConfig {
                 throw new IllegalArgumentException("minFreeSpaceMb must not be negative; got " + minFreeSpaceMb);
             }
 
-            LOG.debug("Resolved RaftStorageConfig: dataDir={}, syncEnabled={}, verifyWrites={}, minFreeSpaceMb={}, maxPayloadSizeMb={}",
+            LOG.atDebug().addKeyValue("event", "config.resolved")
+                    .log("Resolved RaftStorageConfig: dataDir={}, syncEnabled={}, verifyWrites={}, minFreeSpaceMb={}, maxPayloadSizeMb={}",
                     dataDir, syncEnabled, verifyWrites, minFreeSpaceMb, maxPayloadSizeMb);
 
             return new RaftStorageConfig(this);
@@ -337,11 +338,13 @@ public final class RaftStorageConfig {
                 }
                 if (chosen == null) {
                     chosen = parsed;
-                    LOG.debug("Resolved {} from {}: {}", sysProp, source, value);
+                    LOG.atDebug().addKeyValue("event", "config.setting.resolved")
+                            .log("Resolved {} from {}: {}", sysProp, source, value);
                 }
             }
             if (chosen != null) return chosen;
-            LOG.debug("Using default {} for {} (not set by any source)", defaultValue, sysProp);
+            LOG.atDebug().addKeyValue("event", "config.setting.default")
+                    .log("Using default {} for {} (not set by any source)", defaultValue, sysProp);
             return defaultValue;
         }
 
@@ -364,10 +367,12 @@ public final class RaftStorageConfig {
             try (InputStream is = classpath.getResourceAsStream(PROPERTIES_FILE)) {
                 if (is != null) {
                     props.load(is);
-                    LOG.debug("Loaded properties file from classpath: {}", PROPERTIES_FILE);
+                    LOG.atDebug().addKeyValue("event", "config.properties.loaded")
+                            .log("Loaded properties file from classpath: {}", PROPERTIES_FILE);
                     return props;
                 }
-                LOG.debug("No {} found on classpath", PROPERTIES_FILE);
+                LOG.atDebug().addKeyValue("event", "config.properties.absent")
+                        .log("No {} found on classpath", PROPERTIES_FILE);
             } catch (IOException e) {
                 throw new java.io.UncheckedIOException("Cannot read " + PROPERTIES_FILE + " from the classpath", e);
             }
@@ -377,12 +382,14 @@ public final class RaftStorageConfig {
             if (Files.exists(localFile)) {
                 try (InputStream is = Files.newInputStream(localFile)) {
                     props.load(is);
-                    LOG.debug("Loaded properties file from working directory: {}", localFile.toAbsolutePath());
+                    LOG.atDebug().addKeyValue("event", "config.properties.loaded")
+                            .log("Loaded properties file from working directory: {}", localFile.toAbsolutePath());
                 } catch (IOException e) {
                     throw new java.io.UncheckedIOException("Cannot read " + localFile.toAbsolutePath(), e);
                 }
             } else {
-                LOG.debug("No {} in working directory", localFile.toAbsolutePath());
+                LOG.atDebug().addKeyValue("event", "config.properties.absent")
+                        .log("No {} in working directory", localFile.toAbsolutePath());
             }
 
             return props;
