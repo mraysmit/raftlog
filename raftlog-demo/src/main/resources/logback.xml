@@ -2,7 +2,9 @@
 <configuration>
     <property name="LOG_DIR" value="${RAFTLOG_LOG_DIR:-${user.dir}/logs}"/>
     <property name="INSTANCE_ID" value="${RAFTLOG_INSTANCE_ID:-${HOSTNAME:-local}}"/>
-    <property name="LOG_BASE" value="${LOG_DIR}/raftlog-demo-${INSTANCE_ID}"/>
+    <timestamp key="runLocalTimestamp" datePattern="yyyy-MM-dd_HH-mm-ss" timeReference="contextBirth"/>
+    <property name="LOG_BASE" value="${LOG_DIR}/raftlog-demo-${INSTANCE_ID}-${runLocalTimestamp}"/>
+    <property name="RAFTLOG_LEVEL" value="${RAFTLOG_LOG_LEVEL:-INFO}"/>
     
     <!-- Console appender for Docker logs -->
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
@@ -14,13 +16,16 @@
     
     <!-- File appender for persistent logs -->
     <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <!-- One file per run, named for when the run started; a run that outgrows it rolls to .1, .2 ... beside it -->
         <file>${LOG_BASE}.log</file>
-        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
-            <fileNamePattern>${LOG_DIR}/archive/raftlog-demo-${INSTANCE_ID}.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
-            <maxFileSize>100MB</maxFileSize>
-            <maxHistory>30</maxHistory>
-            <totalSizeCap>1GB</totalSizeCap>
+        <rollingPolicy class="ch.qos.logback.core.rolling.FixedWindowRollingPolicy">
+            <fileNamePattern>${LOG_BASE}.%i.log</fileNamePattern>
+            <minIndex>1</minIndex>
+            <maxIndex>9</maxIndex>
         </rollingPolicy>
+        <triggeringPolicy class="ch.qos.logback.core.rolling.SizeBasedTriggeringPolicy">
+            <maxFileSize>100MB</maxFileSize>
+        </triggeringPolicy>
         <encoder>
             <charset>UTF-8</charset>
             <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36}%replace( [%X{storageId}]){' \[\]', ''}%replace( [%X{operationId}]){' \[\]', ''}%replace( [%X{agentId}]){' \[\]', ''}%replace( [%X{requestId}]){' \[\]', ''} %kvp - %msg%n</pattern>
@@ -30,12 +35,14 @@
     <!-- JSON appender for structured logging -->
     <appender name="JSON" class="ch.qos.logback.core.rolling.RollingFileAppender">
         <file>${LOG_BASE}.json</file>
-        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
-            <fileNamePattern>${LOG_DIR}/archive/raftlog-demo-${INSTANCE_ID}.%d{yyyy-MM-dd}.%i.json.gz</fileNamePattern>
-            <maxFileSize>100MB</maxFileSize>
-            <maxHistory>30</maxHistory>
-            <totalSizeCap>1GB</totalSizeCap>
+        <rollingPolicy class="ch.qos.logback.core.rolling.FixedWindowRollingPolicy">
+            <fileNamePattern>${LOG_BASE}.%i.json</fileNamePattern>
+            <minIndex>1</minIndex>
+            <maxIndex>9</maxIndex>
         </rollingPolicy>
+        <triggeringPolicy class="ch.qos.logback.core.rolling.SizeBasedTriggeringPolicy">
+            <maxFileSize>100MB</maxFileSize>
+        </triggeringPolicy>
         <encoder class="net.logstash.logback.encoder.LoggingEventCompositeJsonEncoder">
             <providers>
                 <timestamp/>
@@ -51,7 +58,7 @@
     </appender>
     
     <!-- Logger configurations -->
-    <logger name="dev.mars.raftlog" level="INFO"/>
+    <logger name="dev.mars.raftlog" level="${RAFTLOG_LEVEL}"/>
     <logger name="org.apache.hc" level="WARN"/>
     <logger name="com.sun.net.httpserver" level="WARN"/>
     

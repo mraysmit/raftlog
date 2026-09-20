@@ -24,6 +24,8 @@ configuration. It needs the JDK and Docker, takes well over an hour, and runs, i
 7. all of the above again inside a Linux container as an unprivileged user.
 
 A step that cannot run is a failure, never a skip, and that includes Docker being unavailable.
+Every line it prints is a log record. Run it with `-Dscripts.log.level=DEBUG` to also see the exact
+command of every step, the file its output went to, its exit code and its duration.
 The exit code is non-zero unless every step passed.
 
 Do not substitute a subset because a change "only touches" one area. Deciding which checks a
@@ -115,6 +117,7 @@ java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalCha
 - **The write limit is not a read limit** (in `FileRaftStorageFailurePathTest`): lowering `maxPayloadSizeMb` below the size of an entry already in the log must not make a healthy log replay as corrupt. A record being read is bounded by the file that holds it, and the CRC decides whether it is genuine. The limit still applies to new writes, and still serves as a plausibility check on torn writes.
 - **The coverage gate.** `mvn -Pcoverage verify` fails if the `dev.mars.raftlog.storage` package drops below 99% of lines or branches. It was validated by setting it to 100%, which Windows alone cannot reach, and confirming the build broke. The remaining fraction is the half of `CompactionIo.forceDirectory` that the other platform runs.
 - `WalChaosTest` (7 cases, in `raftlog-demo`): runs the chaos suite as part of the build. A chaos program that somebody has to remember to launch lets the build be green while every scenario is failing, so `WalChaos.run(category)` returns a summary, and `main` only turns it into an exit code. The test runs each category and the whole suite, requires zero failures, and pins the number of scenarios per category (6, 8, 9, 5 and 10, which is 38), so a scenario that is deleted or silently stops being registered fails the build. An unknown category throws, because running nothing and reporting success is worse than refusing. Every category, `nasty` included, can be run on its own.
+- `FileRaftStorageDiagnosticLoggingTest` (30 cases): the log must explain every decision the storage takes. A refusal reaches the caller only as a failed future, which the caller may drop, so each of the eight `WriteRejectionReason` values must produce exactly one ERROR event `storage.write.rejected` carrying the reason, the operation and the state the decision was taken from. It is an error because no refusal is routine: it means the layer above tried to break a Raft safety rule, or the disk is full, or the metadata cannot be read. It must also be the only error and must not fence, because what tells a refusal apart from a damaged storage is the event, not the level. The state must also be reported where it is established (`storage.open.completed`, `wal.replay.completed` with the tail, the boundary and whether the boundary was read or inferred) and where it is lost (`wal.tail.unknown` after a write that failed part way), so that a later `LOG_STATE_UNKNOWN` refusal can be traced to its cause. A file of intact records that is not a valid Raft log is logged with its violation, every verdict on an undecodable record is a WARN that names the defect, and compaction reports the boundary it stored and the bytes it reclaimed. One test reads the main sources and fails on any statement at DEBUG or above without an `event` key. Another reads every Java source in the project, the tests, the demo, the scripts and the fixture generator included, and fails on any `System.out`, `System.err` or `printStackTrace`: output that bypasses the logger has no level, no timestamp and no source. Mutants M29 to M34 remove or downgrade these statements and must be killed.
 - `FileRaftStorageFencingTest`: 13 cases covering fencing after a failed WAL, metadata or directory force, and the replay classification of torn tails versus corruption inside the committed region.
 
 Replay policy: only a structurally incomplete EOF fragment is treated as a torn write and truncated. A complete record with a bad CRC, a malformed header, arbitrary garbage, or an invalid record followed by a valid record is reported as `CorruptLogException`; the file is left untouched and the instance is fenced.
@@ -135,7 +138,8 @@ The 23 compaction cases were retained as behavioral failures before implementati
 | `raftlog-core` | `FileRaftStorageFencingTest` | 13 | Fencing after a failed force; torn tail versus corruption |
 | `raftlog-core` | `FileRaftStorageCompactionFailureTest` | 14 | Prefix compaction under injected I/O failure |
 | `raftlog-core` | `FileRaftStoragePrefixCompactionTest` | 9 | Prefix compaction |
-| `raftlog-core` | `FileRaftStorageLoggingTest` | 5 | What the storage logs |
+| `raftlog-core` | `FileRaftStorageLoggingTest` | 5 | Bounded, single-line, correlated log output |
+| `raftlog-core` | `FileRaftStorageDiagnosticLoggingTest` | 30 | Every refusal, verdict, state change and compaction publication step is logged |
 | `raftlog-core` | `LogSanitizationTest` | 10 | Untrusted text never reaches the log unbounded or multi-line |
 | `raftlog-core` | `GoldenFileCompatibilityTest` | 27 | Existing data directories, by WAL format |
 | `raftlog-core` | `ProtectionGuaranteeTest` | 24 | Thread safety and crash consistency |
@@ -152,7 +156,7 @@ The 23 compaction cases were retained as behavioral failures before implementati
 | `raftlog-demo` | `KeyValueExampleTest` | 4 | Key/value replay example |
 | `raftlog-demo` | `DemoInfoLoggingSafetyTest` | 2 | Demo logging |
 | `raftlog-demo` | `ExampleInfoLoggingTest` | 2 | Example logging |
-| | **Total** | **623** | 608 in `raftlog-core`, 15 in `raftlog-demo` |
+| | **Total** | **650** | 635 in `raftlog-core`, 15 in `raftlog-demo` |
 
 Three of the core tests need POSIX file permissions and are skipped on Windows; they run in the Linux half of `java scripts/VerifyAll.java`, where nothing is skipped.
 

@@ -39,14 +39,21 @@ class CompactionIo {
     private static final Logger LOG = LoggerFactory.getLogger(CompactionIo.class);
 
     void write(FileChannel channel, ByteBuffer bytes) throws IOException {
-        LOG.trace("Writing WAL bytes: remaining={}", bytes.remaining());
+        LOG.atDebug().addKeyValue("event", "io.write.started")
+                .log("Writing WAL bytes: remaining={}", bytes.remaining());
         while (bytes.hasRemaining()) channel.write(bytes);
-        LOG.trace("Completed write to channel {}", channel);
+        LOG.atDebug().addKeyValue("event", "io.write.completed")
+                .log("Completed write to channel {}", channel);
     }
 
     /** Writes one record to the live WAL. A seam so tests can tear a record at a real write boundary. */
     void writeRecord(FileChannel channel, ByteBuffer record) throws IOException {
+        LOG.atDebug().addKeyValue("event", "io.record.write.started")
+                .addKeyValue("recordBytes", record.remaining())
+                .log("Writing one live WAL record");
         while (record.hasRemaining()) channel.write(record);
+        LOG.atDebug().addKeyValue("event", "io.record.write.completed")
+                .log("Live WAL record write completed");
     }
 
     /**
@@ -55,7 +62,10 @@ class CompactionIo {
      * compacted WAL, so that failing one in a test never disturbs the other.
      */
     FileChannel openForReplay(Path path) throws IOException {
-        return FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE);
+        FileChannel channel = FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE);
+        LOG.atDebug().addKeyValue("event", "io.replay.opened")
+                .log("Opened WAL for replay at {}", path);
+        return channel;
     }
 
     /**
@@ -68,53 +78,74 @@ class CompactionIo {
 
     /** Opens the live WAL, creating it if needed. A seam so tests can make open fail after the channel exists. */
     FileChannel openLog(Path path) throws IOException {
-        return FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE);
+        FileChannel channel = FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE);
+        LOG.atDebug().addKeyValue("event", "io.wal.opened")
+                .log("Opened live WAL at {}", path);
+        return channel;
     }
 
     /** Removes an unpublished compaction output. A seam so tests can make cleanup fail. */
     void discard(Path path) throws IOException {
-        Files.deleteIfExists(path);
+        boolean deleted = Files.deleteIfExists(path);
+        LOG.atDebug().addKeyValue("event", "io.staging.discarded")
+                .addKeyValue("deleted", deleted)
+                .log("Discarded unpublished WAL staging file at {}", path);
     }
 
     /** Closes a channel held by the storage. A seam so tests can make resource release fail. */
     void closeChannel(FileChannel channel) throws IOException {
         channel.close();
+        LOG.atDebug().addKeyValue("event", "io.channel.closed")
+                .log("Closed storage channel");
     }
 
     /** Releases the directory lock. A seam so tests can make resource release fail. */
     void releaseLock(java.nio.channels.FileLock lock) throws IOException {
         lock.release();
+        LOG.atDebug().addKeyValue("event", "io.lock.released")
+                .log("Released WAL directory lock");
     }
 
     /** Forces the compaction output file. */
     void force(FileChannel channel) throws IOException {
-        LOG.trace("Forcing compaction output channel {}", channel);
+        LOG.atDebug().addKeyValue("event", "io.compaction.force.started")
+                .log("Forcing compaction output channel {}", channel);
         channel.force(true);
+        LOG.atDebug().addKeyValue("event", "io.compaction.force.completed")
+                .log("Compaction output forced to disk");
     }
 
     /** Forces the live WAL or the metadata staging file. */
     void forceChannel(FileChannel channel) throws IOException {
-        LOG.trace("Forcing channel {}", channel);
+        LOG.atDebug().addKeyValue("event", "io.channel.force.started")
+                .log("Forcing channel {}", channel);
         channel.force(true);
+        LOG.atDebug().addKeyValue("event", "io.channel.force.completed")
+                .log("Channel forced to disk");
     }
 
     void replace(Path source, Path target) throws IOException {
-        LOG.trace("Atomically replacing {} with {}", source, target);
+        LOG.atDebug().addKeyValue("event", "io.replace.started")
+                .log("Atomically replacing {} with {}", source, target);
         Files.move(source, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-        LOG.trace("Replace completed: {} -> {}", source, target);
+        LOG.atDebug().addKeyValue("event", "io.replace.completed")
+                .log("Replace completed: {} -> {}", source, target);
     }
 
     void forceDirectory(Path directory) throws IOException {
         // Java's Windows provider cannot open directories for force. File force and
         // atomic replacement still apply; Linux requires directory force to succeed.
         if (System.getProperty("os.name").startsWith("Windows")) {
-            LOG.trace("Skipping directory force on Windows for {}", directory);
+            LOG.atDebug().addKeyValue("event", "io.directory.force.skipped")
+                    .log("Skipping directory force on Windows for {}", directory);
             return;
         }
-        LOG.trace("Forcing directory {}", directory);
+        LOG.atDebug().addKeyValue("event", "io.directory.force.started")
+                .log("Forcing directory {}", directory);
         try (var channel = FileChannel.open(directory, StandardOpenOption.READ)) {
             channel.force(true);
-            LOG.trace("Directory force complete for {}", directory);
+            LOG.atDebug().addKeyValue("event", "io.directory.force.completed")
+                    .log("Directory force complete for {}", directory);
         }
     }
 
@@ -124,7 +155,8 @@ class CompactionIo {
     }
 
     FileChannel reopen(Path path) throws IOException {
-        LOG.trace("Reopening channel for {}", path);
+        LOG.atDebug().addKeyValue("event", "io.channel.reopening")
+                .log("Reopening channel for {}", path);
         return FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE);
     }
 }

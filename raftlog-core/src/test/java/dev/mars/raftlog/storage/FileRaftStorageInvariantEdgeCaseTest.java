@@ -45,6 +45,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * restart, and anything replay would refuse must be refused at write time.
  */
 class FileRaftStorageInvariantEdgeCaseTest {
+    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(FileRaftStorageInvariantEdgeCaseTest.class);
     @TempDir Path dir;
 
     private static LogEntryData entry(long index, long term) {
@@ -510,7 +511,7 @@ class FileRaftStorageInvariantEdgeCaseTest {
             runAgainstModel(seed, seedDir);
         }
         // Said out loud, because a soak that was given no seeds passes instantly and proves nothing.
-        System.out.println("MODEL SOAK: ran " + seeds + " seeds"
+        LOG.info("MODEL SOAK: ran " + seeds + " seeds"
                 + (seeds == 0 ? " (disabled; pass -Draftlog.model.soakSeeds=N as a Maven property)" : ""));
     }
 

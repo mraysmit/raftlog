@@ -92,6 +92,7 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 @DisplayName("Protection Guarantee Tests")
 class ProtectionGuaranteeTest {
+    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(ProtectionGuaranteeTest.class);
 
     @TempDir
     Path tempDir;
@@ -164,7 +165,7 @@ class ProtectionGuaranteeTest {
                         }
                     } catch (Exception e) {
                         failures.incrementAndGet();
-                        e.printStackTrace();
+                        LOG.error("Concurrent writer failed with something other than a refusal", e);
                     }
                 }));
             }

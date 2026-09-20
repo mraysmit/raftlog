@@ -93,7 +93,8 @@ public record AppendPlan(
      * Creates an empty plan (no truncation, no appends).
      */
     public static AppendPlan empty() {
-        LOG.debug("No-op append plan requested");
+        LOG.atDebug().addKeyValue("event", "append_plan.noop")
+                .log("No-op append plan requested");
         return new AppendPlan(null, List.of());
     }
 
@@ -167,34 +168,53 @@ public record AppendPlan(
                     + lastIndex + "; the previous-entry check should have refused this request");
         }
 
-        LOG.debug("Calculating append plan: startIndex={}, incomingEntries={}, currentLog={}, compactionBoundary={}",
+        LOG.atDebug().addKeyValue("event", "append_plan.started")
+                .log("Calculating append plan: startIndex={}, incomingEntries={}, currentLog={}, compactionBoundary={}",
                 startIndex, incomingEntries.size(), currentLog.size(), compactionBoundary);
 
         Long truncateAt = null;
         int firstNew = incomingEntries.size();                      // until shown otherwise, nothing is new
         for (int i = 0; i < incomingEntries.size(); i++) {
             LogEntryData incoming = incomingEntries.get(i);
-            if (incoming.index() <= compactionBoundary) continue;   // already covered by the snapshot
+            if (incoming.index() <= compactionBoundary) {
+                LOG.atDebug().addKeyValue("event", "append_plan.entry_compacted")
+                        .addKeyValue("index", incoming.index())
+                        .addKeyValue("compactionBoundary", compactionBoundary)
+                        .log("Incoming entry {} is already covered by the snapshot", incoming.index());
+                continue;
+            }
 
             long position = incoming.index() - compactionBoundary - 1;
             if (position >= currentLog.size()) {                    // beyond what we hold: new from here on
                 firstNew = i;
+                LOG.atDebug().addKeyValue("event", "append_plan.first_new_entry")
+                        .addKeyValue("index", incoming.index()).addKeyValue("incomingOffset", i)
+                        .log("Incoming entry {} follows the retained log and starts the new suffix", incoming.index());
                 break;
             }
             LogEntryData held = currentLog.get((int) position);
             if (held.term() != incoming.term()) {                   // conflict: replace from here on
                 truncateAt = incoming.index();
                 firstNew = i;
-                LOG.debug("Conflict detected at index {}: existingTerm={}, incomingTerm={}; truncating from {}",
+                LOG.atDebug().addKeyValue("event", "append_plan.conflict")
+                        .log("Conflict detected at index {}: existingTerm={}, incomingTerm={}; truncating from {}",
                         incoming.index(), held.term(), incoming.term(), truncateAt);
                 break;
             }
             if (!Arrays.equals(payloadOf(held), payloadOf(incoming))) {
                 // Raft creates at most one entry per index per term. Treating this as "already
                 // held" would hide a divergence; truncating would be wrong because the terms agree.
+                LOG.atDebug().addKeyValue("event", "append_plan.payload_divergence")
+                        .addKeyValue("index", incoming.index()).addKeyValue("term", incoming.term())
+                        .addKeyValue("heldPayloadBytes", payloadOf(held).length)
+                        .addKeyValue("incomingPayloadBytes", payloadOf(incoming).length)
+                        .log("Entries at index {} and term {} have different payloads", incoming.index(), incoming.term());
                 throw new IllegalArgumentException("entry " + incoming.index() + " has term " + incoming.term()
                         + " in both logs but a different payload; the logs have diverged");
             }
+            LOG.atDebug().addKeyValue("event", "append_plan.entry_matched")
+                    .addKeyValue("index", incoming.index()).addKeyValue("term", incoming.term())
+                    .log("Incoming entry {} matches the retained entry", incoming.index());
         }
 
         List<LogEntryData> toAppend = incomingEntries.subList(firstNew, incomingEntries.size());
@@ -210,7 +230,8 @@ public record AppendPlan(
             }
         }
 
-        LOG.debug("Append plan resolved: truncateFromIndex={}, entriesToAppend={}", truncateAt, toAppend.size());
+        LOG.atDebug().addKeyValue("event", "append_plan.resolved")
+                .log("Append plan resolved: truncateFromIndex={}, entriesToAppend={}", truncateAt, toAppend.size());
         return new AppendPlan(truncateAt, toAppend);
     }
 
@@ -248,11 +269,18 @@ public record AppendPlan(
         }
 
         if (keep < memoryLog.size()) {
-            LOG.debug("Applying append plan: truncating in-memory log from index {}", truncateFromIndex);
+            LOG.atDebug().addKeyValue("event", "append_plan.apply.truncate")
+                    .log("Applying append plan: truncating in-memory log from index {}", truncateFromIndex);
             memoryLog.subList(keep, memoryLog.size()).clear();
         }
-        LOG.debug("Applying append plan: appending {} entries", entriesToAppend.size());
+        LOG.atDebug().addKeyValue("event", "append_plan.apply.append")
+                .log("Applying append plan: appending {} entries", entriesToAppend.size());
         memoryLog.addAll(entriesToAppend);
+        LOG.atDebug().addKeyValue("event", "append_plan.apply.completed")
+                .addKeyValue("retainedEntries", keep)
+                .addKeyValue("appendedEntries", entriesToAppend.size())
+                .addKeyValue("resultingEntries", memoryLog.size())
+                .log("Applied append plan to the in-memory log");
     }
 
     /**

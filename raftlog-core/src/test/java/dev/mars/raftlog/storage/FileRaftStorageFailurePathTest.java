@@ -52,6 +52,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * {@code fence} or failed-future line in the storage is unexecuted before adding a new one.
  */
 class FileRaftStorageFailurePathTest {
+    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(FileRaftStorageFailurePathTest.class);
     @TempDir Path dir;
 
     // ------------------------------------------------------------------ helpers
@@ -260,15 +261,14 @@ class FileRaftStorageFailurePathTest {
         assertEntries(List.of(entry(1, 1), entry(2, 1)), DurableState.replayAfterRestart(first));
     }
 
-    /** Child process: holds the directory open until its stdin closes. */
+    /** Child process: holds the directory open until its stdin closes. The parent waits for the HOLDING line. */
     public static void main(String[] args) throws Exception {
         FileRaftStorage holder = new FileRaftStorage(RaftStorageConfig.builder().build());
         holder.open(Path.of(args[0])).get(30, TimeUnit.SECONDS);
         holder.appendEntries(List.of(entry(1, 1))).get(30, TimeUnit.SECONDS);
         holder.updateMetadata(4, Optional.of("holder")).get(30, TimeUnit.SECONDS);
         holder.sync().get(30, TimeUnit.SECONDS);
-        System.out.println("HOLDING");
-        System.out.flush();
+        LOG.info("HOLDING");
         while (System.in.read() >= 0) { /* until the parent closes the pipe */ }
         holder.close();
     }
@@ -281,7 +281,7 @@ class FileRaftStorageFailurePathTest {
         try {
             CompletableFuture<Boolean> holding = CompletableFuture.supplyAsync(() -> {
                 try (BufferedReader out = new BufferedReader(new InputStreamReader(child.getInputStream()))) {
-                    for (String line; (line = out.readLine()) != null; ) if (line.equals("HOLDING")) return true;
+                    for (String line; (line = out.readLine()) != null; ) if (line.endsWith("HOLDING")) return true;
                     return false;
                 } catch (IOException e) { return false; }
             });

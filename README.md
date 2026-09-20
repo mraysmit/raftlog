@@ -227,6 +227,76 @@ raftlog.minFreeSpaceMb=64
 raftlog.maxPayloadSizeMb=16
 ```
 
+## Logging
+
+RaftLog logs through SLF4J and brings no logging backend. Every statement at DEBUG or above
+carries a stable `event` key, and every operation carries `storageId`, `operationId` and
+`storagePath` in the MDC, so one operation can be followed and one kind of event can be
+filtered without matching on message text. Text that comes from outside, such as a candidate
+name or a path, is bounded and kept on one line.
+
+| Level | What is logged |
+|-------|----------------|
+| ERROR | A write was refused, the storage can no longer be trusted, or an operation failed on I/O: `storage.write.rejected`, `storage.fenced`, `storage.open.failed`, `storage.close.failed`, `storage.lock.denied`, `wal.replay.invalid`, `wal.replay.failed`, `wal.append.failed`, `wal.suffix_truncate.failed`, `wal.compaction.failed`, `wal.verify.failed`, `metadata.corrupt`, `metadata.unreadable`, `metadata.load.failed`, `metadata.update.failed` |
+| WARN | Something needs attention but nothing was refused or lost: `wal.tail.unknown`, `wal.tail.repaired`, `wal.record.invalid`, `storage.fsync.disabled`, and resources that could not be released cleanly (`storage.open.cleanup_failed`, `storage.channel.close_failed`, `storage.lock.release_failed`, `storage.lock.close_failed`) |
+| INFO | State changes: open, close, replay, suffix truncation, compaction, metadata load |
+| DEBUG | Queue wait and duration for each storage operation; append and metadata validation; per-entry `AppendPlan` decisions; replay tail classification and per-record recovery; metadata checksum checks; compaction and filesystem durability steps |
+
+To turn on the demo's diagnostic logs, set `RAFTLOG_LOG_LEVEL=DEBUG` before starting it.
+The demo writes to the console and rotating text and JSON files under `RAFTLOG_LOG_DIR` (default: `./logs`). For
+example, in PowerShell:
+
+```powershell
+$env:RAFTLOG_LOG_LEVEL = "DEBUG"
+$env:RAFTLOG_LOG_DIR = "C:\temp\raftlog-logs"
+java -jar raftlog-demo/target/raftlog-demo-1.4.0.jar
+```
+
+The core library uses the application's SLF4J configuration. In an application with Logback,
+set `dev.mars.raftlog` to `DEBUG`; no library specific system property changes
+the host application's logger. Debug events carry `storageId` and `operationId` so queued,
+started, completed or failed operations can be followed across threads. Log messages report
+record indices and payload sizes; the core does not log payload bytes.
+
+A refused write reaches the caller as a failed future, which the caller may drop, so the storage
+logs every refusal itself, at ERROR. No refusal is routine: a correct consensus layer never sends
+a gap, a term regression or a second vote in a term, so a refusal means the layer above tried to
+break a Raft safety rule, or the disk is full, or the metadata cannot be read. The event, not the
+level, tells a refusal apart from a damaged storage: after `storage.write.rejected` the instance
+stays usable, after `storage.fenced` it does not. `storage.write.rejected` carries the `reason` (a
+`WriteRejectionReason`), the `operation`, and the state the decision was taken from: `tailKnown`,
+`lastIndex`, `lastTerm`, `prefixBoundary`, `persistedTerm` and `metadataReadable`. Nothing was
+written when this event appears.
+
+The same state is reported where it is established and where it is lost:
+
+- `storage.open.completed` says whether a replay is required before the first write
+  (`replayRequired`) and which term and vote were loaded.
+- `wal.replay.completed` reports `lastIndex`, `lastTerm`, `prefixBoundary` and
+  `boundarySource`, which is `prefix-record`, `inferred` (a compacted log with no boundary
+  record) or `none`.
+- `wal.tail.unknown` follows a write that failed after it may have reached the file. Every write
+  is then refused with `LOG_STATE_UNKNOWN` until `replayLog()` has been called.
+- `wal.replay.invalid` reports intact records that are not a valid Raft log, with the
+  `violation`: `index-gap`, `term-regression`, `boundary-mismatch` or `prefix-not-first`.
+- `wal.record.invalid` reports a record that cannot be decoded, with its `position` and `defect`.
+  Whether it was a torn write (`wal.tail.repaired`) or corruption (`storage.fenced`) follows.
+- `wal.compaction.completed` reports the `requestedIndex`, the `boundary` actually stored, and
+  `bytesBefore` and `bytesAfter`.
+
+Nothing in the project writes to the console directly: not the library, the demo, the tests or
+the scripts. A test fails the build if a `System.out`, `System.err` or `printStackTrace` appears.
+
+- The demo programs log at INFO. At DEBUG the chaos program also reports what each scenario was
+  set up with, the data directory it used, how long it took, and exactly what it damaged and
+  where, including the randomly chosen offsets and bytes, so a failing run can be reproduced.
+- The programs under `scripts/` need only the JDK and log through `java.util.logging`, one line
+  per record. INFO is what a run reports. DEBUG adds what is needed to repeat a step by hand: the
+  exact command, the file its output went to, its exit code and its duration. Turn it on with
+  `java -Dscripts.log.level=DEBUG scripts/VerifyAll.java` or the environment variable
+  `SCRIPTS_LOG_LEVEL`; the level is passed on to the mutation gate and into the Linux container.
+  A level that is not DEBUG, INFO, WARN or ERROR is refused.
+
 ## Architecture
 
 RaftLog follows a **Prepare → Persist → Apply** pattern:
