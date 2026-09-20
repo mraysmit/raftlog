@@ -1,6 +1,0 @@
-replay=OK
-entries=2
-entry.0=1,2,YTI=
-entry.1=2,2,YjI=
-meta.term=0
-meta.vote=NONE

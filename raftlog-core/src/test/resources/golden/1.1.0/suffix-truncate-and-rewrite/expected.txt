@@ -1,9 +1,0 @@
-replay=OK
-entries=5
-entry.0=1,1,YQ==
-entry.1=2,1,Yg==
-entry.2=3,1,Yw==
-entry.3=4,3,ZDI=
-entry.4=5,3,ZTI=
-meta.term=0
-meta.vote=NONE
