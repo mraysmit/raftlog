@@ -1,7 +1,0 @@
-replay=OK
-entries=3
-entry.0=1,1,YQ==
-entry.1=2,1,Yg==
-entry.2=3,1,Yw==
-meta.term=0
-meta.vote=NONE
