@@ -6,7 +6,10 @@ This document provides the exact, repo-specific process for publishing RaftLog t
 
 This release makes the storage refuse anything that is not a valid Raft log, before writing a byte. The rules are listed under [Invariants the storage enforces](RAFTLOG_RAFT_WAL_DESIGN.md#invariants-the-storage-enforces). [Prefix compaction](RAFTLOG_RAFT_WAL_DESIGN.md#139-prefix-compaction-implementation-notes) persists its boundary in the WAL as a `PREFIX` record, which is record format 2. `AppendPlan` and configuration are strict: inconsistent arguments and values that cannot be parsed are errors, not things to work around. Parent, core and demo must all use 1.4.0.
 
-`java scripts/VerifyAll.java` must pass before anything is published. It runs every test of every module under the coverage gate, every shipped program from the packaged jar, the chaos suite, the model soak and the mutation gate, on this platform and again on Linux as an unprivileged user.
+Before publishing, run `mvn -Pcoverage clean verify` and complete the separate packaged-program,
+model-soak, and unprivileged-Linux checks in the [test documentation](RAFTLOG_TEST_DOCUMENTATION.md#run-everything).
+The former Java verification runner and mutation gate have been removed; Maven does not replace
+their combined behavior.
 
 Prepare signatures and source/Javadoc artifacts with `mvn -B -Prelease -DskipTests verify` after the test runs. Publish the same reviewed source with `mvn -B -Prelease -DskipTests deploy`. The configured plugin automatically publishes and waits for `published`; an upload or local install alone is not success. Confirm the parent/core/demo POMs and JARs from Central and compare hashes, then publish the release Git tag and source revision. Follow the [Central Portal Maven documentation](https://central.sonatype.org/publish/publish-portal-maven/).
 
@@ -46,7 +49,7 @@ mvn -version
 gpg --version
 
 # Verify project builds successfully
-mvn clean verify
+mvn -Pcoverage clean verify
 ```
 
 ---
@@ -65,7 +68,7 @@ Remove-Item -Force -Recurse ".\target" -ErrorAction SilentlyContinue
 ```bash
 # 1) Verify state
 git status
-mvn clean verify
+mvn -Pcoverage clean verify
 
 # 2) Set release version
 mvn versions:set -DnewVersion=X.Y.Z
@@ -155,7 +158,8 @@ Use this exact sequence for publishing a new release.
 ```bash
 # 1) Ensure clean branch and verify everything
 git status
-java scripts/VerifyAll.java
+mvn -Pcoverage clean verify
+# Complete the remaining checks in docs/RAFTLOG_TEST_DOCUMENTATION.md#run-everything
 
 # 2) Set release version
 mvn versions:set -DnewVersion=1.4.0
@@ -332,7 +336,11 @@ mvn --encrypt-password your-central-token-password
 
 Before releasing, verify:
 
-- [ ] Everything passes: `java scripts/VerifyAll.java`. This is every test of every module under the coverage gate, every shipped program from the packaged jar, the chaos suite, the model soak and the mutation gate, on this platform and again on Linux as an unprivileged user. `mvn clean verify` alone is not sufficient
+- [ ] `mvn -Pcoverage clean verify` passes for both modules, with no unexpected skipped tests
+- [ ] Packaged demo examples run twice against the same directories; packaged chaos run reports zero failures
+- [ ] The 2000-seed model soak reports `MODEL SOAK: ran 2000 seeds`
+- [ ] The build and separate checks pass on Linux as an unprivileged user, with no permission-test skips
+- [ ] The deleted mutation gate is not reported as having passed; any replacement is documented separately
 - [ ] No SNAPSHOT dependencies: `mvn dependency:tree` shows no `SNAPSHOT` artifacts
 - [ ] Documentation is updated
 - [ ] Version numbers are correct

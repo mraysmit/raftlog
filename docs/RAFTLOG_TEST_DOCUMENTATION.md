@@ -7,34 +7,32 @@ This document provides a comprehensive overview of all test cases in the RaftLog
 ### Run everything
 
 ```bash
-java scripts/VerifyAll.java
+mvn -Pcoverage clean verify
 ```
 
-This is the verification for a release and for any change to the storage, the planner or the
-configuration. It needs the JDK and Docker, takes well over an hour, and runs, in order:
+Run this from the repository root for the Maven build, both modules' tests, packaging, and
+the 99% line and branch coverage gate on the storage package. For a release or a change to
+storage, the planner, or configuration, also perform these separate checks:
 
-1. a clean build of the whole reactor with the coverage gate: every test of every module,
-   packaging, and the 99% line and branch requirement on the storage package;
-2. a check that no test was skipped, other than the Linux-only tests when not on Linux;
-3. every program the project ships, from the packaged jar the README tells users to run, twice
-   against the same directory so that the restart and replay path is exercised;
-4. the chaos program, all categories;
-5. the model soak over 2000 seeds, with proof in its output that the seeds ran;
-6. the mutation gate: its self-test, then every mutant;
-7. all of the above again inside a Linux container as an unprivileged user.
+1. Inspect the Maven test reports for unexpected skipped tests. Three permission tests are
+   expected to skip on Windows and must run on Linux.
+2. Run `WalDemo` and `KeyValueExample` from the packaged demo JAR, twice each against the
+   same data directory. Commands are below.
+3. Run the packaged `WalChaos` program with no category argument and require zero failures.
+4. Run the model soak with 2000 additional seeds, using the Maven command below. Require
+   `MODEL SOAK: ran 2000 seeds` in the output.
+5. Repeat the build, packaged examples, chaos run, and model soak on Linux as an unprivileged
+   user. Permission tests must not skip there.
 
-A step that cannot run is a failure, never a skip, and that includes Docker being unavailable.
-Every line it prints is a log record. Run it with `-Dscripts.log.level=DEBUG` to also see the exact
-command of every step, the file its output went to, its exit code and its duration.
-The exit code is non-zero unless every step passed.
+The former Java verification runner and mutation gate were removed with their directory.
+No current Maven goal replaces the mutation gate, and there is no single command that
+performs the complete checklist. Do not report mutation testing as passed without running
+a replacement.
 
-Do not substitute a subset because a change "only touches" one area. Deciding which checks a
-change needs is a judgement, and on this project that judgement was wrong repeatedly: a soak that
-ran no seeds, a mutation check skipped because the guards "had not changed", two programs whose
-unit tests passed but which were never actually run, a packaged jar that was never built, and a
-whole-reactor coverage build that had been failing unnoticed because the modules were only ever
-built one at a time. The commands below are for working on one thing at a time. They are not
-verification.
+Do not substitute a subset because a change "only touches" one area. Past gaps included a soak
+that ran no seeds, packaged programs that were never actually run, and a whole-reactor coverage
+build that failed while modules were built one at a time. The focused commands below support
+development; the full checklist above is the release procedure.
 
 ### Unit Tests (JUnit)
 
@@ -66,6 +64,17 @@ java -jar raftlog-demo/target/raftlog-demo-1.4.0.jar .\run-data\wal-demo
 # Run the key/value replay example
 java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.KeyValueExample .\run-data\key-values
 ```
+
+Run each example a second time with the same directory to exercise restart and replay.
+
+### Extended Model Soak
+
+```bash
+mvn -pl raftlog-core test -Dtest=FileRaftStorageInvariantEdgeCaseTest#soakWritePathAndReplayPathAgainstTheModel -Draftlog.model.soakSeeds=2000
+```
+
+Check the output for `MODEL SOAK: ran 2000 seeds`; a successful exit without that line does
+not establish that the extra seeds ran.
 
 ### Chaos Tests (WalChaos)
 
@@ -103,8 +112,8 @@ java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalCha
 - `FileRaftStorageInvariantEdgeCaseTest`: 57 cases attacking the invariant checks. The governing property is that the write path and the replay path agree. Covers the last term surviving suffix truncation and compaction, batches that fail part way (a torn record from a device error, an unchecked failure, a disk filling up) never leaving a stale tail, unreadable `meta.dat` refusing updates, index arithmetic at `Long.MAX_VALUE` including a batch that wraps to `Long.MIN_VALUE`, format versioning, the compaction boundary accessor with `AppendPlan`, and null arguments failing the future. Forty seeds of a model-based test drive random operation sequences with restarts against a reference model; `mvn -pl raftlog-core test -Dtest='FileRaftStorageInvariantEdgeCaseTest#soakWritePathAndReplayPathAgainstTheModel' -Draftlog.model.soakSeeds=N` runs the same check over N further seeds. Pass it as a plain Maven property; passing it through `-DargLine` does not reach the forked test JVM, and the soak then runs no seeds and passes in milliseconds. The test prints `MODEL SOAK: ran N seeds`. Two thousand seeds take several minutes; a soak that finishes instantly ran nothing.
 - `DurableState` (test support) and `DurableStateTest` (9 cases): the rule that a refusal test must prove more than the refusal. `DurableState.expectUnchanged(dir)` hashes every file under the test directory, except the lock file, and fails if a block of code changed, added or removed any of them, which also catches a leftover staging file. `DurableState.assertRestartAgrees(storage, dir)` closes the instance, reopens the directory, and requires the replayed log to match what the live instance replayed, payload bytes included. Every refusal in the suite is wrapped in the first, and every refusal test ends with a restart. This covers validation rejections, operations on closed, unopened or fenced instances, a second instance blocked by the lock, and every helper that asserts corruption was reported with the file left intact. Injected I/O failures are deliberately not wrapped: those may leave a staging file or a torn record by design. `DurableStateTest` proves the checker itself notices appended bytes, a same-size content change, truncation, a new file, a removed file and a change in a nested directory.
 - `WalRecords` (test support) and `WalRecordsTest` (8 cases): exact accounting for tests where many threads write at once. A single refusal cannot be checked byte-for-byte while other threads are legitimately writing, but the end state can: the WAL is append-only, so every record in it must come from an operation the storage accepted, and every accepted operation must be in it. The reader is written independently of the production decoder from the documented record format, and is strict about CRCs and trailing bytes. `assertNoStrayFiles` rejects leftover staging files. The concurrent tests in `ProtectionGuaranteeTest` and `FileRaftStorageAdversarialTest` record what was accepted and assert this, then restart. The concurrent metadata test ends on a guaranteed refusal, because an accepted update replaces the staging file and would otherwise mask a refusal that left one behind. `WalChaos` applies the same rule: `expectRefusal` compares a hash of the data directory before and after, and the concurrent scenarios require the WAL length to equal the bytes of the accepted records.
-- **The mutation gate is a hard requirement, and it is a program, not a habit.** Run `java scripts/MutationCheck.java` from the repository root before every release, and after any change that adds or alters a refusal, a failure path or a safety rule. It needs only the JDK. Each mutant removes or inverts one safety rule, the tests named for it are run, and they must fail. Three outcomes fail the gate: SURVIVED (the tests passed with the rule removed), STALE (the text to mutate is no longer in the source exactly once, so the mutant was silently not being applied), and INVALID (the mutant did not compile, which also exits non-zero and must never be mistaken for a kill). Sources are restored after every mutant and verified by checksum. `--verify` checks in seconds that every mutation still applies. When a safety rule is added, its mutant is added in the same change. This exists because the check was once skipped on a judgement that the guards had not changed, in a round that changed the decoder, the configuration and the planner. Line coverage cannot replace it: coverage says a line ran, not that any test would notice if it were wrong.
-- **How the first guards were validated.** These guards were validated by deliberately breaking the storage, first so that a refused append writes a record before validation and then so that a refused metadata update leaves its staging file. The guarded tests and the chaos program must fail under those mutations. One guard, the concurrent metadata test, did not fail at first, which is how its masking problem was found. Repeat the mutation whenever a new kind of refusal is added.
+- **Historical mutation checks.** The removed mutation program once inverted safety rules and required the tests to fail. That gate is no longer available; coverage and the current tests do not establish equivalent mutation sensitivity. A replacement must be added before mutation checks can again be claimed as part of release verification.
+- **How the first guards were validated historically.** These guards were validated by deliberately breaking the storage, first so that a refused append writes a record before validation and then so that a refused metadata update leaves its staging file. The guarded tests and the chaos program must fail under those mutations. One guard, the concurrent metadata test, did not fail at first, which is how its masking problem was found. A future mutation check should cover each new kind of refusal.
 - `FileRaftStorageFailurePathTest` (56 cases), `LogSanitizationTest` (10) and `RaftStorageDefaultsTest` (4): one test for every refusal and failure path that line coverage showed no test had ever executed. The list came from `mvn -Pcoverage test`, not from intuition, and it was long: the replay shape checks (gap, duplicate, term regression, first entry not following the boundary, misplaced prefix marker) had never run in any test. Also covered: historical truncate records below 1 or below the compaction boundary, torn-tail classification for a newer format, an unknown type, a version-0 record, a torn TRUNCATE record, a torn payload that contains the magic bytes or spans several scan windows, and a valid record several windows beyond an apparently torn header. Open: an orphaned compaction output, a second directory on an open instance, a lock held by another process (child JVM), failure after the channel exists, and close racing a failing open. Close: on the executor thread, a refused close task, and failure to close either channel or release the lock. Metadata: an unusable staging path and a metadata path that cannot be read at all. Writes: checked and unchecked failure writing a TRUNCATE record, failure to measure disk space, compaction running out of disk before publication, close or cleanup failing inside a failed compaction, and write verification catching a changed payload, a damaged stored checksum and a short write. Fencing: operations queued before a fence fail with the fencing failure and write nothing. Each test asserts the failure seen, the bytes on disk afterwards, and what the instance will and will not do next.
 - **Coverage as the work list.** Every line of `FileRaftStorage`, `AppendPlan` and `RaftStorage` is now executed by a test. Between Windows and Linux every line of `CompactionIo` is executed too: the directory force body runs on Linux and its early return runs on Windows. No partly taken branches remain in the storage package. Previously: `if (warn)` logging branches, and three defensive branches that are unreachable by construction (a second fence, a scheduling failure on an already-fenced instance, and a stale failed-open future). Before adding a refusal or failure path, run the coverage profile and confirm no `throw`, `fence` or failed-future line is unexecuted.
 - **Run it on Linux as an unprivileged user.** Root ignores read-only permissions, so as root the permission-based tests skip themselves and their paths go unexecuted. From the repository root, with Docker running: mount the repository read-only into `maven:3.9-eclipse-temurin-25`, copy it to a scratch directory inside the container, write a `toolchains.xml` pointing at `$JAVA_HOME`, install the parent POM with `mvn -N install`, then run `mvn -pl raftlog-core -Pcoverage install` with `--user 1000:1000`. The expected result is no skipped tests at all. A path whose only test depends on the platform or the user also needs a deterministic test through a `CompactionIo` seam; the replay I/O failure has both.
@@ -117,7 +126,7 @@ java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalCha
 - **The write limit is not a read limit** (in `FileRaftStorageFailurePathTest`): lowering `maxPayloadSizeMb` below the size of an entry already in the log must not make a healthy log replay as corrupt. A record being read is bounded by the file that holds it, and the CRC decides whether it is genuine. The limit still applies to new writes, and still serves as a plausibility check on torn writes.
 - **The coverage gate.** `mvn -Pcoverage verify` fails if the `dev.mars.raftlog.storage` package drops below 99% of lines or branches. It was validated by setting it to 100%, which Windows alone cannot reach, and confirming the build broke. The remaining fraction is the half of `CompactionIo.forceDirectory` that the other platform runs.
 - `WalChaosTest` (7 cases, in `raftlog-demo`): runs the chaos suite as part of the build. A chaos program that somebody has to remember to launch lets the build be green while every scenario is failing, so `WalChaos.run(category)` returns a summary, and `main` only turns it into an exit code. The test runs each category and the whole suite, requires zero failures, and pins the number of scenarios per category (6, 8, 9, 5 and 10, which is 38), so a scenario that is deleted or silently stops being registered fails the build. An unknown category throws, because running nothing and reporting success is worse than refusing. Every category, `nasty` included, can be run on its own.
-- `FileRaftStorageDiagnosticLoggingTest` (30 cases): the log must explain every decision the storage takes. A refusal reaches the caller only as a failed future, which the caller may drop, so each of the eight `WriteRejectionReason` values must produce exactly one ERROR event `storage.write.rejected` carrying the reason, the operation and the state the decision was taken from. It is an error because no refusal is routine: it means the layer above tried to break a Raft safety rule, or the disk is full, or the metadata cannot be read. It must also be the only error and must not fence, because what tells a refusal apart from a damaged storage is the event, not the level. The state must also be reported where it is established (`storage.open.completed`, `wal.replay.completed` with the tail, the boundary and whether the boundary was read or inferred) and where it is lost (`wal.tail.unknown` after a write that failed part way), so that a later `LOG_STATE_UNKNOWN` refusal can be traced to its cause. A file of intact records that is not a valid Raft log is logged with its violation, every verdict on an undecodable record is a WARN that names the defect, and compaction reports the boundary it stored and the bytes it reclaimed. One test reads the main sources and fails on any statement at DEBUG or above without an `event` key. Another reads every Java source in the project, the tests, the demo, the scripts and the fixture generator included, and fails on any `System.out`, `System.err` or `printStackTrace`: output that bypasses the logger has no level, no timestamp and no source. Mutants M29 to M34 remove or downgrade these statements and must be killed.
+- `FileRaftStorageDiagnosticLoggingTest` (30 cases): the log must explain every decision the storage takes. A refusal reaches the caller only as a failed future, which the caller may drop, so each of the eight `WriteRejectionReason` values must produce exactly one ERROR event `storage.write.rejected` carrying the reason, the operation and the state the decision was taken from. It is an error because no refusal is routine: it means the layer above tried to break a Raft safety rule, or the disk is full, or the metadata cannot be read. It must also be the only error and must not fence, because what tells a refusal apart from a damaged storage is the event, not the level. The state must also be reported where it is established (`storage.open.completed`, `wal.replay.completed` with the tail, the boundary and whether the boundary was read or inferred) and where it is lost (`wal.tail.unknown` after a write that failed part way), so that a later `LOG_STATE_UNKNOWN` refusal can be traced to its cause. A file of intact records that is not a valid Raft log is logged with its violation, every verdict on an undecodable record is a WARN that names the defect, and compaction reports the boundary it stored and the bytes it reclaimed. One test reads the main sources and fails on any statement at DEBUG or above without an `event` key. Another scans Java sources for `System.out`, `System.err` or `printStackTrace`: output that bypasses the logger has no level, no timestamp and no source. The former logging mutants are no longer run.
 - `FileRaftStorageFencingTest`: 13 cases covering fencing after a failed WAL, metadata or directory force, and the replay classification of torn tails versus corruption inside the committed region.
 
 Replay policy: only a structurally incomplete EOF fragment is treated as a torn write and truncated. A complete record with a bad CRC, a malformed header, arbitrary garbage, or an invalid record followed by a valid record is reported as `CorruptLogException`; the file is left untouched and the instance is fenced.
@@ -158,7 +167,7 @@ The 23 compaction cases were retained as behavioral failures before implementati
 | `raftlog-demo` | `ExampleInfoLoggingTest` | 2 | Example logging |
 | | **Total** | **650** | 635 in `raftlog-core`, 15 in `raftlog-demo` |
 
-Three of the core tests need POSIX file permissions and are skipped on Windows; they run in the Linux half of `java scripts/VerifyAll.java`, where nothing is skipped.
+Three core tests need POSIX file permissions and are skipped on Windows. Run the Maven verification on Linux as an unprivileged user and check that none are skipped there.
 
 ---
 
