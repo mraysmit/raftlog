@@ -55,17 +55,17 @@ import java.util.concurrent.TimeUnit;
  * mvn package -pl raftlog-demo -am
  * 
  * # Run with default configuration
- * java -jar raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar
+ * java -jar raftlog-demo/target/raftlog-demo-1.4.0.jar
  * 
  * # Run with CLI data directory override
- * java -jar raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar /path/to/data
+ * java -jar raftlog-demo/target/raftlog-demo-1.4.0.jar /path/to/data
  * 
  * # Run with system properties
- * java -Draftlog.dataDir=/path/to/data -Draftlog.verifyWrites=true -jar raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar
+ * java -Draftlog.dataDir=/path/to/data -Draftlog.verifyWrites=true -jar raftlog-demo/target/raftlog-demo-1.4.0.jar
  * 
  * # Run with environment variables (PowerShell)
  * $env:RAFTLOG_DATA_DIR = "/path/to/data"
- * java -jar raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar
+ * java -jar raftlog-demo/target/raftlog-demo-1.4.0.jar
  * </pre>
  * 
  * @see RaftStorageConfig

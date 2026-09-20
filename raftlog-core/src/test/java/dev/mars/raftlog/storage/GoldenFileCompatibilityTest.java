@@ -42,25 +42,32 @@ import java.util.stream.Stream;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Data directories written by the PUBLISHED 1.1.0 and 1.2.0 jars must keep working.
+ * Data directories already on disk must keep working.
  * <p>
- * The fixtures under {@code src/test/resources/golden} were produced by running those jars, as
- * downloaded from Maven Central and verified against their published checksums, through
- * {@code GoldenFileGenerator.java.txt}. Each scenario carries {@code expected.txt}: what that old
- * release itself replays from the files. That, not anyone's expectation, is the oracle here.
+ * The fixtures under {@code src/test/resources/golden} are organised by WAL record format, which
+ * is what decides whether a file can be read, not by which build wrote it:
+ * <ul>
+ *   <li>{@code format-1}: APPEND and TRUNCATE records only. A compacted log in this format has no
+ *       boundary record and simply begins above index 1. Written by a published jar downloaded
+ *       from Maven Central and verified against its published checksum;</li>
+ *   <li>{@code format-2}: the current format, in which a compacted log begins with a PREFIX
+ *       record carrying the boundary. Written by the current build.</li>
+ * </ul>
+ * {@code GoldenFileGenerator.java.txt} beside the fixtures is the program that produced them. Each
+ * scenario carries {@code expected.txt}: the replay recorded by the jar that wrote the files. That
+ * record, not anyone's expectation, is the oracle here.
  * <p>
  * Two contracts are pinned:
  * <ul>
- *   <li>a directory holding a well-formed log replays exactly as the old release replayed it,
- *       byte for byte in the payloads, keeps its metadata, is not modified by replay, and can be
- *       continued and restarted;</li>
- *   <li>a directory holding a log that those releases wrongly accepted (a gap, a duplicate index,
- *       a term regression) is refused by replay without being modified. That is a deliberate
- *       break, and this test is what keeps it deliberate.</li>
+ *   <li>a directory holding a well-formed log replays exactly as recorded, byte for byte in the
+ *       payloads, keeps its metadata, is not modified by replay, and can be continued and
+ *       restarted;</li>
+ *   <li>a directory holding a log that is not a valid Raft log (a gap, a duplicate index, a term
+ *       regression), which format 1 could contain, is refused by replay without being modified.</li>
  * </ul>
  */
 class GoldenFileCompatibilityTest {
-    /** Logs the old releases accepted that are not valid Raft logs. */
+    /** Logs that format 1 could contain and that are not valid Raft logs. */
     private static final Set<String> MALFORMED =
             Set.of("permissive-gap", "permissive-duplicate-index", "permissive-term-regression");
 
@@ -75,9 +82,9 @@ class GoldenFileCompatibilityTest {
 
     private static Stream<String> scenarios(boolean malformed) throws Exception {
         List<String> found = new ArrayList<>();
-        for (String version : List.of("1.1.0", "1.2.0")) {
-            try (Stream<Path> dirs = Files.list(goldenRoot().resolve(version))) {
-                dirs.filter(Files::isDirectory).map(d -> version + "/" + d.getFileName())
+        for (String format : List.of("format-1", "format-2")) {
+            try (Stream<Path> dirs = Files.list(goldenRoot().resolve(format))) {
+                dirs.filter(Files::isDirectory).map(d -> format + "/" + d.getFileName())
                         .filter(s -> MALFORMED.contains(s.substring(s.indexOf('/') + 1)) == malformed).forEach(found::add);
             }
         }
@@ -95,7 +102,7 @@ class GoldenFileCompatibilityTest {
             int eq = line.indexOf('=');
             if (eq > 0) p.put(line.substring(0, eq), line.substring(eq + 1).strip());
         }
-        assertEquals("OK", p.get("replay"), "the old release replayed every fixture successfully");
+        assertEquals("OK", p.get("replay"), "the jar that wrote the fixture replayed it successfully");
         List<LogEntryData> entries = new ArrayList<>();
         for (int i = 0; i < Integer.parseInt(p.get("entries")); i++) {
             String[] parts = p.get("entry." + i).split(",", -1);
@@ -139,6 +146,14 @@ class GoldenFileCompatibilityTest {
 
     // ------------------------------------------------------------------ the fixtures themselves
 
+    @Test void everyFormatHasItsFullSetOfScenarios() throws Exception {
+        for (var expected : java.util.Map.of("format-1", 13L, "format-2", 8L).entrySet()) {
+            try (Stream<Path> dirs = Files.list(goldenRoot().resolve(expected.getKey()))) {
+                assertEquals(expected.getValue(), dirs.filter(Files::isDirectory).count(), expected.getKey() + " scenarios");
+            }
+        }
+    }
+
     @Test void fixturesAreByteIdenticalToWhatThePublishedJarsWrote() throws Exception {
         // Guards against a checkout rewriting line endings inside a binary file.
         int verified = 0;
@@ -149,7 +164,12 @@ class GoldenFileCompatibilityTest {
             assertEquals(parts[0], HexFormat.of().formatHex(digest), "fixture was altered: " + parts[1]);
             verified++;
         }
-        assertTrue(verified >= 30, "expected the whole fixture set, verified only " + verified);
+        long onDisk;
+        try (Stream<Path> files = Files.walk(goldenRoot())) {
+            onDisk = files.filter(f -> List.of("raft.log", "meta.dat").contains(f.getFileName().toString())).count();
+        }
+        assertTrue(verified > 0, "no fixture was verified");
+        assertEquals(onDisk, verified, "every binary fixture must be listed in SHA256SUMS");
     }
 
     // ------------------------------------------------------------------ contract 1: well-formed logs keep working
@@ -175,8 +195,8 @@ class GoldenFileCompatibilityTest {
             assertSameLog(old.entries(), replayed, scenario + " replay");
             assertEquals(old.meta(), await(storage.loadMetadata()), scenario + " metadata");
 
-            // The log continues where the old release left it, and the metadata baseline holds.
-            long next = replayed.isEmpty() ? 1 : replayed.getLast().index() + 1;
+            // The log continues where the fixture left it, and the metadata baseline holds.
+            long next = replayed.isEmpty() ? await(storage.compactionBoundary()) + 1 : replayed.getLast().index() + 1;
             long term = replayed.isEmpty() ? 1 : replayed.getLast().term();
             LogEntryData added = new LogEntryData(next, term, "written-by-the-new-build".getBytes(StandardCharsets.UTF_8));
             await(storage.appendEntries(List.of(added)));
@@ -189,10 +209,10 @@ class GoldenFileCompatibilityTest {
         } finally { await(storage.closeAsync()); }
     }
 
-    @Test void logCompactedByAnOldReleaseHasItsBoundaryInferredSoTheCompactedPrefixStaysProtected() throws Exception {
-        // 1.2.0 compacted without writing a boundary marker: the file simply starts at entry 6.
+    @Test void compactedLogWithNoBoundaryRecordHasItsBoundaryInferredSoTheCompactedPrefixStaysProtected() throws Exception {
+        // Format 1 has no boundary record: the compacted file simply starts at entry 6.
         // Entries 1 to 5 are in the node's snapshot. Nothing may be written back into that range.
-        Path dir = copyOf("1.2.0/compacted-with-retained-entries");
+        Path dir = copyOf("format-1/compacted-with-retained-entries");
         FileRaftStorage storage = open(dir);
         try {
             List<LogEntryData> replayed = await(storage.replayLog());
@@ -216,8 +236,8 @@ class GoldenFileCompatibilityTest {
         assertEquals(6, DurableState.replayAfterRestart(dir).getFirst().index());
     }
 
-    @Test void nextCompactionOfAnOldLogWritesTheMarkerWithoutLosingTheInferredBoundary() throws Exception {
-        Path dir = copyOf("1.2.0/compacted-with-retained-entries");
+    @Test void nextCompactionOfAFormatOneLogWritesTheBoundaryRecordWithoutLosingTheInferredBoundary() throws Exception {
+        Path dir = copyOf("format-1/compacted-with-retained-entries");
         FileRaftStorage storage = open(dir);
         try {
             await(storage.replayLog());
@@ -229,13 +249,52 @@ class GoldenFileCompatibilityTest {
             assertEquals(8, await(reopened.replayLog()).getFirst().index());
             assertEquals(7L, await(reopened.compactionBoundary()), "now persisted by the marker");
         } finally { await(reopened.closeAsync()); }
+        assertEquals(WalRecords.PREFIX, WalRecords.read(dir.resolve("raft.log")).getFirst().type(), "upgraded to the current format");
+    }
+
+    // ------------------------------------------------------------------ the current format
+
+    @Test void compactedLogInTheCurrentFormatKeepsItsBoundaryEvenWhenNothingWasRetained() throws Exception {
+        Path dir = copyOf("format-2/compacted-to-empty");
+        WalRecords.Raw first = WalRecords.read(dir.resolve("raft.log")).getFirst();
+        assertEquals(WalRecords.PREFIX, first.type());
+        assertEquals(3, first.index());
+
+        FileRaftStorage storage = open(dir);
+        try {
+            assertTrue(await(storage.replayLog()).isEmpty());
+            assertEquals(3L, await(storage.compactionBoundary()), "read back from the PREFIX record");
+            try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
+                for (long wrong : new long[]{1, 3, 5}) {
+                    var rejected = assertInstanceOf(FileRaftStorage.WriteRejectedException.class,
+                            assertThrows(ExecutionException.class,
+                                    () -> await(storage.appendEntries(List.of(new LogEntryData(wrong, 2, new byte[0]))))).getCause());
+                    assertEquals(WriteRejectionReason.INDEX_NOT_CONTIGUOUS, rejected.reason());
+                }
+            }
+            await(storage.appendEntries(List.of(new LogEntryData(4, 2, new byte[]{4}))));
+        } finally { await(storage.closeAsync()); }
+        assertEquals(4, DurableState.replayAfterRestart(dir).getFirst().index());
+    }
+
+    @Test void compactedLogInTheCurrentFormatBeginsWithItsBoundaryRecord() throws Exception {
+        Path dir = copyOf("format-2/compacted-with-retained-entries");
+        List<WalRecords.Raw> records = WalRecords.read(dir.resolve("raft.log"));
+        assertEquals(WalRecords.PREFIX, records.getFirst().type());
+        assertEquals(5, records.getFirst().index());
+        assertEquals(1, records.stream().filter(r -> r.type() == WalRecords.PREFIX).count());
+        FileRaftStorage storage = open(dir);
+        try {
+            assertEquals(6, await(storage.replayLog()).getFirst().index());
+            assertEquals(5L, await(storage.compactionBoundary()));
+        } finally { await(storage.closeAsync()); }
     }
 
     // ------------------------------------------------------------------ contract 2: malformed logs are refused, untouched
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("malformedScenarios")
-    void logThatAnOldReleaseWronglyAcceptedIsRefusedWithoutBeingModified(String scenario) throws Exception {
+    void logThatIsNotAValidRaftLogIsRefusedWithoutBeingModified(String scenario) throws Exception {
         Path dir = copyOf(scenario);
         FileRaftStorage storage = open(dir);
         try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {

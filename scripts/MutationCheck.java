@@ -93,7 +93,7 @@ public class MutationCheck {
             "                if (position + requested <= fileSize) {\n", "                if (false) {\n", FAILURES),
         new Mutant("M10", "a torn compaction boundary is reported, never repaired", STORAGE,
             "        if (type == TYPE_PREFIX) return false;\n", "", FAILURES),
-        new Mutant("M11", "the boundary of a log compacted by an old release is inferred", STORAGE,
+        new Mutant("M11", "the boundary of a compacted log with no PREFIX record is inferred", STORAGE,
             "        prefixBoundary = entries.isEmpty() ? boundary : entries.getFirst().index() - 1;\n",
             "        prefixBoundary = boundary;\n", "GoldenFileCompatibilityTest"),
         new Mutant("M12", "replay refuses a log that is not a well-formed Raft log", STORAGE,
