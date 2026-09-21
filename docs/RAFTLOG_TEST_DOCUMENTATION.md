@@ -148,7 +148,7 @@ The 23 compaction cases were retained as behavioral failures before implementati
 | `raftlog-core` | `FileRaftStorageCompactionFailureTest` | 14 | Prefix compaction under injected I/O failure |
 | `raftlog-core` | `FileRaftStoragePrefixCompactionTest` | 9 | Prefix compaction |
 | `raftlog-core` | `FileRaftStorageLoggingTest` | 5 | Bounded, single-line, correlated log output |
-| `raftlog-core` | `FileRaftStorageDiagnosticLoggingTest` | 30 | Every refusal, verdict, state change and compaction publication step is logged |
+| `raftlog-core` | `FileRaftStorageDiagnosticLoggingTest` | 31 | Every refusal, verdict, state change and compaction publication step is logged |
 | `raftlog-core` | `LogSanitizationTest` | 10 | Untrusted text never reaches the log unbounded or multi-line |
 | `raftlog-core` | `GoldenFileCompatibilityTest` | 27 | Existing data directories, by WAL format |
 | `raftlog-core` | `ProtectionGuaranteeTest` | 24 | Thread safety and crash consistency |
@@ -165,7 +165,7 @@ The 23 compaction cases were retained as behavioral failures before implementati
 | `raftlog-demo` | `KeyValueExampleTest` | 4 | Key/value replay example |
 | `raftlog-demo` | `DemoInfoLoggingSafetyTest` | 2 | Demo logging |
 | `raftlog-demo` | `ExampleInfoLoggingTest` | 2 | Example logging |
-| | **Total** | **650** | 635 in `raftlog-core`, 15 in `raftlog-demo` |
+| | **Total** | **654** | 639 in `raftlog-core`, 15 in `raftlog-demo` |
 
 Three core tests need POSIX file permissions and are skipped on Windows. Run the Maven verification on Linux as an unprivileged user and check that none are skipped there.
 
