@@ -6,12 +6,12 @@ This document provides the exact, repo-specific process for publishing RaftLog t
 
 This release makes the storage refuse anything that is not a valid Raft log, before writing a byte. The rules are listed under [Invariants the storage enforces](RAFTLOG_RAFT_WAL_DESIGN.md#invariants-the-storage-enforces). [Prefix compaction](RAFTLOG_RAFT_WAL_DESIGN.md#139-prefix-compaction-implementation-notes) persists its boundary in the WAL as a `PREFIX` record, which is record format 2. `AppendPlan` and configuration are strict: inconsistent arguments and values that cannot be parsed are errors, not things to work around. Parent, core and demo must all use 1.4.0.
 
-Before publishing, run `mvn -Pcoverage clean verify` and complete the separate packaged-program,
+Before publishing, run `mvn -B -Pcoverage clean verify` and complete the separate packaged-program,
 model-soak, and unprivileged-Linux checks in the [test documentation](RAFTLOG_TEST_DOCUMENTATION.md#run-everything).
 The former Java verification runner and mutation gate have been removed; Maven does not replace
 their combined behavior.
 
-Prepare signatures and source/Javadoc artifacts with `mvn -B -Prelease -DskipTests verify` after the test runs. Publish the same reviewed source with `mvn -B -Prelease -DskipTests deploy`. The configured plugin automatically publishes and waits for `published`; an upload or local install alone is not success. Confirm the parent/core/demo POMs and JARs from Central and compare hashes, then publish the release Git tag and source revision. Follow the [Central Portal Maven documentation](https://central.sonatype.org/publish/publish-portal-maven/).
+Prepare signatures and source/Javadoc artifacts with `mvn -B -Prelease -DskipTests clean verify` after the test runs. Publish the verified source with `mvn -B -Prelease -DskipTests deploy`. The configured plugin automatically publishes and waits for `published`; an upload or local install alone is not success. Confirm the parent/core/demo POMs and JARs from Central and compare hashes, then publish the release Git tag and source revision. Follow the [Central Portal Maven documentation](https://central.sonatype.org/publish/publish-portal-maven/).
 
 Application snapshot coordination and deployment-filesystem power-loss acceptance remain the consuming project's responsibility.
 
@@ -49,7 +49,7 @@ mvn -version
 gpg --version
 
 # Verify project builds successfully
-mvn -Pcoverage clean verify
+mvn -B -Pcoverage clean verify
 ```
 
 ---
@@ -68,32 +68,39 @@ Remove-Item -Force -Recurse ".\target" -ErrorAction SilentlyContinue
 ```bash
 # 1) Verify state
 git status
-mvn -Pcoverage clean verify
+mvn -B -Pcoverage clean verify
 
 # 2) Set release version
-mvn versions:set -DnewVersion=X.Y.Z
-mvn versions:commit
+mvn -B versions:set -DnewVersion=X.Y.Z
+mvn -B versions:commit
 
 # 3) Commit version bump
 git add -A
 git commit -m "Release X.Y.Z"
 
-# 4) Publish to Central Portal
-mvn -Prelease -DskipTests clean deploy
+# 4) Prepare and verify signed release artifacts from clean target directories
+mvn -B -Prelease -DskipTests clean verify
 
-# 5) Tag and publish git refs
+# 5) Publish the verified source to Central Portal
+mvn -B -Prelease -DskipTests deploy
+
+# 6) Tag and publish git refs
 git tag vX.Y.Z
 git push origin main
 git push origin vX.Y.Z
 
-# 6) Create GitHub release notes
+# 7) Create GitHub release notes
 gh release create vX.Y.Z --title "vX.Y.Z" --generate-notes
 ```
 
 Notes:
-1. Central versions are immutable. If `X.Y.Z` already exists, bump and retry.
-2. Keep publishing plugin in main build plugins (not in an inactive profile).
-3. Do not add legacy OSSRH `distributionManagement` URLs.
+1. `-B` is Maven batch mode. Release commands use it consistently so they never wait for
+   interactive Maven input and produce stable automation output.
+2. `clean verify` prevents stale files from entering the signed artifacts. Run `deploy` next
+   without another `clean`.
+3. Central versions are immutable. If `X.Y.Z` already exists, bump and retry.
+4. Keep publishing plugin in main build plugins (not in an inactive profile).
+5. Do not add legacy OSSRH `distributionManagement` URLs.
 
 ---
 
@@ -158,21 +165,24 @@ Use this exact sequence for publishing a new release.
 ```bash
 # 1) Ensure clean branch and verify everything
 git status
-mvn -Pcoverage clean verify
+mvn -B -Pcoverage clean verify
 # Complete the remaining checks in docs/RAFTLOG_TEST_DOCUMENTATION.md#run-everything
 
 # 2) Set release version
-mvn versions:set -DnewVersion=1.4.0
-mvn versions:commit
+mvn -B versions:set -DnewVersion=1.4.0
+mvn -B versions:commit
 
 # 3) Commit version bump
 git add -A
 git commit -m "Release 1.4.0"
 
-# 4) Publish to Central Portal
-mvn -Prelease -DskipTests clean deploy
+# 4) Prepare and verify signed release artifacts from clean target directories
+mvn -B -Prelease -DskipTests clean verify
 
-# 5) Tag and push after successful publish
+# 5) Publish the verified source to Central Portal
+mvn -B -Prelease -DskipTests deploy
+
+# 6) Tag and push after successful publish
 git tag v1.4.0
 git push origin main
 git push origin v1.4.0
@@ -251,7 +261,7 @@ In `~/.m2/settings.xml`:
 
 ```bash
 echo test | gpg --clearsign
-mvn -Prelease -DskipTests clean install
+mvn -B -Prelease -DskipTests clean install
 ```
 
 ### GPG Agent for Passphrase Caching (Optional)
@@ -271,7 +281,7 @@ max-cache-ttl 7200
 
 ```bash
 # Skip GPG signing for local testing
-mvn clean install -Prelease -Dgpg.skip=true
+mvn -B -Prelease -Dgpg.skip=true clean install
 ```
 
 ---
@@ -292,9 +302,10 @@ mvn clean install -Prelease -Dgpg.skip=true
 The version already exists in Central. Bump and redeploy:
 
 ```bash
-mvn versions:set -DnewVersion=X.Y.(Z+1)
-mvn versions:commit
-mvn -Prelease -DskipTests clean deploy
+mvn -B versions:set -DnewVersion=X.Y.(Z+1)
+mvn -B versions:commit
+mvn -B -Prelease -DskipTests clean verify
+mvn -B -Prelease -DskipTests deploy
 ```
 
 #### 3. GPG hangs or `.asc` files are locked on Windows
@@ -318,7 +329,7 @@ Also verify in `~/.m2/settings.xml`:
 #### 5. Local-only build without GPG
 
 ```powershell
-mvn clean install -Prelease -DskipTests "-Dgpg.skip=true"
+mvn -B -Prelease -DskipTests "-Dgpg.skip=true" clean install
 ```
 
 Use only for local development, not Central publishing.
@@ -336,12 +347,12 @@ mvn --encrypt-password your-central-token-password
 
 Before releasing, verify:
 
-- [ ] `mvn -Pcoverage clean verify` passes for both modules, with no unexpected skipped tests
+- [ ] `mvn -B -Pcoverage clean verify` passes for both modules, with no unexpected skipped tests
 - [ ] Packaged demo examples run twice against the same directories; packaged chaos run reports zero failures
 - [ ] The 2000-seed model soak reports `MODEL SOAK: ran 2000 seeds`
 - [ ] The build and separate checks pass on Linux as an unprivileged user, with no permission-test skips
 - [ ] The deleted mutation gate is not reported as having passed; any replacement is documented separately
-- [ ] No SNAPSHOT dependencies: `mvn dependency:tree` shows no `SNAPSHOT` artifacts
+- [ ] No SNAPSHOT dependencies: `mvn -B dependency:tree` shows no `SNAPSHOT` artifacts
 - [ ] Documentation is updated
 - [ ] Version numbers are correct
 - [ ] Git working directory is clean
