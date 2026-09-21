@@ -46,11 +46,14 @@ class FileRaftStorageLoggingTest {
     Path dir;
 
     private Logger logger;
+    private Level levelBefore;
     private ListAppender<ILoggingEvent> appender;
 
     @BeforeEach
     void captureStorageLogs() {
         logger = (Logger) LoggerFactory.getLogger(FileRaftStorage.class);
+        levelBefore = logger.getLevel();
+        logger.setLevel(Level.DEBUG);
         appender = new ListAppender<>();
         appender.start();
         logger.addAppender(appender);
@@ -59,6 +62,7 @@ class FileRaftStorageLoggingTest {
     @AfterEach
     void stopCapturingStorageLogs() {
         logger.detachAppender(appender);
+        logger.setLevel(levelBefore);
         appender.stop();
     }
 

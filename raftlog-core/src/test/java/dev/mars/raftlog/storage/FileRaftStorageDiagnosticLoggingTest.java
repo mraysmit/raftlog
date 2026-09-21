@@ -52,14 +52,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * The log must explain every decision the storage takes about a write or about a file it reads.
  * <p>
  * A refusal reaches the caller as a failed future, and a caller that drops the future leaves no
- * trace of it. The storage therefore logs every refusal itself: once, at ERROR, with the reason and
- * with the state the decision was taken from. It is an error because no refusal is routine: a
- * correct consensus layer never sends a gap, a term regression or a second vote, so a refusal means
- * the layer above tried to break a Raft safety rule, or the disk is full, or the metadata cannot be
- * read, and each of those needs a person. What tells a refusal apart from a damaged storage is the
- * event, not the level: after {@code storage.write.rejected} nothing was written and the instance
- * is usable, after {@code storage.fenced} it is not. The same state is reported when it is established (open and replay) and when it is lost (a
- * write that failed part way), so a refusal can be traced back to its cause from the log alone.
+ * trace of it. The storage therefore logs each kind of refusal itself at ERROR, with the reason and
+ * with the state the decision was taken from. Repeated refusals of the same reason are sampled at
+ * powers of two and summarized on close so an adversarial caller cannot flood the log. It is an
+ * error because no refusal is routine: a correct consensus layer never sends a gap, a term
+ * regression or a second vote, so a refusal means the layer above tried to break a Raft safety
+ * rule, or the disk is full, or the metadata cannot be read. What tells a refusal apart from a
+ * damaged storage is the event, not the level: after {@code storage.write.rejected} nothing was
+ * written and the instance is usable, after {@code storage.fenced} it is not. The same state is
+ * reported when it is established (open and replay) and when it is lost (a write that failed part
+ * way), so a refusal can be traced back to its cause from the log alone.
  */
 class FileRaftStorageDiagnosticLoggingTest {
 
@@ -87,7 +89,7 @@ class FileRaftStorageDiagnosticLoggingTest {
         appender.stop();
     }
 
-    // ------------------------------------------------------------------ every refusal is logged
+    // ------------------------------------------------------------------ refusal diagnostics
 
     @Test void appendThatDoesNotContinueTheLogIsLoggedWithTheTailItWasCheckedAgainst() throws Exception {
         FileRaftStorage storage = openWithEntries(entry(1, 1), entry(2, 3));
@@ -101,6 +103,31 @@ class FileRaftStorageDiagnosticLoggingTest {
             assertTrue(refusal.getFormattedMessage().contains("Append must start at index 3, got 5"),
                     refusal.getFormattedMessage());
         } finally { await(storage.closeAsync()); }
+    }
+
+    @Test void repeatedNonContiguousAppendsAreSampledAndSummarized() throws Exception {
+        FileRaftStorage storage = open(dir);
+        for (int i = 0; i < 100; i++) {
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> await(storage.appendEntries(List.of(entry(2, 1)))));
+            var rejected = assertInstanceOf(FileRaftStorage.WriteRejectedException.class, failure.getCause());
+            assertEquals(WriteRejectionReason.INDEX_NOT_CONTIGUOUS, rejected.reason());
+        }
+
+        List<ILoggingEvent> sampled = events("storage.write.rejected");
+        List<Long> expectedCounts = List.of(1L, 2L, 4L, 8L, 16L, 32L, 64L);
+        assertEquals(expectedCounts.size(), sampled.size());
+        for (int i = 0; i < expectedCounts.size(); i++) {
+            assertKeyValue(sampled.get(i), "rejectionCount", expectedCounts.get(i));
+        }
+
+        await(storage.closeAsync());
+        ILoggingEvent summary = only("storage.write.rejection_summary");
+        assertEquals(Level.INFO, summary.getLevel());
+        assertKeyValue(summary, "reason", WriteRejectionReason.INDEX_NOT_CONTIGUOUS.name());
+        assertKeyValue(summary, "rejectionCount", 100L);
+        assertKeyValue(summary, "loggedCount", 7L);
+        assertKeyValue(summary, "suppressedCount", 93L);
     }
 
     @Test void appendWithATermBelowTheTailIsLogged() throws Exception {

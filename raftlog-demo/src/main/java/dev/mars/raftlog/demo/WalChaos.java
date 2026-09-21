@@ -1657,7 +1657,6 @@ public class WalChaos {
             if (e.getCause() instanceof FileRaftStorage.WriteRejectedException rejected) {
                 for (WriteRejectionReason reason : acceptableRefusals) {
                     if (rejected.reason() == reason) {
-                        LOG.debug("    refused ({}): {}", reason, rejected.getMessage());
                         return Outcome.REFUSED;
                     }
                 }
