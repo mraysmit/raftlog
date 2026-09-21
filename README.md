@@ -348,6 +348,7 @@ raftlog/
 │       │   └── storage/    # RaftStorage, FileRaftStorage, RaftStorageConfig, AppendPlan
 │       └── test/java/      # Unit tests (154 tests)
 ├── raftlog-demo/           # Demo applications and chaos scenarios
+│   ├── README.md           # Demo programs, configuration, logging, and cleanup
 │   └── src/main/java/      # Basic WAL and key/value replay examples
 ├── LICENSE                 # Apache License 2.0
 ├── NOTICE                  # Third-party attributions
@@ -355,6 +356,9 @@ raftlog/
 ```
 
 ## Running the Demo
+
+See the [RaftLog Demo guide](raftlog-demo/README.md) for all three runnable
+programs, configuration differences, chaos categories, logging, and cleanup.
 
 ```bash
 # Build the project
@@ -376,7 +380,9 @@ java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar \
 
 ## Documentation
 
-See [RAFTLOG_RAFT_WAL_DESIGN.md](docs/RAFTLOG_RAFT_WAL_DESIGN.md) for the complete design specification.
+- [RaftLog Demo guide](raftlog-demo/README.md)
+- [RaftLog WAL design](docs/RAFTLOG_RAFT_WAL_DESIGN.md)
+- [Test documentation](docs/RAFTLOG_TEST_DOCUMENTATION.md)
 
 ## License
 
