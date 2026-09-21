@@ -259,13 +259,18 @@ the host application's logger. Debug events carry `storageId` and `operationId` 
 started, completed or failed operations can be followed across threads. Log messages report
 record indices and payload sizes; the core does not log payload bytes.
 
+Maven tests log at INFO by default. Set `RAFTLOG_TEST_LOG_LEVEL=DEBUG` to capture detailed
+per-operation diagnostics while investigating a test failure.
+
 A refused write reaches the caller as a failed future, which the caller may drop, so the storage
-logs every refusal itself, at ERROR. No refusal is routine: a correct consensus layer never sends
-a gap, a term regression or a second vote in a term, so a refusal means the layer above tried to
+logs refusals itself at ERROR. Repeated refusals with the same reason are sampled at counts 1, 2,
+4, 8 and so on, then reported exactly in `storage.write.rejection_summary` when the storage closes.
+No refusal is routine: a correct consensus layer never sends a gap, a term regression or a second
+vote in a term, so a refusal means the layer above tried to
 break a Raft safety rule, or the disk is full, or the metadata cannot be read. The event, not the
 level, tells a refusal apart from a damaged storage: after `storage.write.rejected` the instance
 stays usable, after `storage.fenced` it does not. `storage.write.rejected` carries the `reason` (a
-`WriteRejectionReason`), the `operation`, and the state the decision was taken from: `tailKnown`,
+`WriteRejectionReason`), the `operation`, `rejectionCount`, and the state the decision was taken from: `tailKnown`,
 `lastIndex`, `lastTerm`, `prefixBoundary`, `persistedTerm` and `metadataReadable`. Nothing was
 written when this event appears.
 

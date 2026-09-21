@@ -15,6 +15,7 @@
  */
 package dev.mars.raftlog.demo;
 
+import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
@@ -82,15 +83,18 @@ class ExampleInfoLoggingTest {
 
     private static List<String> capture(Class<?> loggerOwner, ThrowingRunnable action) throws Exception {
         Logger logger = (Logger) LoggerFactory.getLogger(loggerOwner);
+        Level levelBefore = logger.getLevel();
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
         appender.start();
         logger.addAppender(appender);
+        logger.setLevel(Level.DEBUG);
         try {
             action.run();
             return appender.list.stream()
                     .map(ILoggingEvent::getFormattedMessage)
                     .toList();
         } finally {
+            logger.setLevel(levelBefore);
             logger.detachAppender(appender);
             appender.stop();
         }

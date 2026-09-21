@@ -37,6 +37,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.function.Supplier;
 import java.util.zip.CRC32C;
 
@@ -179,6 +180,9 @@ public final class FileRaftStorage implements RaftStorage {
     private final CompactionIo compactionIo;
     private final String storageId = UUID.randomUUID().toString();
     private final AtomicLong operationSequence = new AtomicLong();
+    /** Counts refusals by reason so a repeated out-of-order writer cannot flood the log. */
+    private final AtomicLongArray rejectionCounts =
+            new AtomicLongArray(WriteRejectionReason.values().length);
 
     /**
      * Written on the WAL executor by open(); also read on caller threads for log
@@ -521,6 +525,7 @@ public final class FileRaftStorage implements RaftStorage {
                                 .log("Error closing log channel: {}", e.getMessage());
                     }
                     cleanupSucceeded &= releaseExclusiveLock();
+                    logRejectionSummaries();
                     long elapsedMs = (System.nanoTime() - closeStarted) / 1_000_000;
                     LOG.atInfo().addKeyValue("event", cleanupSucceeded
                                     ? "storage.close.completed" : "storage.close.completed_with_warnings")
@@ -771,12 +776,17 @@ public final class FileRaftStorage implements RaftStorage {
             if (entry.payload() != null && entry.payload().length > maxPayloadSize) {
                 // Decided on the caller's thread, where the tail state must not be read.
                 String message = "Payload too large: " + entry.payload().length + " bytes (max: " + maxPayloadSize + ")";
-                LOG.atError().addKeyValue("event", "storage.write.rejected")
-                        .addKeyValue("reason", WriteRejectionReason.PAYLOAD_TOO_LARGE.name())
-                        .addKeyValue("operation", "append")
-                        .addKeyValue("entryIndex", entry.index())
-                        .log("Refused append: {} ({}). Nothing was written",
-                                WriteRejectionReason.PAYLOAD_TOO_LARGE, message);
+                long rejectionCount = rejectionCounts.incrementAndGet(
+                        WriteRejectionReason.PAYLOAD_TOO_LARGE.ordinal());
+                if (isPowerOfTwo(rejectionCount)) {
+                    LOG.atError().addKeyValue("event", "storage.write.rejected")
+                            .addKeyValue("reason", WriteRejectionReason.PAYLOAD_TOO_LARGE.name())
+                            .addKeyValue("operation", "append")
+                            .addKeyValue("entryIndex", entry.index())
+                            .addKeyValue("rejectionCount", rejectionCount)
+                            .log("Refused append: {} ({}). Nothing was written",
+                                    WriteRejectionReason.PAYLOAD_TOO_LARGE, message);
+                }
                 return CompletableFuture.failedFuture(
                         new WriteRejectedException(WriteRejectionReason.PAYLOAD_TOO_LARGE, message));
             }
@@ -1048,26 +1058,50 @@ public final class FileRaftStorage implements RaftStorage {
 
     /**
      * Logs a refusal and returns the exception for the caller to throw. A refusal reaches the
-     * caller only as a failed future, which the caller may drop, so the storage records it
-     * itself, with the state the decision was taken from. It is an ERROR because no refusal is
-     * routine: a correct consensus layer never sends a gap, a term regression or a second vote,
-     * so a refusal means the layer above tried to break a Raft safety rule, or the disk is full,
-     * or the metadata cannot be read. The event, not the level, tells it apart from a damaged
-     * storage: nothing was written and the instance stays usable, unlike {@code storage.fenced}.
-     * Called only on the WAL executor, which owns that state.
+     * caller only as a failed future, which the caller may drop, so the storage records it with
+     * the state the decision was taken from. Repeated refusals of the same reason are sampled at
+     * powers of two and summarized on close; this preserves the first occurrence and the growth
+     * rate without allowing a broken or adversarial caller to flood the log. The event, not the
+     * level, tells a refusal apart from a
+     * damaged storage: nothing was written and the instance stays usable, unlike
+     * {@code storage.fenced}. Called only on the WAL executor, which owns that state.
      */
     private WriteRejectedException refuse(WriteRejectionReason reason, String message) {
-        LOG.atError().addKeyValue("event", "storage.write.rejected")
-                .addKeyValue("reason", reason.name())
-                .addKeyValue("operation", currentOperation)
-                .addKeyValue("tailKnown", logStateKnown)
-                .addKeyValue("lastIndex", lastIndex)
-                .addKeyValue("lastTerm", lastTerm())
-                .addKeyValue("prefixBoundary", prefixBoundary)
-                .addKeyValue("persistedTerm", persistedTerm)
-                .addKeyValue("metadataReadable", !metaUnreadable)
-                .log("Refused {}: {} ({}). Nothing was written", currentOperation, reason, message);
+        long rejectionCount = rejectionCounts.incrementAndGet(reason.ordinal());
+        if (isPowerOfTwo(rejectionCount)) {
+            LOG.atError().addKeyValue("event", "storage.write.rejected")
+                    .addKeyValue("reason", reason.name())
+                    .addKeyValue("operation", currentOperation)
+                    .addKeyValue("rejectionCount", rejectionCount)
+                    .addKeyValue("tailKnown", logStateKnown)
+                    .addKeyValue("lastIndex", lastIndex)
+                    .addKeyValue("lastTerm", lastTerm())
+                    .addKeyValue("prefixBoundary", prefixBoundary)
+                    .addKeyValue("persistedTerm", persistedTerm)
+                    .addKeyValue("metadataReadable", !metaUnreadable)
+                    .log("Refused {}: {} ({}). Nothing was written", currentOperation, reason, message);
+        }
         return new WriteRejectedException(reason, message);
+    }
+
+    private static boolean isPowerOfTwo(long value) {
+        return value > 0 && (value & (value - 1)) == 0;
+    }
+
+    /** Reports exact totals after sampling repeated refusals. */
+    private void logRejectionSummaries() {
+        for (WriteRejectionReason reason : WriteRejectionReason.values()) {
+            long total = rejectionCounts.get(reason.ordinal());
+            if (total <= 1) continue;
+            long logged = Long.SIZE - Long.numberOfLeadingZeros(total);
+            LOG.atInfo().addKeyValue("event", "storage.write.rejection_summary")
+                    .addKeyValue("reason", reason.name())
+                    .addKeyValue("rejectionCount", total)
+                    .addKeyValue("loggedCount", logged)
+                    .addKeyValue("suppressedCount", total - logged)
+                    .log("Write refusal summary: reason={}, total={}, individuallyLogged={}, suppressed={}",
+                            reason, total, logged, total - logged);
+        }
     }
 
     /**

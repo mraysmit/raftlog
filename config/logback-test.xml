@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
     <property name="TEST_LOG_DIR" value="${raftlog.test.log.dir:-${user.dir}/logs}"/>
+    <property name="TEST_LOG_LEVEL" value="${RAFTLOG_TEST_LOG_LEVEL:-INFO}"/>
     <timestamp key="testRunLocalTimestamp" datePattern="yyyy-MM-dd_HH-mm-ss" timeReference="contextBirth"/>
 
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
@@ -20,7 +21,7 @@
         </encoder>
     </appender>
 
-    <logger name="dev.mars.raftlog" level="DEBUG"/>
+    <logger name="dev.mars.raftlog" level="${TEST_LOG_LEVEL}"/>
     <logger name="org.apache" level="WARN"/>
     <logger name="io.netty" level="WARN"/>
     <logger name="io.grpc" level="WARN"/>
