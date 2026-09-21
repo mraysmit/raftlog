@@ -11,7 +11,7 @@ model-soak, and unprivileged-Linux checks in the [test documentation](RAFTLOG_TE
 The former Java verification runner and mutation gate have been removed; Maven does not replace
 their combined behavior.
 
-Prepare signatures and source/Javadoc artifacts with `mvn -B -Prelease -DskipTests clean verify` after the test runs. Publish the verified source with `mvn -B -Prelease -DskipTests deploy`. The configured plugin automatically publishes and waits for `published`; an upload or local install alone is not success. Confirm the parent/core/demo POMs and JARs from Central and compare hashes, then publish the release Git tag and source revision. Follow the [Central Portal Maven documentation](https://central.sonatype.org/publish/publish-portal-maven/).
+Prepare signatures and source/Javadoc artifacts with `mvn -B -Prelease -DskipTests clean verify` after the test runs. Publish the verified source with `mvn -B -Prelease -DskipTests clean deploy`. The configured plugin automatically publishes and waits for `published`; an upload or local install alone is not success. Confirm the parent/core/demo POMs and JARs from Central and compare hashes, then publish the release Git tag and source revision. Follow the [Central Portal Maven documentation](https://central.sonatype.org/publish/publish-portal-maven/).
 
 Application snapshot coordination and deployment-filesystem power-loss acceptance remain the consuming project's responsibility.
 
@@ -82,7 +82,7 @@ git commit -m "Release X.Y.Z"
 mvn -B -Prelease -DskipTests clean verify
 
 # 5) Publish the verified source to Central Portal
-mvn -B -Prelease -DskipTests deploy
+mvn -B -Prelease -DskipTests clean deploy
 
 # 6) Tag and publish git refs
 git tag vX.Y.Z
@@ -96,8 +96,8 @@ gh release create vX.Y.Z --title "vX.Y.Z" --generate-notes
 Notes:
 1. `-B` is Maven batch mode. Release commands use it consistently so they never wait for
    interactive Maven input and produce stable automation output.
-2. `clean verify` prevents stale files from entering the signed artifacts. Run `deploy` next
-   without another `clean`.
+2. Both release-profile commands start with `clean` so stale or previously shaded artifacts
+   cannot enter the signed bundle. They must run from the same reviewed commit.
 3. Central versions are immutable. If `X.Y.Z` already exists, bump and retry.
 4. Keep publishing plugin in main build plugins (not in an inactive profile).
 5. Do not add legacy OSSRH `distributionManagement` URLs.
@@ -180,7 +180,7 @@ git commit -m "Release 1.4.0"
 mvn -B -Prelease -DskipTests clean verify
 
 # 5) Publish the verified source to Central Portal
-mvn -B -Prelease -DskipTests deploy
+mvn -B -Prelease -DskipTests clean deploy
 
 # 6) Tag and push after successful publish
 git tag v1.4.0
@@ -305,7 +305,7 @@ The version already exists in Central. Bump and redeploy:
 mvn -B versions:set -DnewVersion=X.Y.(Z+1)
 mvn -B versions:commit
 mvn -B -Prelease -DskipTests clean verify
-mvn -B -Prelease -DskipTests deploy
+mvn -B -Prelease -DskipTests clean deploy
 ```
 
 #### 3. GPG hangs or `.asc` files are locked on Windows
