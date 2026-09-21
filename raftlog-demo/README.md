@@ -31,6 +31,37 @@ updates the persistent term and vote, replays existing entries, appends two new
 entries, performs a durability barrier, and verifies the appended entries by
 replaying them.
 
+The central use case looks like this:
+
+```java
+RaftStorageConfig config = RaftStorageConfig.builder()
+        .dataDir("./run-data/wal-demo")
+        .build();
+
+try (FileRaftStorage storage = new FileRaftStorage(config)) {
+    storage.open().join();
+
+    var metadata = storage.loadMetadata().join();
+    long nextTerm = metadata.currentTerm() + 1;
+    storage.updateMetadata(nextTerm, Optional.of("node-1")).join();
+
+    List<RaftStorage.LogEntryData> existing = storage.replayLog().join();
+    long nextIndex = existing.isEmpty()
+            ? 1
+            : existing.get(existing.size() - 1).index() + 1;
+
+    storage.appendEntries(List.of(
+            new RaftStorage.LogEntryData(
+                    nextIndex, nextTerm, "SET greeting hello".getBytes(UTF_8))))
+            .join();
+    storage.sync().join();
+}
+```
+
+This is a shortened version of the demo. It assumes imports for
+`FileRaftStorage`, `RaftStorage`, `RaftStorageConfig`, `List`, `Optional`, and
+the static `StandardCharsets.UTF_8` constant.
+
 ```bash
 # Use RaftLog's default data directory (~/.raftlog/data)
 java -jar raftlog-demo/target/raftlog-demo-1.4.0.jar
@@ -64,6 +95,43 @@ writes length-prefixed UTF-8 key/value pairs, replays the complete log, and
 reconstructs a last-write-wins map. The key/value layer is example code, not an
 API supplied by `raftlog-core`.
 
+A minimal application-specific encoding and replay loop is:
+
+```java
+record KeyValue(String key, String value) {}
+
+static byte[] encode(KeyValue item) {
+    byte[] key = item.key().getBytes(UTF_8);
+    byte[] value = item.value().getBytes(UTF_8);
+    return ByteBuffer.allocate(8 + key.length + value.length)
+            .putInt(key.length).put(key)
+            .putInt(value.length).put(value)
+            .array();
+}
+
+try (FileRaftStorage storage = new FileRaftStorage(
+        RaftStorageConfig.builder().dataDir("./run-data/key-values").build())) {
+    storage.open().join();
+    List<RaftStorage.LogEntryData> existing = storage.replayLog().join();
+    long nextIndex = existing.isEmpty()
+            ? 1
+            : existing.get(existing.size() - 1).index() + 1;
+
+    storage.appendEntries(List.of(new RaftStorage.LogEntryData(
+            nextIndex, 1, encode(new KeyValue("ui.theme", "dark")))))
+            .join();
+    storage.sync().join();
+
+    List<RaftStorage.LogEntryData> recovered = storage.replayLog().join();
+    // Decode each recovered payload and apply it to the application's map.
+}
+```
+
+The full example also validates payload lengths and UTF-8, decodes every
+record, and replaces earlier map values when a key appears again. The snippet
+assumes the same storage imports as the WAL walkthrough, plus `ByteBuffer` and
+the static `StandardCharsets.UTF_8` constant.
+
 ```bash
 java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar \
   dev.mars.raftlog.demo.KeyValueExample ./run-data/key-values
@@ -83,6 +151,22 @@ optional directory argument. It does not load `raftlog.properties`,
 corruption, partial writes, boundary conditions, stress cases, and other hostile
 conditions. It creates a fresh temporary directory for every invocation and
 removes that directory before returning.
+
+The suite can also be called from Java, which is how its JUnit test exercises
+the scenarios:
+
+```java
+WalChaos.Summary summary = WalChaos.run("corruption");
+if (summary.failed() != 0) {
+    throw new IllegalStateException(
+            "Chaos failures: " + summary.failed() + " of "
+                    + (summary.passed() + summary.failed()));
+}
+```
+
+Use `"all"` to run the complete suite. `WalChaos.run` reports the result rather
+than terminating the JVM; the command-line `main` method converts that result
+to process exit status `0` or `1`.
 
 ```bash
 # Run all 38 scenarios
@@ -163,4 +247,3 @@ mvn test -pl raftlog-demo -am
 
 For the complete project and release verification procedures, see [RaftLog test
 documentation](../docs/RAFTLOG_TEST_DOCUMENTATION.md).
-
