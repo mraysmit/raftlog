@@ -60,14 +60,13 @@ class FileRaftStorageLinuxTest {
             assumeFalse(readOnlyDir.toFile().canWrite(),
                     "Skipped: read-only enforcement not available (running as root?)");
 
-            FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             Path target = readOnlyDir.resolve("subdir");
+            try (FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build())) {
+                ExecutionException ex = assertThrows(ExecutionException.class,
+                        () -> storage.open(target).get(5, TimeUnit.SECONDS));
 
-            ExecutionException ex = assertThrows(ExecutionException.class,
-                    () -> storage.open(target).get(5, TimeUnit.SECONDS));
-
-            assertTrue(ex.getCause() instanceof StorageException);
-            storage.close();
+                assertTrue(ex.getCause() instanceof StorageException);
+            }
         } finally {
             readOnlyDir.toFile().setWritable(true);
             Files.deleteIfExists(readOnlyDir);
@@ -77,9 +76,8 @@ class FileRaftStorageLinuxTest {
     @Test
     @DisplayName("raft.lock is not world-writable or group-writable after open")
     void testLockFileIsNotWorldWritable() throws Exception {
-        FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
-        storage.open(tempDir).get(5, TimeUnit.SECONDS);
-        try {
+        try (FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build())) {
+            storage.open(tempDir).get(5, TimeUnit.SECONDS);
             Path lockFile = tempDir.resolve("raft.lock");
             assertTrue(Files.exists(lockFile), "raft.lock should exist after open");
 
@@ -88,8 +86,6 @@ class FileRaftStorageLinuxTest {
                     "raft.lock must not be world-writable");
             assertFalse(perms.contains(PosixFilePermission.GROUP_WRITE),
                     "raft.lock must not be group-writable");
-        } finally {
-            storage.close();
         }
     }
 
@@ -101,16 +97,16 @@ class FileRaftStorageLinuxTest {
         Path symlink = symlinkParent.resolve("link");
         Files.createSymbolicLink(symlink, realDir);
         try {
-            FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
-            storage.open(symlink).get(5, TimeUnit.SECONDS);
+            try (FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build())) {
+                storage.open(symlink).get(5, TimeUnit.SECONDS);
 
-            List<LogEntryData> entries = List.of(new LogEntryData(1, 1, "data".getBytes()));
-            storage.appendEntries(entries).get(5, TimeUnit.SECONDS);
-            storage.sync().get(5, TimeUnit.SECONDS);
+                List<LogEntryData> entries = List.of(new LogEntryData(1, 1, "data".getBytes()));
+                storage.appendEntries(entries).get(5, TimeUnit.SECONDS);
+                storage.sync().get(5, TimeUnit.SECONDS);
 
-            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-            assertEquals(1, replayed.size());
-            storage.close();
+                List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
+                assertEquals(1, replayed.size());
+            }
         } finally {
             Files.deleteIfExists(symlink);
             Files.deleteIfExists(symlinkParent);

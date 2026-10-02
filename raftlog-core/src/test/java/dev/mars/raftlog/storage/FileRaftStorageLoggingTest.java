@@ -71,13 +71,10 @@ class FileRaftStorageLoggingTest {
     @Test
     void oversizedVotedForIsBoundedAndNotLoggedInFull() throws Exception {
         String votedFor = "node-" + "x".repeat(10_000);
-        FileRaftStorage storage = new FileRaftStorage();
-        await(storage.open(dir));
-        try {
+        try (FileRaftStorage storage = new FileRaftStorage()) {
+            await(storage.open(dir));
             await(storage.updateMetadata(7, Optional.of(votedFor)));
             await(storage.loadMetadata());
-        } finally {
-            closeAndAwait(storage);
         }
 
         List<String> messages = metadataVoteMessages();
@@ -91,13 +88,10 @@ class FileRaftStorageLoggingTest {
     @Test
     void controlCharactersInVotedForCannotForgeLogLines() throws Exception {
         String votedFor = "node-a\r\nFORGED ERROR\t\u0000end";
-        FileRaftStorage storage = new FileRaftStorage();
-        await(storage.open(dir));
-        try {
+        try (FileRaftStorage storage = new FileRaftStorage()) {
+            await(storage.open(dir));
             await(storage.updateMetadata(8, Optional.of(votedFor)));
             await(storage.loadMetadata());
-        } finally {
-            closeAndAwait(storage);
         }
 
         List<String> messages = metadataVoteMessages();
@@ -112,14 +106,11 @@ class FileRaftStorageLoggingTest {
 
     @Test
     void ambiguousTailCorruptionHasAccurateSinglePunctuationMessage() throws Exception {
-        FileRaftStorage writer = new FileRaftStorage();
-        await(writer.open(dir));
-        try {
+        try (FileRaftStorage writer = new FileRaftStorage()) {
+            await(writer.open(dir));
             await(writer.appendEntries(List.of(
                     new RaftStorage.LogEntryData(1, 1, "payload".getBytes()))));
             await(writer.sync());
-        } finally {
-            closeAndAwait(writer);
         }
 
         Path logPath = dir.resolve("raft.log");
@@ -127,14 +118,11 @@ class FileRaftStorageLoggingTest {
         bytes[bytes.length - 1] ^= 1;
         Files.write(logPath, bytes, StandardOpenOption.TRUNCATE_EXISTING);
 
-        FileRaftStorage recovery = new FileRaftStorage();
-        await(recovery.open(dir));
-        try {
+        try (FileRaftStorage recovery = new FileRaftStorage()) {
+            await(recovery.open(dir));
             ExecutionException failure = assertThrows(ExecutionException.class,
                     () -> await(recovery.replayLog()));
             assertTrue(failure.getCause() instanceof FileRaftStorage.CorruptLogException);
-        } finally {
-            closeAndAwait(recovery);
         }
 
         String message = appender.list.stream()
@@ -151,11 +139,11 @@ class FileRaftStorageLoggingTest {
 
     @Test
     void operationsCarryCorrelationAndStableEventFields() throws Exception {
-        FileRaftStorage storage = new FileRaftStorage();
-        await(storage.open(dir));
-        await(storage.appendEntries(List.of(new RaftStorage.LogEntryData(1, 1, new byte[]{1}))));
-        await(storage.sync());
-        closeAndAwait(storage);
+        try (FileRaftStorage storage = new FileRaftStorage()) {
+            await(storage.open(dir));
+            await(storage.appendEntries(List.of(new RaftStorage.LogEntryData(1, 1, new byte[]{1}))));
+            await(storage.sync());
+        }
 
         ILoggingEvent opened = eventStartingWith("WAL opened successfully:");
         assertFalse(opened.getMDCPropertyMap().get("storageId").isBlank());
@@ -176,14 +164,11 @@ class FileRaftStorageLoggingTest {
 
     @Test
     void truncatedMetadataHasExplicitCorruptionLog() throws Exception {
-        FileRaftStorage storage = new FileRaftStorage();
-        await(storage.open(dir));
-        Files.write(dir.resolve("meta.dat"), new byte[]{1, 2, 3});
-        try {
+        try (FileRaftStorage storage = new FileRaftStorage()) {
+            await(storage.open(dir));
+            Files.write(dir.resolve("meta.dat"), new byte[]{1, 2, 3});
             ExecutionException failure = assertThrows(ExecutionException.class, () -> await(storage.loadMetadata()));
             assertTrue(failure.getCause() instanceof FileRaftStorage.StorageException);
-        } finally {
-            closeAndAwait(storage);
         }
 
         ILoggingEvent corrupt = eventStartingWith("Corrupt metadata: file is 3 bytes");
@@ -217,8 +202,4 @@ class FileRaftStorageLoggingTest {
         return future.get(10, TimeUnit.SECONDS);
     }
 
-    /** Waits for close to finish so the executor emits no further log events. */
-    private static void closeAndAwait(FileRaftStorage storage) throws Exception {
-        await(storage.closeAsync());
-    }
 }

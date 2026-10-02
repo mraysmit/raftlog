@@ -174,10 +174,10 @@ public class GoldenFileGenerator {
     static void scenario(String name, Scenario scenario, Tamper tamper) throws Exception {
         Path dir = out.resolve(name);
         Files.createDirectories(dir);
-        FileRaftStorage storage = new FileRaftStorage(true);
-        await(storage.open(dir));
-        scenario.write(storage);
-        storage.close();
+        try (FileRaftStorage storage = new FileRaftStorage(true)) {
+            await(storage.open(dir));
+            scenario.write(storage);
+        }
         awaitLockRelease(dir);
         tamper.apply(dir);
         Files.deleteIfExists(dir.resolve("raft.lock"));
@@ -188,29 +188,29 @@ public class GoldenFileGenerator {
             if (Files.exists(dir.resolve(f))) Files.copy(dir.resolve(f), copy.resolve(f), StandardCopyOption.REPLACE_EXISTING);
         }
         StringBuilder expected = new StringBuilder();
-        FileRaftStorage reader = new FileRaftStorage(true);
-        await(reader.open(copy));
-        try {
-            List<LogEntryData> entries = await(reader.replayLog());
-            expected.append("replay=OK\n").append("entries=").append(entries.size()).append('\n');
-            for (int i = 0; i < entries.size(); i++) {
-                LogEntryData x = entries.get(i);
-                expected.append("entry.").append(i).append('=').append(x.index()).append(',').append(x.term()).append(',')
-                        .append(Base64.getEncoder().encodeToString(x.payload())).append('\n');
+        try (FileRaftStorage reader = new FileRaftStorage(true)) {
+            await(reader.open(copy));
+            try {
+                List<LogEntryData> entries = await(reader.replayLog());
+                expected.append("replay=OK\n").append("entries=").append(entries.size()).append('\n');
+                for (int i = 0; i < entries.size(); i++) {
+                    LogEntryData x = entries.get(i);
+                    expected.append("entry.").append(i).append('=').append(x.index()).append(',').append(x.term()).append(',')
+                            .append(Base64.getEncoder().encodeToString(x.payload())).append('\n');
+                }
+            } catch (Exception failure) {
+                Throwable cause = failure.getCause() == null ? failure : failure.getCause();
+                expected.append("replay=FAILED ").append(cause.getClass().getSimpleName()).append('\n');
             }
-        } catch (Exception failure) {
-            Throwable cause = failure.getCause() == null ? failure : failure.getCause();
-            expected.append("replay=FAILED ").append(cause.getClass().getSimpleName()).append('\n');
+            try {
+                PersistentMeta meta = await(reader.loadMetadata());
+                expected.append("meta.term=").append(meta.currentTerm()).append('\n');
+                expected.append("meta.vote=").append(meta.votedFor()
+                        .map(v -> "B64:" + Base64.getEncoder().encodeToString(v.getBytes(StandardCharsets.UTF_8))).orElse("NONE")).append('\n');
+            } catch (Exception failure) {
+                expected.append("meta=FAILED\n");
+            }
         }
-        try {
-            PersistentMeta meta = await(reader.loadMetadata());
-            expected.append("meta.term=").append(meta.currentTerm()).append('\n');
-            expected.append("meta.vote=").append(meta.votedFor()
-                    .map(v -> "B64:" + Base64.getEncoder().encodeToString(v.getBytes(StandardCharsets.UTF_8))).orElse("NONE")).append('\n');
-        } catch (Exception failure) {
-            expected.append("meta=FAILED\n");
-        }
-        reader.close();
         awaitLockRelease(copy);
         Files.writeString(dir.resolve("expected.txt"), expected.toString());
         LOG.info("  " + name + ": " + expected.toString().lines().findFirst().orElse(""));

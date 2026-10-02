@@ -37,8 +37,17 @@ class FileRaftStorageRecoveryContractTest {
 
     private static FileRaftStorage open(Path dir) throws Exception {
         FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
-        await(storage.open(dir));
-        return storage;
+        try {
+            await(storage.open(dir));
+            return storage;
+        } catch (Exception | Error failure) {
+            try {
+                storage.close();
+            } catch (RuntimeException closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+            throw failure;
+        }
     }
 
     private static void close(FileRaftStorage storage, Path dir) throws Exception {
@@ -87,13 +96,13 @@ class FileRaftStorageRecoveryContractTest {
     }
 
     @Test void concurrentOpenOfSameDirectoryIsIdempotent() throws Exception {
-        FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
-        CompletableFuture<Void> firstOpen = storage.open(tempDir);
-        CompletableFuture<Void> secondOpen = storage.open(tempDir);
+        try (FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build())) {
+            CompletableFuture<Void> firstOpen = storage.open(tempDir);
+            CompletableFuture<Void> secondOpen = storage.open(tempDir);
 
-        await(firstOpen);
-        await(secondOpen);
-        await(storage.closeAsync());
+            await(firstOpen);
+            await(secondOpen);
+        }
     }
 
     @Test void operationsAfterCloseFailWithStorageExceptionNotExecutorRejection() throws Exception {
@@ -131,23 +140,23 @@ class FileRaftStorageRecoveryContractTest {
             // The holder is idle from here on, so the failed open and everything queued
             // behind it must leave the directory byte-for-byte as it was.
             try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
-                FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
-                CompletableFuture<Void> opening = storage.open(tempDir);
-                CompletableFuture<Void> append = storage.appendEntries(List.of(entry(3, 1)));
-                CompletableFuture<Void> truncate = storage.truncateSuffix(1);
-                CompletableFuture<Void> metadata = storage.updateMetadata(9, Optional.of("intruder"));
-                CompletableFuture<Void> compact = storage.truncatePrefix(1);
-                CompletableFuture<List<LogEntryData>> replay = storage.replayLog();
-                CompletableFuture<Void> sync = storage.sync();
+                try (FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build())) {
+                    CompletableFuture<Void> opening = storage.open(tempDir);
+                    CompletableFuture<Void> append = storage.appendEntries(List.of(entry(3, 1)));
+                    CompletableFuture<Void> truncate = storage.truncateSuffix(1);
+                    CompletableFuture<Void> metadata = storage.updateMetadata(9, Optional.of("intruder"));
+                    CompletableFuture<Void> compact = storage.truncatePrefix(1);
+                    CompletableFuture<List<LogEntryData>> replay = storage.replayLog();
+                    CompletableFuture<Void> sync = storage.sync();
 
-                assertThrows(java.util.concurrent.ExecutionException.class, () -> await(opening));
-                for (CompletableFuture<?> future : List.of(append, truncate, metadata, compact, replay, sync)) {
-                    Throwable cause = assertThrows(java.util.concurrent.ExecutionException.class,
-                            () -> await(future)).getCause();
-                    assertInstanceOf(FileRaftStorage.StorageException.class, cause);
-                    assertTrue(cause.getMessage().startsWith("Storage is not open"), cause.getMessage());
+                    assertThrows(java.util.concurrent.ExecutionException.class, () -> await(opening));
+                    for (CompletableFuture<?> future : List.of(append, truncate, metadata, compact, replay, sync)) {
+                        Throwable cause = assertThrows(java.util.concurrent.ExecutionException.class,
+                                () -> await(future)).getCause();
+                        assertInstanceOf(FileRaftStorage.StorageException.class, cause);
+                        assertTrue(cause.getMessage().startsWith("Storage is not open"), cause.getMessage());
+                    }
                 }
-                await(storage.closeAsync());
             }
             // The holder still owns a working log.
             await(holder.appendEntries(List.of(entry(3, 1))));
@@ -159,23 +168,22 @@ class FileRaftStorageRecoveryContractTest {
     }
 
     @Test void operationsBeforeOpenFailWithStorageException() throws Exception {
-        FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
-        DurableState untouchedAtLine145 = DurableState.expectUnchanged(tempDir);
-        Throwable cause = assertThrows(java.util.concurrent.ExecutionException.class,
-                () -> await(storage.appendEntries(List.of(entry(1, 1))))).getCause();
-        untouchedAtLine145.close();
-        assertInstanceOf(FileRaftStorage.StorageException.class, cause);
-        assertTrue(cause.getMessage().startsWith("Storage is not open"), cause.getMessage());
-        await(storage.closeAsync());
+        try (FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
+             DurableState ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+            Throwable cause = assertThrows(java.util.concurrent.ExecutionException.class,
+                    () -> await(storage.appendEntries(List.of(entry(1, 1))))).getCause();
+            assertInstanceOf(FileRaftStorage.StorageException.class, cause);
+            assertTrue(cause.getMessage().startsWith("Storage is not open"), cause.getMessage());
+        }
     }
 
     @Test void syncIsAnOrderingBarrierEvenWithFsyncDisabled() throws Exception {
-        FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(false);
-        await(storage.open(tempDir));
-        CompletableFuture<Void> append = storage.appendEntries(List.of(entry(1, 1)));
-        await(storage.sync());
-        assertTrue(append.isDone(), "sync() completed before an earlier append");
-        await(storage.closeAsync());
+        try (FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(false)) {
+            await(storage.open(tempDir));
+            CompletableFuture<Void> append = storage.appendEntries(List.of(entry(1, 1)));
+            await(storage.sync());
+            assertTrue(append.isDone(), "sync() completed before an earlier append");
+        }
     }
 
     @Test void closeDrainsOperationsAcceptedBeforeIt() throws Exception {
@@ -196,17 +204,22 @@ class FileRaftStorageRecoveryContractTest {
         };
         RaftStorageConfig config = RaftStorageConfig.builder().dataDir(tempDir.toString()).build();
         FileRaftStorage storage = new FileRaftStorage(config, blockingIo);
-        await(storage.open());
+        try {
+            await(storage.open());
 
-        CompletableFuture<Void> blockingSync = storage.sync();
-        assertTrue(forceStarted.await(10, TimeUnit.SECONDS));
-        CompletableFuture<Void> acceptedAppend = storage.appendEntries(List.of(entry(1, 1)));
-        CompletableFuture<Void> close = storage.closeAsync();
-        releaseForce.countDown();
+            CompletableFuture<Void> blockingSync = storage.sync();
+            assertTrue(forceStarted.await(10, TimeUnit.SECONDS));
+            CompletableFuture<Void> acceptedAppend = storage.appendEntries(List.of(entry(1, 1)));
+            CompletableFuture<Void> close = storage.closeAsync();
+            releaseForce.countDown();
 
-        await(blockingSync);
-        await(acceptedAppend);
-        await(close);
+            await(blockingSync);
+            await(acceptedAppend);
+            await(close);
+        } finally {
+            releaseForce.countDown();
+            storage.close();
+        }
         assertEntries(List.of(entry(1, 1)), recover(tempDir));
     }
 
@@ -226,18 +239,22 @@ class FileRaftStorageRecoveryContractTest {
         CountDownLatch forceStarted = new CountDownLatch(1);
         CountDownLatch releaseForce = new CountDownLatch(1);
         FileRaftStorage storage = storageWithBlockingForce(forceStarted, releaseForce);
-        await(storage.open());
-        CompletableFuture<Void> blockingSync = storage.sync();
-        assertTrue(forceStarted.await(10, TimeUnit.SECONDS));
+        try {
+            await(storage.open());
+            CompletableFuture<Void> blockingSync = storage.sync();
+            assertTrue(forceStarted.await(10, TimeUnit.SECONDS));
 
-        ArrayList<LogEntryData> entries = new ArrayList<>(List.of(entry(1, 1)));
-        CompletableFuture<Void> append = storage.appendEntries(entries);
-        entries.clear();
-        releaseForce.countDown();
+            ArrayList<LogEntryData> entries = new ArrayList<>(List.of(entry(1, 1)));
+            CompletableFuture<Void> append = storage.appendEntries(entries);
+            entries.clear();
+            releaseForce.countDown();
 
-        await(blockingSync);
-        await(append);
-        await(storage.closeAsync());
+            await(blockingSync);
+            await(append);
+        } finally {
+            releaseForce.countDown();
+            storage.close();
+        }
         assertEntries(List.of(entry(1, 1)), recover(tempDir));
     }
 
@@ -245,18 +262,22 @@ class FileRaftStorageRecoveryContractTest {
         CountDownLatch forceStarted = new CountDownLatch(1);
         CountDownLatch releaseForce = new CountDownLatch(1);
         FileRaftStorage storage = storageWithBlockingForce(forceStarted, releaseForce);
-        await(storage.open());
-        CompletableFuture<Void> blockingSync = storage.sync();
-        assertTrue(forceStarted.await(10, TimeUnit.SECONDS));
+        try {
+            await(storage.open());
+            CompletableFuture<Void> blockingSync = storage.sync();
+            assertTrue(forceStarted.await(10, TimeUnit.SECONDS));
 
-        byte[] payload = {1};
-        CompletableFuture<Void> append = storage.appendEntries(List.of(new LogEntryData(1, 1, payload)));
-        payload[0] = 9;
-        releaseForce.countDown();
+            byte[] payload = {1};
+            CompletableFuture<Void> append = storage.appendEntries(List.of(new LogEntryData(1, 1, payload)));
+            payload[0] = 9;
+            releaseForce.countDown();
 
-        await(blockingSync);
-        await(append);
-        await(storage.closeAsync());
+            await(blockingSync);
+            await(append);
+        } finally {
+            releaseForce.countDown();
+            storage.close();
+        }
         assertEntries(List.of(entry(1, 1)), recover(tempDir));
     }
 

@@ -28,8 +28,17 @@ class FileRaftStoragePrefixCompactionTest {
 
     static FileRaftStorage open(Path dir) {
         FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
-        await(storage.open(dir));
-        return storage;
+        try {
+            await(storage.open(dir));
+            return storage;
+        } catch (RuntimeException | Error failure) {
+            try {
+                storage.close();
+            } catch (RuntimeException closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+            throw failure;
+        }
     }
 
     static void close(FileRaftStorage storage, Path dir) {

@@ -131,8 +131,17 @@ class GoldenFileCompatibilityTest {
 
     private static FileRaftStorage open(Path dir) throws Exception {
         FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
-        await(storage.open(dir));
-        return storage;
+        try {
+            await(storage.open(dir));
+            return storage;
+        } catch (Exception | Error failure) {
+            try {
+                storage.close();
+            } catch (RuntimeException closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+            throw failure;
+        }
     }
 
     private static void assertSameLog(List<LogEntryData> expected, List<LogEntryData> actual, String what) {

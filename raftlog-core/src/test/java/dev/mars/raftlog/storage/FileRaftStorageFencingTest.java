@@ -81,8 +81,8 @@ class FileRaftStorageFencingTest {
 
     private void seed() throws Exception {
         FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
-        await(storage.open(dir));
         try {
+            await(storage.open(dir));
             await(storage.appendEntries(SEED));
             await(storage.sync());
         } finally { close(storage, dir); }
@@ -132,8 +132,8 @@ class FileRaftStorageFencingTest {
         seed();
         FailingForce io = new FailingForce(1);
         FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build(), io);
-        await(storage.open(dir));
         try {
+            await(storage.open(dir));
             await(storage.replayLog());
             await(storage.appendEntries(List.of(entry(4, 2))));
             Throwable cause = failureOf(storage.sync());
@@ -149,8 +149,8 @@ class FileRaftStorageFencingTest {
 
         // A fresh instance recovers whatever actually reached the file.
         FileRaftStorage fresh = new FileRaftStorage(RaftStorageConfig.builder().build());
-        await(fresh.open(dir));
         try {
+            await(fresh.open(dir));
             List<LogEntryData> replayed = await(fresh.replayLog());
             assertTrue(replayed.size() == 3 || replayed.size() == 4);
             assertEntries(SEED, replayed.subList(0, 3));
@@ -163,13 +163,15 @@ class FileRaftStorageFencingTest {
     @Test void failedMetadataStagingForceFencesTheInstanceAndKeepsOldMetadata() throws Exception {
         seed();
         FileRaftStorage seeded = new FileRaftStorage(RaftStorageConfig.builder().build());
-        await(seeded.open(dir));
-        try { await(seeded.updateMetadata(5, Optional.of("node-a"))); } finally { close(seeded, dir); }
+        try {
+            await(seeded.open(dir));
+            await(seeded.updateMetadata(5, Optional.of("node-a")));
+        } finally { close(seeded, dir); }
 
         FailingForce io = new FailingForce(1);
         FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build(), io);
-        await(storage.open(dir));
         try {
+            await(storage.open(dir));
             assertInstanceOf(FileRaftStorage.StorageException.class,
                     failureOf(storage.updateMetadata(6, Optional.of("node-b"))));
             try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
@@ -178,8 +180,8 @@ class FileRaftStorageFencingTest {
         } finally { close(storage, dir); }
 
         FileRaftStorage fresh = new FileRaftStorage(RaftStorageConfig.builder().build());
-        await(fresh.open(dir));
         try {
+            await(fresh.open(dir));
             RaftStorage.PersistentMeta meta = await(fresh.loadMetadata());
             assertEquals(5, meta.currentTerm());
             assertEquals(Optional.of("node-a"), meta.votedFor());
@@ -194,8 +196,8 @@ class FileRaftStorageFencingTest {
             }
         };
         FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build(), io);
-        await(storage.open(dir));
         try {
+            await(storage.open(dir));
             Throwable cause = failureOf(storage.updateMetadata(7, Optional.of("node-c")));
             assertInstanceOf(FileRaftStorage.StorageException.class, cause);
             assertEquals("Injected directory fsync failure", cause.getCause().getMessage());
@@ -212,8 +214,8 @@ class FileRaftStorageFencingTest {
         FailingForce io = new FailingForce(1);
         FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(
                 RaftStorageConfig.builder().build(), io);
-        await(storage.open(dir));
         try {
+            await(storage.open(dir));
             await(storage.replayLog());
             await(storage.appendEntries(List.of(entry(4, 2))));
             await(storage.sync());
@@ -226,8 +228,8 @@ class FileRaftStorageFencingTest {
         seed();
         FailingForce io = new FailingForce(1);
         FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().verifyWrites(true).build(), io);
-        await(storage.open(dir));
         try {
+            await(storage.open(dir));
             await(storage.replayLog());
             Throwable cause = failureOf(storage.appendEntries(List.of(entry(4, 2))));
             assertInstanceOf(FileRaftStorage.StorageException.class, cause);
@@ -281,8 +283,8 @@ class FileRaftStorageFencingTest {
         byte[] before = Files.readAllBytes(dir.resolve("raft.log"));
 
         FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
-        await(storage.open(dir));
         try {
+            await(storage.open(dir));
             Throwable cause = failureOf(storage.replayLog());
             var corrupt = assertInstanceOf(FileRaftStorage.CorruptLogException.class, cause);
             assertEquals(second, corrupt.corruptOffset());
@@ -303,8 +305,8 @@ class FileRaftStorageFencingTest {
         byte[] before = Files.readAllBytes(dir.resolve("raft.log"));
 
         FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
-        await(storage.open(dir));
         try {
+            await(storage.open(dir));
             var corrupt = assertInstanceOf(FileRaftStorage.CorruptLogException.class,
                     failureOf(storage.replayLog()));
             assertEquals(third, corrupt.corruptOffset());
@@ -329,8 +331,8 @@ class FileRaftStorageFencingTest {
         byte[] before = Files.readAllBytes(log);
 
         FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
-        await(storage.open(dir));
         try {
+            await(storage.open(dir));
             var corrupt = assertInstanceOf(FileRaftStorage.CorruptLogException.class, failureOf(storage.replayLog()));
             assertEquals(second, corrupt.corruptOffset());
         } finally { close(storage, dir); }
@@ -346,8 +348,8 @@ class FileRaftStorageFencingTest {
         Files.write(dir.resolve("raft.log"), garbage, StandardOpenOption.APPEND);
 
         FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
-        await(storage.open(dir));
         try {
+            await(storage.open(dir));
             var corrupt = assertInstanceOf(FileRaftStorage.CorruptLogException.class,
                     failureOf(storage.replayLog()));
             assertEquals(validSize, corrupt.corruptOffset());
@@ -367,8 +369,8 @@ class FileRaftStorageFencingTest {
         Files.write(dir.resolve("raft.log"), encode(entry(4, 1)), StandardOpenOption.APPEND);
 
         FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
-        await(storage.open(dir));
         try {
+            await(storage.open(dir));
             var corrupt = assertInstanceOf(FileRaftStorage.CorruptLogException.class, failureOf(storage.replayLog()));
             assertEquals(validSize, corrupt.corruptOffset());
             assertEquals(3, corrupt.entriesBeforeCorruption());
@@ -381,8 +383,8 @@ class FileRaftStorageFencingTest {
         byte[] before = Files.readAllBytes(dir.resolve("raft.log"));
 
         FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
-        await(storage.open(dir));
         try {
+            await(storage.open(dir));
             try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
                 assertInstanceOf(FileRaftStorage.CorruptLogException.class, failureOf(storage.truncatePrefix(1)));
             }

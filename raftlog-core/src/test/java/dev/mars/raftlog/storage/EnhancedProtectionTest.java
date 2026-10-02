@@ -86,17 +86,15 @@ class EnhancedProtectionTest {
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             // Second instance should fail
-            FileRaftStorage storage2 = new FileRaftStorage(RaftStorageConfig.builder().build());
-            DurableState untouchedAtLine90 = DurableState.expectUnchanged(tempDir);
-            ExecutionException ex = assertThrows(ExecutionException.class, () ->
-                    storage2.open(tempDir).get(5, TimeUnit.SECONDS));
-            untouchedAtLine90.close();
+            try (FileRaftStorage storage2 = new FileRaftStorage(RaftStorageConfig.builder().build());
+                 DurableState ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                ExecutionException ex = assertThrows(ExecutionException.class, () ->
+                        storage2.open(tempDir).get(5, TimeUnit.SECONDS));
 
-            assertTrue(ex.getCause() instanceof StorageException);
-            assertTrue(ex.getCause().getMessage().contains("exclusive lock") ||
-                       ex.getCause().getMessage().contains("Another process"));
-            
-            storage2.close();
+                assertTrue(ex.getCause() instanceof StorageException);
+                assertTrue(ex.getCause().getMessage().contains("exclusive lock") ||
+                           ex.getCause().getMessage().contains("Another process"));
+            }
         }
 
         @Test
@@ -113,14 +111,13 @@ class EnhancedProtectionTest {
             storage = null;
 
             // Second instance should succeed
-            FileRaftStorage storage2 = new FileRaftStorage(RaftStorageConfig.builder().build());
-            assertDoesNotThrow(() -> storage2.open(tempDir).get(5, TimeUnit.SECONDS));
+            try (FileRaftStorage storage2 = new FileRaftStorage(RaftStorageConfig.builder().build())) {
+                assertDoesNotThrow(() -> storage2.open(tempDir).get(5, TimeUnit.SECONDS));
 
-            // Should be able to read the data
-            List<LogEntryData> replayed = storage2.replayLog().get(5, TimeUnit.SECONDS);
-            assertEquals(1, replayed.size());
-
-            storage2.close();
+                // Should be able to read the data
+                List<LogEntryData> replayed = storage2.replayLog().get(5, TimeUnit.SECONDS);
+                assertEquals(1, replayed.size());
+            }
         }
 
         @Test
@@ -384,12 +381,11 @@ class EnhancedProtectionTest {
             storage.sync().get(5, TimeUnit.SECONDS);
 
             // Second instance blocked
-            FileRaftStorage blocked = new FileRaftStorage(RaftStorageConfig.builder().verifyWrites(true).build());
-            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+            try (FileRaftStorage blocked = new FileRaftStorage(RaftStorageConfig.builder().verifyWrites(true).build());
+                 var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
                 assertThrows(ExecutionException.class, () ->
                         blocked.open(tempDir).get(5, TimeUnit.SECONDS));
             }
-            blocked.close();
 
             // Close and reopen
             storage.close();
@@ -415,18 +411,16 @@ class EnhancedProtectionTest {
             storage.sync().get(5, TimeUnit.SECONDS);
 
             // Attempt second instance fails gracefully
-            FileRaftStorage reader = new FileRaftStorage(RaftStorageConfig.builder().build());
-            DurableState untouchedAtLine413 = DurableState.expectUnchanged(tempDir);
-            ExecutionException ex = assertThrows(ExecutionException.class, () ->
-                    reader.open(tempDir).get(5, TimeUnit.SECONDS));
-            untouchedAtLine413.close();
+            try (FileRaftStorage reader = new FileRaftStorage(RaftStorageConfig.builder().build());
+                 DurableState ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                ExecutionException ex = assertThrows(ExecutionException.class, () ->
+                        reader.open(tempDir).get(5, TimeUnit.SECONDS));
 
-            // Error message should be helpful
-            String message = ex.getCause().getMessage();
-            assertTrue(message.contains("exclusive lock") || message.contains("Another process"),
-                    "Error message should indicate lock conflict: " + message);
-
-            reader.close();
+                // Error message should be helpful
+                String message = ex.getCause().getMessage();
+                assertTrue(message.contains("exclusive lock") || message.contains("Another process"),
+                        "Error message should indicate lock conflict: " + message);
+            }
         }
     }
 }

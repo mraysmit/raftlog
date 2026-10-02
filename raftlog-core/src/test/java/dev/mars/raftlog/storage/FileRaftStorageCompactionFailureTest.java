@@ -55,9 +55,9 @@ class FileRaftStorageCompactionFailureTest {
             @Override FileChannel reopen(Path path) throws IOException { failAt("reopen"); return super.reopen(path); }
         };
         FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build(), io);
-        await(storage.open(dir));
         boolean publicationAttempted = !List.of("write", "force").contains(failure);
         try {
+            await(storage.open(dir));
             assertThrows(Exception.class, () -> storage.truncatePrefix(2).get(10, TimeUnit.SECONDS));
             assertTrue(injected.get(), "Must exercise the requested real filesystem boundary");
             if (publicationAttempted) {
@@ -105,8 +105,8 @@ class FileRaftStorageCompactionFailureTest {
         };
         FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(
                 RaftStorageConfig.builder().build(), io);
-        await(storage.open(dir));
         try {
+            await(storage.open(dir));
             var compact = storage.truncatePrefix(2);
             assertTrue(atDirectory.await(3, TimeUnit.SECONDS), "Compaction must reach directory durability boundary");
             var append = storage.appendEntries(List.of(entry(4, 3)));

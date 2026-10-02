@@ -46,25 +46,33 @@ class RaftStorageDefaultsTest {
     }
 
     @Test void prefixCompactionIsExplicitlyUnsupportedByDefaultRatherThanSilentlyIgnored() {
-        CompletableFuture<Void> result = new Minimal().truncatePrefix(5);
-        assertTrue(result.isCompletedExceptionally());
-        Throwable cause = assertThrows(ExecutionException.class, result::get).getCause();
-        assertInstanceOf(UnsupportedOperationException.class, cause);
+        try (Minimal storage = new Minimal()) {
+            CompletableFuture<Void> result = storage.truncatePrefix(5);
+            assertTrue(result.isCompletedExceptionally());
+            Throwable cause = assertThrows(ExecutionException.class, result::get).getCause();
+            assertInstanceOf(UnsupportedOperationException.class, cause);
+        }
     }
 
     @Test void defaultCloseAsyncClosesSynchronouslyAndCompletes() throws Exception {
-        Minimal storage = new Minimal();
-        CompletableFuture<Void> closed = storage.closeAsync();
-        assertTrue(closed.isDone());
-        assertNull(closed.get());
-        assertEquals(1, storage.closes.get());
+        try (Minimal storage = new Minimal()) {
+            CompletableFuture<Void> closed = storage.closeAsync();
+            assertTrue(closed.isDone());
+            assertNull(closed.get());
+            assertEquals(1, storage.closes.get());
+        }
     }
 
     @Test void defaultCloseAsyncReportsAThrowingCloseThroughTheFuture() {
-        Minimal storage = new Minimal();
-        storage.closeFailure = new IllegalStateException("close failed");
-        CompletableFuture<Void> closed = assertDoesNotThrow(storage::closeAsync);
-        assertSame(storage.closeFailure, assertThrows(ExecutionException.class, closed::get).getCause());
+        try (Minimal storage = new Minimal()) {
+            storage.closeFailure = new IllegalStateException("close failed");
+            try {
+                CompletableFuture<Void> closed = assertDoesNotThrow(storage::closeAsync);
+                assertSame(storage.closeFailure, assertThrows(ExecutionException.class, closed::get).getCause());
+            } finally {
+                storage.closeFailure = null;
+            }
+        }
     }
 
     @Test void emptyMetadataIsTermZeroWithNoVote() {

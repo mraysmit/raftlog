@@ -67,8 +67,17 @@ class FileRaftStorageInvariantEdgeCaseTest {
 
     private static FileRaftStorage open(Path dir) throws Exception {
         FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(false);
-        await(storage.open(dir));
-        return storage;
+        try {
+            await(storage.open(dir));
+            return storage;
+        } catch (Exception | Error failure) {
+            try {
+                storage.close();
+            } catch (RuntimeException closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+            throw failure;
+        }
     }
 
     private static List<LogEntryData> restartAndReplay(Path dir) throws Exception {
@@ -155,9 +164,9 @@ class FileRaftStorageInvariantEdgeCaseTest {
     @Test void uncheckedFailureMidBatchLeavesTheTailUnknownSoARetryCannotDuplicate() throws Exception {
         RaftStorageConfig config = RaftStorageConfig.builder().verifyWrites(true).build();
         FileRaftStorage storage = new FileRaftStorage(config, new UncheckedFailureOnForce(2));
-        await(storage.open(dir));
         List<LogEntryData> batch = List.of(entry(1, 1), entry(2, 1));
         try {
+            await(storage.open(dir));
             assertInstanceOf(IllegalStateException.class, failureOf(storage.appendEntries(batch)));
             // Entry 1 is on disk. A blind retry must be refused, not written a second time.
             try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
@@ -187,8 +196,8 @@ class FileRaftStorageInvariantEdgeCaseTest {
     @Test void ioFailureMidBatchTearsARecordAndReplayRepairsItBeforeTheNextWrite() throws Exception {
         FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(
                 RaftStorageConfig.builder().build(), new TornRecordWrite(2));
-        await(storage.open(dir));
         try {
+            await(storage.open(dir));
             Throwable cause = failureOf(storage.appendEntries(List.of(entry(1, 1), entry(2, 1))));
             assertInstanceOf(FileRaftStorage.StorageException.class, cause);
             assertInstanceOf(IOException.class, cause.getCause());
@@ -218,8 +227,8 @@ class FileRaftStorageInvariantEdgeCaseTest {
     @Test void diskSpaceIsCheckedBeforeTheFirstRecordOfABatchIsWritten() throws Exception {
         FillingDisk disk = new FillingDisk();
         FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(RaftStorageConfig.builder().build(), disk);
-        await(storage.open(dir));
         try {
+            await(storage.open(dir));
             disk.full = true;
             LogEntryData large = new LogEntryData(2, 1, new byte[2 * 1024 * 1024]);
             try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {

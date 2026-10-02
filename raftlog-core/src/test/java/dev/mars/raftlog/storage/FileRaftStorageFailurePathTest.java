@@ -76,14 +76,26 @@ class FileRaftStorageFailurePathTest {
 
     private static FileRaftStorage open(Path dir) throws Exception {
         FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(false);
-        await(storage.open(dir));
-        return storage;
+        return open(storage, dir);
     }
 
     private static FileRaftStorage open(Path dir, CompactionIo io) throws Exception {
         FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(RaftStorageConfig.builder().build(), io);
-        await(storage.open(dir));
-        return storage;
+        return open(storage, dir);
+    }
+
+    private static FileRaftStorage open(FileRaftStorage storage, Path dir) throws Exception {
+        try {
+            await(storage.open(dir));
+            return storage;
+        } catch (Exception | Error failure) {
+            try {
+                storage.close();
+            } catch (RuntimeException closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+            throw failure;
+        }
     }
 
     private static void assertEntries(List<LogEntryData> expected, List<LogEntryData> actual) {
@@ -271,14 +283,14 @@ class FileRaftStorageFailurePathTest {
 
     /** Child process: holds the directory open until its stdin closes. The parent waits for the HOLDING line. */
     public static void main(String[] args) throws Exception {
-        FileRaftStorage holder = new FileRaftStorage(RaftStorageConfig.builder().build());
-        holder.open(Path.of(args[0])).get(30, TimeUnit.SECONDS);
-        holder.appendEntries(List.of(entry(1, 1))).get(30, TimeUnit.SECONDS);
-        holder.updateMetadata(4, Optional.of("holder")).get(30, TimeUnit.SECONDS);
-        holder.sync().get(30, TimeUnit.SECONDS);
-        LOG.info("HOLDING");
-        while (System.in.read() >= 0) { /* until the parent closes the pipe */ }
-        holder.close();
+        try (FileRaftStorage holder = new FileRaftStorage(RaftStorageConfig.builder().build())) {
+            holder.open(Path.of(args[0])).get(30, TimeUnit.SECONDS);
+            holder.appendEntries(List.of(entry(1, 1))).get(30, TimeUnit.SECONDS);
+            holder.updateMetadata(4, Optional.of("holder")).get(30, TimeUnit.SECONDS);
+            holder.sync().get(30, TimeUnit.SECONDS);
+            LOG.info("HOLDING");
+            while (System.in.read() >= 0) { /* until the parent closes the pipe */ }
+        }
     }
 
     @Test void lockHeldByAnotherProcessRefusesOpenAndLeavesTheDirectoryUntouched() throws Exception {
@@ -339,22 +351,26 @@ class FileRaftStorageFailurePathTest {
     @Test void closeCalledOnTheWalExecutorThreadDoesNotDeadlock() throws Exception {
         GatedForce io = new GatedForce(null);
         FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build(), io);
-        await(storage.open(dir));
-        await(storage.appendEntries(List.of(entry(1, 1))));
+        try {
+            await(storage.open(dir));
+            await(storage.appendEntries(List.of(entry(1, 1))));
 
-        CompletableFuture<Void> sync = storage.sync();
-        assertTrue(io.entered.await(10, TimeUnit.SECONDS));
-        AtomicReference<String> callbackThread = new AtomicReference<>();
-        // Registered while sync is still running, so the callback runs on the executor thread.
-        CompletableFuture<Void> closedInCallback = sync.thenRun(() -> {
-            callbackThread.set(Thread.currentThread().getName());
-            storage.close();
-        });
-        io.release.countDown();
+            CompletableFuture<Void> sync = storage.sync();
+            assertTrue(io.entered.await(10, TimeUnit.SECONDS));
+            AtomicReference<String> callbackThread = new AtomicReference<>();
+            // Registered while sync is still running, so the callback runs on the executor thread.
+            CompletableFuture<Void> closedInCallback = sync.thenRun(() -> {
+                callbackThread.set(Thread.currentThread().getName());
+                storage.close();
+            });
+            io.release.countDown();
 
-        await(closedInCallback);
-        assertEquals("wal-executor", callbackThread.get());
-        await(storage.closeAsync());
+            await(closedInCallback);
+            assertEquals("wal-executor", callbackThread.get());
+        } finally {
+            io.release.countDown();
+            await(storage.closeAsync());
+        }
         assertEntries(List.of(entry(1, 1)), DurableState.replayAfterRestart(dir));
     }
 
@@ -604,8 +620,7 @@ class FileRaftStorageFailurePathTest {
 
     private FileRaftStorage openVerifying(CompactionIo io) throws Exception {
         FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().verifyWrites(true).build(), io);
-        await(storage.open(dir));
-        return storage;
+        return open(storage, dir);
     }
 
     @Test void writeVerificationCatchesADeviceThatStoredDifferentBytes() throws Exception {
@@ -683,8 +698,8 @@ class FileRaftStorageFailurePathTest {
     @Test void operationQueuedBeforeAFenceFailsWithTheFencingFailureAndWritesNothing() throws Exception {
         GatedForce io = new GatedForce(new IOException("Injected fsync failure"));
         FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build(), io);
-        await(storage.open(dir));
         try {
+            await(storage.open(dir));
             await(storage.appendEntries(List.of(entry(1, 1))));
             CompletableFuture<Void> sync = storage.sync();
             assertTrue(io.entered.await(10, TimeUnit.SECONDS));
@@ -703,7 +718,10 @@ class FileRaftStorageFailurePathTest {
             assertEquals(walBytes, Files.size(dir.resolve("raft.log")), "work queued behind the fence must not reach the WAL");
             assertFalse(Files.exists(dir.resolve("meta.dat")));
             WalRecords.assertNoStrayFiles(dir);
-        } finally { await(storage.closeAsync()); }
+        } finally {
+            io.release.countDown();
+            await(storage.closeAsync());
+        }
     }
 
     @Test void readOperationsRefusedByTheExecutorFailTheirFuture() throws Exception {
@@ -792,12 +810,15 @@ class FileRaftStorageFailurePathTest {
     @Test void openThatFailsAfterTheChannelExistsReleasesEverythingEvenIfClosingItFails() throws Exception {
         DeadChannelOnOpen io = new DeadChannelOnOpen();
         FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(RaftStorageConfig.builder().build(), io);
-        Throwable cause = failureOf(storage.open(dir));
-        assertInstanceOf(FileRaftStorage.StorageException.class, cause);
-        assertTrue(cause.getMessage().startsWith("Failed to open WAL"), cause.getMessage());
-        assertTrue(io.closes.get() >= 1, "the half-opened channel must be closed through the failure path");
-        assertRejectedAsNotOpen(storage.appendEntries(List.of(entry(1, 1))));
-        await(storage.closeAsync());
+        try {
+            Throwable cause = failureOf(storage.open(dir));
+            assertInstanceOf(FileRaftStorage.StorageException.class, cause);
+            assertTrue(cause.getMessage().startsWith("Failed to open WAL"), cause.getMessage());
+            assertTrue(io.closes.get() >= 1, "the half-opened channel must be closed through the failure path");
+            assertRejectedAsNotOpen(storage.appendEntries(List.of(entry(1, 1))));
+        } finally {
+            await(storage.closeAsync());
+        }
         // The lock was released despite the close failure: the directory is usable at once.
         FileRaftStorage next = open(dir);
         try { await(next.appendEntries(List.of(entry(1, 1)))); } finally { await(next.closeAsync()); }
@@ -1134,16 +1155,16 @@ class FileRaftStorageFailurePathTest {
         byte[] big = new byte[2 * 1024 * 1024];
         for (int i = 0; i < big.length; i++) big[i] = (byte) (i * 7);
         FileRaftStorage generous = new FileRaftStorage(RaftStorageConfig.builder().maxPayloadSizeMb(4).build());
-        await(generous.open(dir));
         try {
+            await(generous.open(dir));
             await(generous.appendEntries(List.of(new LogEntryData(1, 1, big), entry(2, 1))));
             await(generous.sync());
         } finally { await(generous.closeAsync()); }
 
         // An operator lowers the limit. The log is healthy; it must not be reported as corrupt.
         FileRaftStorage strict = new FileRaftStorage(RaftStorageConfig.builder().maxPayloadSizeMb(1).build());
-        await(strict.open(dir));
         try {
+            await(strict.open(dir));
             List<LogEntryData> replayed;
             try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
                 replayed = await(strict.replayLog());
@@ -1162,8 +1183,8 @@ class FileRaftStorageFailurePathTest {
         } finally { await(strict.closeAsync()); }
 
         FileRaftStorage again = new FileRaftStorage(RaftStorageConfig.builder().maxPayloadSizeMb(1).build());
-        await(again.open(dir));
         try {
+            await(again.open(dir));
             List<LogEntryData> replayed = await(again.replayLog());
             assertEquals(3, replayed.size());
             assertArrayEquals(big, replayed.get(0).payload());
@@ -1284,16 +1305,21 @@ class FileRaftStorageFailurePathTest {
     @Test void closeRequestedWhileAnOpenIsFailingKeepsTheInstanceClosed() throws Exception {
         GatedFailingOpen io = new GatedFailingOpen();
         FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(RaftStorageConfig.builder().build(), io);
-        CompletableFuture<Void> opening = storage.open(dir);
-        assertTrue(io.entered.await(10, TimeUnit.SECONDS));
-        CompletableFuture<Void> closing = storage.closeAsync();
-        io.release.countDown();
+        try {
+            CompletableFuture<Void> opening = storage.open(dir);
+            assertTrue(io.entered.await(10, TimeUnit.SECONDS));
+            CompletableFuture<Void> closing = storage.closeAsync();
+            io.release.countDown();
 
-        assertInstanceOf(FileRaftStorage.StorageException.class, failureOf(opening));
-        await(closing);
-        // A failed open normally allows a retry. A closed instance must not come back to life.
-        Throwable cause = failureOf(storage.open(dir));
-        assertTrue(cause.getMessage().startsWith("Storage is closed"), cause.getMessage());
+            assertInstanceOf(FileRaftStorage.StorageException.class, failureOf(opening));
+            await(closing);
+            // A failed open normally allows a retry. A closed instance must not come back to life.
+            Throwable cause = failureOf(storage.open(dir));
+            assertTrue(cause.getMessage().startsWith("Storage is closed"), cause.getMessage());
+        } finally {
+            io.release.countDown();
+            storage.close();
+        }
         FileRaftStorage next = open(dir);
         try { await(next.appendEntries(List.of(entry(1, 1)))); } finally { await(next.closeAsync()); }
     }
@@ -1307,10 +1333,13 @@ class FileRaftStorageFailurePathTest {
             }
         };
         FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(RaftStorageConfig.builder().build(), deadChannel);
-        assertTrue(failureOf(storage.open(dir)).getMessage().startsWith("Failed to open WAL"));
-        // After a failed open the same instance may try again.
-        assertTrue(failureOf(storage.open(dir)).getMessage().startsWith("Failed to open WAL"));
-        await(storage.closeAsync());
+        try {
+            assertTrue(failureOf(storage.open(dir)).getMessage().startsWith("Failed to open WAL"));
+            // After a failed open the same instance may try again.
+            assertTrue(failureOf(storage.open(dir)).getMessage().startsWith("Failed to open WAL"));
+        } finally {
+            await(storage.closeAsync());
+        }
     }
 
     // ------------------------------------------------------------------ append plan

@@ -41,9 +41,8 @@ class WalRecordsTest {
     /** Writes 1..3, truncates from 3, appends 3 again; returns what was accepted. */
     private List<WalRecords.Raw> writeKnownLog() throws Exception {
         List<WalRecords.Raw> accepted = new ArrayList<>();
-        FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
-        storage.open(dir).get(10, TimeUnit.SECONDS);
-        try {
+        try (FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build())) {
+            storage.open(dir).get(10, TimeUnit.SECONDS);
             List<LogEntryData> batch = List.of(entry(1, 1), entry(2, 1), entry(3, 1));
             storage.appendEntries(batch).get(10, TimeUnit.SECONDS);
             batch.forEach(e -> accepted.add(WalRecords.append(e)));
@@ -51,7 +50,7 @@ class WalRecordsTest {
             accepted.add(WalRecords.truncate(3));
             storage.appendEntries(List.of(entry(3, 2))).get(10, TimeUnit.SECONDS);
             accepted.add(WalRecords.append(entry(3, 2)));
-        } finally { storage.close(); }
+        }
         return accepted;
     }
 

@@ -110,14 +110,11 @@ final class DurableState implements AutoCloseable {
      * @return the replayed entries, for further assertions
      */
     static List<LogEntryData> replayAfterRestart(Path dataDir) throws Exception {
-        FileRaftStorage fresh = new FileRaftStorage(RaftStorageConfig.builder().build());
-        fresh.open(dataDir).get(10, TimeUnit.SECONDS);
-        try {
+        try (FileRaftStorage fresh = new FileRaftStorage(RaftStorageConfig.builder().build())) {
+            fresh.open(dataDir).get(10, TimeUnit.SECONDS);
             List<LogEntryData> entries = fresh.replayLog().get(10, TimeUnit.SECONDS);
             assertWellFormed(entries);
             return entries;
-        } finally {
-            fresh.closeAsync().get(10, TimeUnit.SECONDS);
         }
     }
 
@@ -127,9 +124,13 @@ final class DurableState implements AutoCloseable {
      * different after a reboot either.
      */
     static List<LogEntryData> assertRestartAgrees(FileRaftStorage live, Path dataDir) throws Exception {
-        List<LogEntryData> liveView = live.replayLog().get(10, TimeUnit.SECONDS);
-        assertWellFormed(liveView);
-        live.closeAsync().get(10, TimeUnit.SECONDS);
+        List<LogEntryData> liveView;
+        try {
+            liveView = live.replayLog().get(10, TimeUnit.SECONDS);
+            assertWellFormed(liveView);
+        } finally {
+            live.closeAsync().get(10, TimeUnit.SECONDS);
+        }
         List<LogEntryData> restarted = replayAfterRestart(dataDir);
         assertEquals(fingerprint(liveView), fingerprint(restarted),
                 "the log after a restart must match what the live instance replayed");

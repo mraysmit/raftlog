@@ -1454,10 +1454,11 @@ public class WalChaos {
                 .dataDir(testDir.toString())
                 .build();
 
-        FileRaftStorage storage = new FileRaftStorage(config);
-        storage.open().join();
-        storage.closeAsync().join();
-        storage.closeAsync().join(); // Should not throw
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
+            storage.open().join();
+            storage.closeAsync().join();
+            storage.closeAsync().join(); // Should not throw
+        }
     }
 
     private void opsAfterClose() throws Exception {
@@ -1466,17 +1467,18 @@ public class WalChaos {
                 .dataDir(testDir.toString())
                 .build();
 
-        FileRaftStorage storage = new FileRaftStorage(config);
-        storage.open().join();
-        storage.closeAsync().join();
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
+            storage.open().join();
+            storage.closeAsync().join();
 
-        try {
-            storage.appendEntries(List.of(
-                    new LogEntryData(1, 1, "oops".getBytes())
-            )).join();
-            throw new AssertionError("Should have thrown on closed storage");
-        } catch (Exception e) {
+            try {
+                storage.appendEntries(List.of(
+                        new LogEntryData(1, 1, "oops".getBytes())
+                )).join();
+                throw new AssertionError("Should have thrown on closed storage");
+            } catch (Exception e) {
                 LOG.info("    Correctly rejected: {}", e.getMessage());
+            }
         }
     }
 

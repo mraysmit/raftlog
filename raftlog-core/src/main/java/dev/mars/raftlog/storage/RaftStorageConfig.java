@@ -64,8 +64,10 @@ import java.util.Properties;
  *     .verifyWrites(true)
  *     .build();
  * 
- * RaftStorage storage = new FileRaftStorage(config);
- * storage.open().join();
+ * try (RaftStorage storage = new FileRaftStorage(config)) {
+ *     storage.open().join();
+ *     // use storage
+ * }
  * </pre>
  */
 public final class RaftStorageConfig {

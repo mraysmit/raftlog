@@ -108,22 +108,21 @@ class FileRaftStorageDiagnosticLoggingTest {
     }
 
     @Test void repeatedNonContiguousAppendsAreSampledAndSummarized() throws Exception {
-        FileRaftStorage storage = open(dir);
-        for (int i = 0; i < 100; i++) {
-            ExecutionException failure = assertThrows(ExecutionException.class,
-                    () -> await(storage.appendEntries(List.of(entry(2, 1)))));
-            var rejected = assertInstanceOf(FileRaftStorage.WriteRejectedException.class, failure.getCause());
-            assertEquals(WriteRejectionReason.INDEX_NOT_CONTIGUOUS, rejected.reason());
-        }
+        try (FileRaftStorage storage = open(dir)) {
+            for (int i = 0; i < 100; i++) {
+                ExecutionException failure = assertThrows(ExecutionException.class,
+                        () -> await(storage.appendEntries(List.of(entry(2, 1)))));
+                var rejected = assertInstanceOf(FileRaftStorage.WriteRejectedException.class, failure.getCause());
+                assertEquals(WriteRejectionReason.INDEX_NOT_CONTIGUOUS, rejected.reason());
+            }
 
-        List<ILoggingEvent> sampled = events("storage.write.rejected");
-        List<Long> expectedCounts = List.of(1L, 2L, 4L, 8L, 16L, 32L, 64L);
-        assertEquals(expectedCounts.size(), sampled.size());
-        for (int i = 0; i < expectedCounts.size(); i++) {
-            assertKeyValue(sampled.get(i), "rejectionCount", expectedCounts.get(i));
+            List<ILoggingEvent> sampled = events("storage.write.rejected");
+            List<Long> expectedCounts = List.of(1L, 2L, 4L, 8L, 16L, 32L, 64L);
+            assertEquals(expectedCounts.size(), sampled.size());
+            for (int i = 0; i < expectedCounts.size(); i++) {
+                assertKeyValue(sampled.get(i), "rejectionCount", expectedCounts.get(i));
+            }
         }
-
-        await(storage.closeAsync());
         ILoggingEvent summary = only("storage.write.rejection_summary");
         assertEquals(Level.INFO, summary.getLevel());
         assertKeyValue(summary, "reason", WriteRejectionReason.INDEX_NOT_CONTIGUOUS.name());
@@ -208,36 +207,34 @@ class FileRaftStorageDiagnosticLoggingTest {
     }
 
     @Test void oversizedPayloadIsLoggedLikeEveryOtherRefusal() throws Exception {
-        FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().maxPayloadSizeMb(1).build());
-        await(storage.open(dir));
-        try {
+        try (FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().maxPayloadSizeMb(1).build())) {
+            await(storage.open(dir));
             ILoggingEvent refusal = refusalOf(
                     storage.appendEntries(List.of(new LogEntryData(1, 1, new byte[1024 * 1024 + 1]))),
                     WriteRejectionReason.PAYLOAD_TOO_LARGE, "append");
             assertKeyValue(refusal, "entryIndex", 1L);
-        } finally { await(storage.closeAsync()); }
+        }
     }
 
     @Test void repeatedOversizedPayloadsAreSampledLikeEveryOtherRefusal() throws Exception {
         // This refusal is decided on the caller's thread, by its own copy of the sampling rule.
-        FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().maxPayloadSizeMb(1).build());
-        await(storage.open(dir));
-        byte[] oversized = new byte[1024 * 1024 + 1];
-        for (int i = 0; i < 5; i++) {
-            ExecutionException failure = assertThrows(ExecutionException.class,
-                    () -> await(storage.appendEntries(List.of(new LogEntryData(1, 1, oversized)))));
-            var rejected = assertInstanceOf(FileRaftStorage.WriteRejectedException.class, failure.getCause());
-            assertEquals(WriteRejectionReason.PAYLOAD_TOO_LARGE, rejected.reason());
-        }
+        try (FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().maxPayloadSizeMb(1).build())) {
+            await(storage.open(dir));
+            byte[] oversized = new byte[1024 * 1024 + 1];
+            for (int i = 0; i < 5; i++) {
+                ExecutionException failure = assertThrows(ExecutionException.class,
+                        () -> await(storage.appendEntries(List.of(new LogEntryData(1, 1, oversized)))));
+                var rejected = assertInstanceOf(FileRaftStorage.WriteRejectedException.class, failure.getCause());
+                assertEquals(WriteRejectionReason.PAYLOAD_TOO_LARGE, rejected.reason());
+            }
 
-        List<ILoggingEvent> sampled = events("storage.write.rejected");
-        List<Long> expectedCounts = List.of(1L, 2L, 4L);
-        assertEquals(expectedCounts.size(), sampled.size());
-        for (int i = 0; i < expectedCounts.size(); i++) {
-            assertKeyValue(sampled.get(i), "rejectionCount", expectedCounts.get(i));
+            List<ILoggingEvent> sampled = events("storage.write.rejected");
+            List<Long> expectedCounts = List.of(1L, 2L, 4L);
+            assertEquals(expectedCounts.size(), sampled.size());
+            for (int i = 0; i < expectedCounts.size(); i++) {
+                assertKeyValue(sampled.get(i), "rejectionCount", expectedCounts.get(i));
+            }
         }
-
-        await(storage.closeAsync());
         ILoggingEvent summary = only("storage.write.rejection_summary");
         assertKeyValue(summary, "reason", WriteRejectionReason.PAYLOAD_TOO_LARGE.name());
         assertKeyValue(summary, "rejectionCount", 5L);
@@ -247,16 +244,15 @@ class FileRaftStorageDiagnosticLoggingTest {
 
     @Test void fullDiskIsLoggedLikeEveryOtherRefusal() throws Exception {
         Disk disk = new Disk();
-        FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(
-                RaftStorageConfig.builder().minFreeSpaceMb(64).build(), disk);
-        await(storage.open(dir));
-        try {
+        try (FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(
+                RaftStorageConfig.builder().minFreeSpaceMb(64).build(), disk)) {
+            await(storage.open(dir));
             disk.full = true;
             ILoggingEvent refusal = refusalOf(
                     storage.appendEntries(List.of(new LogEntryData(1, 1, new byte[2 * 1024 * 1024]))),
                     WriteRejectionReason.INSUFFICIENT_DISK_SPACE, "append");
             assertKeyValue(refusal, "lastIndex", 0L);
-        } finally { await(storage.closeAsync()); }
+        }
     }
 
     // ------------------------------------------------------------------ the state behind the decisions
@@ -299,9 +295,9 @@ class FileRaftStorageDiagnosticLoggingTest {
     }
 
     @Test void replaySummaryOfACompactedLogSaysTheBoundaryWasReadFromItsRecord() throws Exception {
-        FileRaftStorage writer = openWithEntries(entry(1, 1), entry(2, 1), entry(3, 2));
-        await(writer.truncatePrefix(3));
-        await(writer.closeAsync());
+        try (FileRaftStorage writer = openWithEntries(entry(1, 1), entry(2, 1), entry(3, 2))) {
+            await(writer.truncatePrefix(3));
+        }
         appender.list.clear();
         FileRaftStorage storage = open(dir);
         try {
@@ -329,9 +325,9 @@ class FileRaftStorageDiagnosticLoggingTest {
 
     @Test void failedAppendSaysTheTailIsNowUnknownSoTheNextRefusalCanBeTracedToIt() throws Exception {
         FailingWrites io = new FailingWrites();
-        FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(RaftStorageConfig.builder().build(), io);
-        await(storage.open(dir));
-        try {
+        try (FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(
+                RaftStorageConfig.builder().build(), io)) {
+            await(storage.open(dir));
             io.fail = true;
             assertThrows(ExecutionException.class, () -> await(storage.appendEntries(List.of(entry(1, 1)))));
             ILoggingEvent lost = only("wal.tail.unknown");
@@ -342,19 +338,19 @@ class FileRaftStorageDiagnosticLoggingTest {
             io.fail = false;
             appender.list.clear();
             refusalOf(storage.appendEntries(List.of(entry(1, 1))), WriteRejectionReason.LOG_STATE_UNKNOWN, "append");
-        } finally { await(storage.closeAsync()); }
+        }
     }
 
     @Test void failedTruncationSaysTheTailIsNowUnknown() throws Exception {
         FailingWrites io = new FailingWrites();
-        FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(RaftStorageConfig.builder().build(), io);
-        await(storage.open(dir));
-        try {
+        try (FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(
+                RaftStorageConfig.builder().build(), io)) {
+            await(storage.open(dir));
             await(storage.appendEntries(List.of(entry(1, 1), entry(2, 1))));
             io.fail = true;
             assertThrows(ExecutionException.class, () -> await(storage.truncateSuffix(2)));
             assertKeyValue(only("wal.tail.unknown"), "operation", "suffix-truncate");
-        } finally { await(storage.closeAsync()); }
+        }
     }
 
     // ------------------------------------------------------------------ a file that is not a valid Raft log
@@ -628,14 +624,32 @@ class FileRaftStorageDiagnosticLoggingTest {
 
     private FileRaftStorage openWithEntries(LogEntryData... entries) throws Exception {
         FileRaftStorage storage = open(dir);
-        await(storage.appendEntries(List.of(entries)));
-        return storage;
+        try {
+            await(storage.appendEntries(List.of(entries)));
+            return storage;
+        } catch (Exception | Error failure) {
+            try {
+                storage.close();
+            } catch (RuntimeException closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+            throw failure;
+        }
     }
 
     private static FileRaftStorage open(Path dir) throws Exception {
         FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(false);
-        await(storage.open(dir));
-        return storage;
+        try {
+            await(storage.open(dir));
+            return storage;
+        } catch (Exception | Error failure) {
+            try {
+                storage.close();
+            } catch (RuntimeException closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+            throw failure;
+        }
     }
 
     private static LogEntryData entry(long index, long term) {

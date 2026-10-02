@@ -478,10 +478,8 @@ class ConfigResolverTest {
                     .verifyWrites(true)
                     .build();
 
-            FileRaftStorage storage = new FileRaftStorage(config);
-            storage.open(tempDir).get(5, java.util.concurrent.TimeUnit.SECONDS);
-
-            try {
+            try (FileRaftStorage storage = new FileRaftStorage(config)) {
+                storage.open(tempDir).get(5, java.util.concurrent.TimeUnit.SECONDS);
                 // Append with verification
                 storage.appendEntries(java.util.List.of(
                         new RaftStorage.LogEntryData(1, 1, "test".getBytes())
@@ -492,8 +490,6 @@ class ConfigResolverTest {
                 var entries = storage.replayLog().get(5, java.util.concurrent.TimeUnit.SECONDS);
                 assertEquals(1, entries.size());
                 assertEquals(1, entries.get(0).index());
-            } finally {
-                storage.close();
             }
         }
 
@@ -508,18 +504,14 @@ class ConfigResolverTest {
                     .maxPayloadSizeMb(1)
                     .build();
 
-            FileRaftStorage storage = new FileRaftStorage(config);
-            storage.open(tempDir).get(5, java.util.concurrent.TimeUnit.SECONDS);
-
-            try {
+            try (FileRaftStorage storage = new FileRaftStorage(config)) {
+                storage.open(tempDir).get(5, java.util.concurrent.TimeUnit.SECONDS);
                 // Small payload should work
                 byte[] smallPayload = new byte[1000]; // 1KB, well under 1MB
                 storage.appendEntries(java.util.List.of(
                         new RaftStorage.LogEntryData(1, 1, smallPayload)
                 )).get(5, java.util.concurrent.TimeUnit.SECONDS);
                 storage.sync().get(5, java.util.concurrent.TimeUnit.SECONDS);
-            } finally {
-                storage.close();
             }
         }
     }
