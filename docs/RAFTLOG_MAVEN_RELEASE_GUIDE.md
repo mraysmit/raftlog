@@ -2,9 +2,21 @@
 
 This document provides the exact, repo-specific process for publishing RaftLog to Maven Central via Sonatype Central Portal.
 
-## 1.4.0 release
+## 1.4.1 release
 
-This release makes the storage refuse anything that is not a valid Raft log, before writing a byte. The rules are listed under [Invariants the storage enforces](RAFTLOG_RAFT_WAL_DESIGN.md#invariants-the-storage-enforces). [Prefix compaction](RAFTLOG_RAFT_WAL_DESIGN.md#139-prefix-compaction-implementation-notes) persists its boundary in the WAL as a `PREFIX` record, which is record format 2. `AppendPlan` and configuration are strict: inconsistent arguments and values that cannot be parsed are errors, not things to work around. Parent, core and demo must all use 1.4.0.
+1.4.1 corrects recovery and input-handling faults found in 1.4.0. The WAL and metadata formats are unchanged, so a data directory written by 1.4.0 opens without migration. Parent, core and demo must all use 1.4.1.
+
+**Source-incompatible change.** The constructors `FileRaftStorage(boolean)` and `FileRaftStorage(boolean, boolean)`, deprecated in 1.4.0, are removed. Build the storage with `new FileRaftStorage(RaftStorageConfig.builder().build())`, and enable verification with `verifyWrites(true)` on the builder.
+
+Changes in behaviour:
+
+- **Inferred compaction boundary survives a restart.** A log compacted by a release before 1.4.0 has no `PREFIX` record, so its boundary is inferred from its first entry. 1.4.0 lost that boundary on restart once the whole retained suffix had been truncated, and then accepted writes inside the range the snapshot covers. The boundary is now established when the first entry is read.
+- **A format-1 log that overlaps its own compacted prefix is refused.** Following from the above, a log whose first entry implies a boundary and whose later records restart below it fails replay with `StorageException`. 1.4.0 loaded it.
+- **Torn-tail repair is narrower.** Replay truncates an incomplete fragment at the end of the file only when its header describes the operation that could validly come next: the next index for an `APPEND`, or a boundary inside the retained log for a `TRUNCATE`. Any other fragment is reported as `CorruptLogException` and the file is left unchanged.
+- **Torn-tail repair no longer depends on `maxPayloadSizeMb`.** Lowering the limit below the size of a record that was torn while being written no longer turns a repairable tail into a corruption report.
+- **`updateMetadata` refuses a null `votedFor`.** The returned future fails with `IllegalArgumentException`. Pass `Optional.empty()` for no vote.
+- **Write verification tolerates short reads.** With `verifyWrites` enabled, a positional read that returns fewer bytes than requested is completed instead of being reported as a failure, and a read-back record with a damaged length field is reported as `StorageException`.
+- **`LogEntryData` compares by content.** `equals`, `hashCode` and `toString` use the payload bytes. Code that relied on two entries with equal payloads being unequal must change.
 
 Before publishing, run `mvn -B -Pcoverage clean verify` and complete the separate packaged-program,
 model-soak, and unprivileged-Linux checks in the [test documentation](RAFTLOG_TEST_DOCUMENTATION.md#run-everything).
@@ -14,6 +26,10 @@ their combined behavior.
 Prepare signatures and source/Javadoc artifacts with `mvn -B -Prelease -DskipTests clean verify` after the test runs. Publish the verified source with `mvn -B -Prelease -DskipTests clean deploy`. The configured plugin automatically publishes and waits for `published`; an upload or local install alone is not success. Confirm the parent/core/demo POMs and JARs from Central and compare hashes, then publish the release Git tag and source revision. Follow the [Central Portal Maven documentation](https://central.sonatype.org/publish/publish-portal-maven/).
 
 Application snapshot coordination and deployment-filesystem power-loss acceptance remain the consuming project's responsibility.
+
+## 1.4.0 release
+
+This release makes the storage refuse anything that is not a valid Raft log, before writing a byte. The rules are listed under [Invariants the storage enforces](RAFTLOG_RAFT_WAL_DESIGN.md#invariants-the-storage-enforces). [Prefix compaction](RAFTLOG_RAFT_WAL_DESIGN.md#139-prefix-compaction-implementation-notes) persists its boundary in the WAL as a `PREFIX` record, which is record format 2. `AppendPlan` and configuration are strict: inconsistent arguments and values that cannot be parsed are errors, not things to work around. Parent, core and demo must all use 1.4.0.
 
 ## Table of Contents
 
@@ -169,12 +185,12 @@ mvn -B -Pcoverage clean verify
 # Complete the remaining checks in docs/RAFTLOG_TEST_DOCUMENTATION.md#run-everything
 
 # 2) Set release version
-mvn -B versions:set -DnewVersion=1.4.0
+mvn -B versions:set -DnewVersion=1.4.1
 mvn -B versions:commit
 
 # 3) Commit version bump
 git add -A
-git commit -m "Release 1.4.0"
+git commit -m "Release 1.4.1"
 
 # 4) Prepare and verify signed release artifacts from clean target directories
 mvn -B -Prelease -DskipTests clean verify
@@ -183,9 +199,9 @@ mvn -B -Prelease -DskipTests clean verify
 mvn -B -Prelease -DskipTests clean deploy
 
 # 6) Tag and push after successful publish
-git tag v1.4.0
+git tag v1.4.1
 git push origin main
-git push origin v1.4.0
+git push origin v1.4.1
 ```
 
 ### Windows Pre-Deploy Cleanup (Recommended)
@@ -199,7 +215,7 @@ Remove-Item -Force -Recurse ".\target" -ErrorAction SilentlyContinue
 
 ### Important Central Portal Rules
 
-1. Artifact versions are immutable. Once `1.4.0` is in Central it cannot be replaced or withdrawn, so a correction needs a new version number.
+1. Artifact versions are immutable. Once a version is in Central it cannot be replaced or withdrawn, so a correction needs a new version number.
 2. Do not use legacy OSSRH `distributionManagement` URLs in this project.
 3. The Central publishing plugin must be active in main build plugins, not hidden in an inactive profile.
 4. If Central says your key is missing, verify key publication and UID email format first.

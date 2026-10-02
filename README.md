@@ -82,20 +82,20 @@ handing back a log that replays into something `AppendPlan` cannot reason about.
 <dependency>
     <groupId>io.github.mraysmit</groupId>
     <artifactId>raftlog-core</artifactId>
-    <version>1.4.0</version>
+    <version>1.4.1</version>
 </dependency>
 ```
 
 ### Gradle (Groovy)
 
 ```groovy
-implementation 'io.github.mraysmit:raftlog-core:1.4.0'
+implementation 'io.github.mraysmit:raftlog-core:1.4.1'
 ```
 
 ### Gradle (Kotlin)
 
 ```kotlin
-implementation("io.github.mraysmit:raftlog-core:1.4.0")
+implementation("io.github.mraysmit:raftlog-core:1.4.1")
 ```
 
 ## Building
