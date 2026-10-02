@@ -110,11 +110,15 @@ final class DurableState implements AutoCloseable {
      * @return the replayed entries, for further assertions
      */
     static List<LogEntryData> replayAfterRestart(Path dataDir) throws Exception {
-        try (FileRaftStorage fresh = new FileRaftStorage(RaftStorageConfig.builder().build())) {
+        FileRaftStorage fresh = new FileRaftStorage(RaftStorageConfig.builder().build());
+        try {
             fresh.open(dataDir).get(10, TimeUnit.SECONDS);
             List<LogEntryData> entries = fresh.replayLog().get(10, TimeUnit.SECONDS);
             assertWellFormed(entries);
             return entries;
+        } finally {
+            // Bounded, so a close that never finishes fails the test instead of stalling the build.
+            fresh.closeAsync().get(10, TimeUnit.SECONDS);
         }
     }
 
