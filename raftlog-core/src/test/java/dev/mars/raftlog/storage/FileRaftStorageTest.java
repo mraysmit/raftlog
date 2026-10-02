@@ -30,6 +30,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -63,6 +64,15 @@ class FileRaftStorageTest {
     void tearDown() {
         if (storage != null) {
             storage.close();
+        }
+    }
+
+    private FileRaftStorage.CorruptLogException assertCorruptReplay(FileRaftStorage storage) {
+        // Reporting corruption must never modify the file it reports on.
+        try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> storage.replayLog().get(5, TimeUnit.SECONDS));
+            return assertInstanceOf(FileRaftStorage.CorruptLogException.class, failure.getCause());
         }
     }
 
@@ -216,10 +226,14 @@ class FileRaftStorageTest {
 
         LogEntryData entry = new LogEntryData(1, 1, hugePayload);
 
-        // Should fail with StorageException
-        var future = storage.appendEntries(List.of(entry));
-        
-        assertThrows(Exception.class, () -> future.get(5, TimeUnit.SECONDS));
+        // Should fail with StorageException, and must not have written any of it
+        try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+            var future = storage.appendEntries(List.of(entry));
+            assertThrows(Exception.class, () -> future.get(5, TimeUnit.SECONDS));
+        }
+
+        // Refused must also mean nothing is different after a reboot.
+        DurableState.assertRestartAgrees(storage, tempDir);
     }
 
     // ========================================================================
@@ -368,11 +382,10 @@ class FileRaftStorageTest {
         storage = new FileRaftStorage(true);
         storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
-        List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-
-        // Should only recover the first entry
-        assertEquals(1, replayed.size());
-        assertEquals(1, replayed.get(0).index());
+        byte[] before = Files.readAllBytes(logPath);
+        FileRaftStorage.CorruptLogException corrupt = assertCorruptReplay(storage);
+        assertEquals(1, corrupt.entriesBeforeCorruption());
+        assertArrayEquals(before, Files.readAllBytes(logPath));
     }
 
     // ========================================================================

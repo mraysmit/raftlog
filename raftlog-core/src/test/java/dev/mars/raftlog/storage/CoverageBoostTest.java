@@ -54,10 +54,11 @@ class CoverageBoostTest {
     class AppendPlanBranchTests {
 
         @Test
-        @DisplayName("Constructor with null entries creates empty list")
+        @DisplayName("Constructor refuses null entries; a truncation-only plan takes an empty list")
         void testConstructorNullEntries() {
-            AppendPlan plan = new AppendPlan(5L, null);
-            
+            assertThrows(NullPointerException.class, () -> new AppendPlan(5L, null));
+            AppendPlan plan = new AppendPlan(5L, List.of());
+
             assertEquals(5L, plan.truncateFromIndex());
             assertNotNull(plan.entriesToAppend());
             assertTrue(plan.entriesToAppend().isEmpty());
@@ -74,7 +75,7 @@ class CoverageBoostTest {
                     new LogEntryData(2, 1, "b".getBytes())
             );
             AppendPlan plan = new AppendPlan(null, entries);
-            
+
             assertNull(plan.truncateFromIndex());
             assertEquals(2, plan.entriesToAppend().size());
             assertFalse(plan.requiresTruncation());
@@ -86,7 +87,7 @@ class CoverageBoostTest {
         @DisplayName("Empty plan - no truncation, no entries")
         void testEmptyPlanNoPersistence() {
             AppendPlan plan = AppendPlan.empty();
-            
+
             assertNull(plan.truncateFromIndex());
             assertTrue(plan.entriesToAppend().isEmpty());
             assertFalse(plan.requiresTruncation());
@@ -95,15 +96,12 @@ class CoverageBoostTest {
         }
 
         @Test
-        @DisplayName("from() with null incoming entries returns empty")
+        @DisplayName("from() refuses null incoming entries")
         void testFromNullEntries() {
             List<LogEntryData> log = new ArrayList<>();
             log.add(new LogEntryData(1, 1, "a".getBytes()));
-            
-            AppendPlan plan = AppendPlan.from(1, null, log);
-            
-            assertFalse(plan.requiresPersistence());
-            assertTrue(plan.entriesToAppend().isEmpty());
+
+            assertThrows(NullPointerException.class, () -> AppendPlan.from(1, null, log));
         }
 
         @Test
@@ -111,26 +109,25 @@ class CoverageBoostTest {
         void testFromEmptyEntries() {
             List<LogEntryData> log = new ArrayList<>();
             log.add(new LogEntryData(1, 1, "a".getBytes()));
-            
+
             AppendPlan plan = AppendPlan.from(1, Collections.emptyList(), log);
-            
+
             assertFalse(plan.requiresPersistence());
         }
 
         @Test
-        @DisplayName("from() with negative index treats all as new")
+        @DisplayName("from() refuses a start index that disagrees with the entries or is below 1")
         void testFromNegativeIndex() {
             List<LogEntryData> incoming = List.of(
                     new LogEntryData(1, 1, "a".getBytes()),
                     new LogEntryData(2, 1, "b".getBytes())
             );
             List<LogEntryData> log = new ArrayList<>();
-            
-            // startIndex = 0 means logPos = -1 (invalid)
-            AppendPlan plan = AppendPlan.from(0, incoming, log);
-            
-            assertEquals(2, plan.entriesToAppend().size());
-            assertFalse(plan.requiresTruncation());
+
+            // The entries say they begin at 1. A start index of 0 contradicts them, and is not a log index.
+            assertThrows(IllegalArgumentException.class, () -> AppendPlan.from(0, incoming, log));
+            assertThrows(IllegalArgumentException.class, () -> AppendPlan.from(2, incoming, log));
+            assertEquals(2, AppendPlan.from(1, incoming, log).entriesToAppend().size());
         }
 
         @Test
@@ -139,13 +136,15 @@ class CoverageBoostTest {
             List<LogEntryData> log = new ArrayList<>();
             log.add(new LogEntryData(1, 1, "a".getBytes()));
             log.add(new LogEntryData(2, 1, "b".getBytes()));
-            
-            // Truncate from index 10 (beyond log size)
-            AppendPlan plan = new AppendPlan(10L, List.of(new LogEntryData(3, 1, "c".getBytes())));
-            plan.applyTo(log);
-            
-            // Truncation should be no-op, just append
-            assertEquals(3, log.size());
+
+            // A replacement must begin where the truncation does, or it leaves a hole.
+            assertThrows(IllegalArgumentException.class,
+                    () -> new AppendPlan(10L, List.of(new LogEntryData(3, 1, "c".getBytes()))));
+
+            // A truncation beyond the end of the log is not a no-op: the plan was made for another log.
+            AppendPlan plan = new AppendPlan(10L, List.of(new LogEntryData(10, 1, "c".getBytes())));
+            assertThrows(IllegalArgumentException.class, () -> plan.applyTo(log));
+            assertEquals(2, log.size(), "a refused plan leaves the log untouched");
         }
 
         @Test
@@ -153,13 +152,11 @@ class CoverageBoostTest {
         void testApplyToTruncateNegativePosition() {
             List<LogEntryData> log = new ArrayList<>();
             log.add(new LogEntryData(1, 1, "a".getBytes()));
-            
-            // truncateFromIndex = 0 means fromPos = -1 (invalid)
-            AppendPlan plan = new AppendPlan(0L, List.of(new LogEntryData(2, 1, "b".getBytes())));
-            plan.applyTo(log);
-            
-            // Truncation should be no-op, just append
-            assertEquals(2, log.size());
+
+            // Log indices start at 1, so a plan cannot truncate from 0.
+            assertThrows(IllegalArgumentException.class,
+                    () -> new AppendPlan(0L, List.of(new LogEntryData(2, 1, "b".getBytes()))));
+            assertEquals(1, log.size());
         }
 
         @Test
@@ -169,15 +166,15 @@ class CoverageBoostTest {
             log.add(new LogEntryData(1, 1, "a".getBytes()));
             log.add(new LogEntryData(2, 1, "b".getBytes()));
             log.add(new LogEntryData(3, 1, "c".getBytes()));
-            
+
             // Incoming entries match what's in log
             List<LogEntryData> incoming = List.of(
                     new LogEntryData(1, 1, "a".getBytes()),
                     new LogEntryData(2, 1, "b".getBytes())
             );
-            
+
             AppendPlan plan = AppendPlan.from(1, incoming, log);
-            
+
             assertFalse(plan.requiresTruncation());
             assertFalse(plan.hasEntriesToAppend());
             assertFalse(plan.requiresPersistence());
@@ -189,16 +186,16 @@ class CoverageBoostTest {
             List<LogEntryData> log = new ArrayList<>();
             log.add(new LogEntryData(1, 1, "a".getBytes()));
             log.add(new LogEntryData(2, 1, "b".getBytes()));
-            
+
             // First entry matches, second and third are new
             List<LogEntryData> incoming = List.of(
                     new LogEntryData(1, 1, "a".getBytes()),
                     new LogEntryData(2, 1, "b".getBytes()),
                     new LogEntryData(3, 1, "c".getBytes())
             );
-            
+
             AppendPlan plan = AppendPlan.from(1, incoming, log);
-            
+
             assertFalse(plan.requiresTruncation());
             assertTrue(plan.hasEntriesToAppend());
             assertEquals(1, plan.entriesToAppend().size());
@@ -211,15 +208,15 @@ class CoverageBoostTest {
             List<LogEntryData> log = new ArrayList<>();
             log.add(new LogEntryData(1, 1, "a".getBytes()));
             log.add(new LogEntryData(2, 1, "b".getBytes()));
-            
+
             // Different term at index 1
             List<LogEntryData> incoming = List.of(
                     new LogEntryData(1, 2, "x".getBytes()),
                     new LogEntryData(2, 2, "y".getBytes())
             );
-            
+
             AppendPlan plan = AppendPlan.from(1, incoming, log);
-            
+
             assertTrue(plan.requiresTruncation());
             assertEquals(1L, plan.truncateFromIndex());
             assertEquals(2, plan.entriesToAppend().size());
@@ -230,17 +227,16 @@ class CoverageBoostTest {
         void testFromIncomingStartsBeyondLog() {
             List<LogEntryData> log = new ArrayList<>();
             log.add(new LogEntryData(1, 1, "a".getBytes()));
-            
+
             // Start at index 3, log only has up to index 1
             List<LogEntryData> incoming = List.of(
                     new LogEntryData(3, 1, "c".getBytes()),
                     new LogEntryData(4, 1, "d".getBytes())
             );
-            
-            AppendPlan plan = AppendPlan.from(3, incoming, log);
-            
-            assertFalse(plan.requiresTruncation());
-            assertEquals(2, plan.entriesToAppend().size());
+
+            // Entry 2 is missing. The previous-entry check of AppendEntries should have refused the
+            // request; a plan that appended 3 and 4 anyway would put a hole in the log.
+            assertThrows(IllegalArgumentException.class, () -> AppendPlan.from(3, incoming, log));
         }
     }
 
@@ -258,16 +254,21 @@ class CoverageBoostTest {
             FileRaftStorage storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
-            // Index 0 should work (though unusual for Raft)
-            storage.appendEntries(List.of(new LogEntryData(0, 1, "zero".getBytes())))
-                    .get(5, TimeUnit.SECONDS);
+            // Raft log indices start at 1; index 0 is refused before anything is written
+            DurableState untouchedAtLine262 = DurableState.expectUnchanged(tempDir);
+            var failure = assertThrows(java.util.concurrent.ExecutionException.class, () ->
+                    storage.appendEntries(List.of(new LogEntryData(0, 1, "zero".getBytes())))
+                            .get(5, TimeUnit.SECONDS));
+            untouchedAtLine262.close();
+            var rejected = assertInstanceOf(FileRaftStorage.WriteRejectedException.class, failure.getCause());
+            assertEquals(WriteRejectionReason.INDEX_NOT_CONTIGUOUS, rejected.reason());
             storage.sync().get(5, TimeUnit.SECONDS);
 
             List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
-            assertEquals(1, replayed.size());
-            assertEquals(0, replayed.get(0).index());
+            assertEquals(0, replayed.size());
 
-            storage.close();
+            // Refused must also mean nothing is different after a reboot.
+            DurableState.assertRestartAgrees(storage, tempDir);
         }
 
         @Test
@@ -293,6 +294,8 @@ class CoverageBoostTest {
             FileRaftStorage storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
+            // Long.MAX_VALUE is only reachable as the continuation of a compacted log.
+            storage.truncatePrefix(Long.MAX_VALUE - 1).get(5, TimeUnit.SECONDS);
             storage.appendEntries(List.of(new LogEntryData(Long.MAX_VALUE, 1, "max".getBytes())))
                     .get(5, TimeUnit.SECONDS);
             storage.sync().get(5, TimeUnit.SECONDS);
@@ -350,13 +353,19 @@ class CoverageBoostTest {
             )).get(5, TimeUnit.SECONDS);
             storage.sync().get(5, TimeUnit.SECONDS);
 
-            // Truncate from index 0 removes everything
-            storage.truncateSuffix(0).get(5, TimeUnit.SECONDS);
+            // Truncating from index 0 is refused; from index 1 removes everything
+            DurableState untouchedAtLine358 = DurableState.expectUnchanged(tempDir);
+            var failure = assertThrows(java.util.concurrent.ExecutionException.class, () ->
+                    storage.truncateSuffix(0).get(5, TimeUnit.SECONDS));
+            untouchedAtLine358.close();
+            var rejected = assertInstanceOf(FileRaftStorage.WriteRejectedException.class, failure.getCause());
+            assertEquals(WriteRejectionReason.INVALID_TRUNCATION, rejected.reason());
+            storage.truncateSuffix(1).get(5, TimeUnit.SECONDS);
             storage.sync().get(5, TimeUnit.SECONDS);
 
             // Should be able to replay and get nothing
             storage.close();
-            
+
             FileRaftStorage storage2 = new FileRaftStorage(true);
             storage2.open(tempDir).get(5, TimeUnit.SECONDS);
             List<LogEntryData> replayed = storage2.replayLog().get(5, TimeUnit.SECONDS);
@@ -384,7 +393,7 @@ class CoverageBoostTest {
             storage.sync().get(5, TimeUnit.SECONDS);
 
             storage.close();
-            
+
             FileRaftStorage storage2 = new FileRaftStorage(true);
             storage2.open(tempDir).get(5, TimeUnit.SECONDS);
             List<LogEntryData> replayed = storage2.replayLog().get(5, TimeUnit.SECONDS);
@@ -578,7 +587,7 @@ class CoverageBoostTest {
 
             try {
                 System.setProperty("raftlog.dataDir", tempDir.toString());
-                System.setProperty("raftlog.syncEnabled", "false");
+                System.setProperty("raftlog.syncEnabled", "true");
                 System.setProperty("raftlog.verifyWrites", "true");
                 System.setProperty("raftlog.minFreeSpaceMb", "256");
                 System.setProperty("raftlog.maxPayloadSizeMb", "64");
@@ -586,7 +595,7 @@ class CoverageBoostTest {
                 RaftStorageConfig config = RaftStorageConfig.builder().build();
 
                 assertEquals(tempDir, config.dataDir());
-                assertFalse(config.syncEnabled());
+                assertTrue(config.syncEnabled());
                 assertTrue(config.verifyWrites());
                 assertEquals(256, config.minFreeSpaceMb());
                 assertEquals(64, config.maxPayloadSizeMb());
@@ -607,10 +616,8 @@ class CoverageBoostTest {
             try {
                 System.setProperty("raftlog.minFreeSpaceMb", "not-a-number");
 
-                RaftStorageConfig config = RaftStorageConfig.builder().build();
-
-                // Should fall back to default
-                assertEquals(64, config.minFreeSpaceMb());
+                // Refused, not replaced by the default.
+                assertThrows(IllegalArgumentException.class, () -> RaftStorageConfig.builder().build());
             } finally {
                 restoreProperty("raftlog.minFreeSpaceMb", original);
             }
@@ -673,7 +680,7 @@ class CoverageBoostTest {
             // This test creates a properties file but since Builder is already 
             // instantiated, we need to verify the loading mechanism works
             Path propsFile = Path.of("raftlog.properties");
-            
+
             // Properties file loading happens at Builder construction time,
             // and the working directory might already have a file or not.
             // We just verify the config loads without error
@@ -750,7 +757,7 @@ class CoverageBoostTest {
         @Test
         @DisplayName("Operations work with sync disabled")
         void testSyncDisabledOperations() throws Exception {
-            FileRaftStorage storage = new FileRaftStorage(false); // sync disabled
+            FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(false);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             storage.appendEntries(List.of(
@@ -769,7 +776,7 @@ class CoverageBoostTest {
         @Test
         @DisplayName("Metadata works with sync disabled")
         void testMetadataSyncDisabled() throws Exception {
-            FileRaftStorage storage = new FileRaftStorage(false);
+            FileRaftStorage storage = FileRaftStorage.unsafeWithoutFsyncForTesting(false);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             storage.updateMetadata(5, Optional.of("no-sync-node")).get(5, TimeUnit.SECONDS);
@@ -887,21 +894,16 @@ class CoverageBoostTest {
         void testBooleanConstructorSyncEnabled() throws Exception {
             FileRaftStorage storage = new FileRaftStorage(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
-            
+
             assertTrue(storage.config().syncEnabled());
-            
+
             storage.close();
         }
 
         @Test
-        @DisplayName("Boolean constructor - sync disabled")
-        void testBooleanConstructorSyncDisabled() throws Exception {
-            FileRaftStorage storage = new FileRaftStorage(false);
-            storage.open(tempDir).get(5, TimeUnit.SECONDS);
-            
-            assertFalse(storage.config().syncEnabled());
-            
-            storage.close();
+        @DisplayName("Boolean constructor rejects sync disabled")
+        void testBooleanConstructorRejectsSyncDisabled() {
+            assertThrows(IllegalArgumentException.class, () -> new FileRaftStorage(false));
         }
 
         @Test
@@ -909,10 +911,10 @@ class CoverageBoostTest {
         void testTwoBooleanConstructor() throws Exception {
             FileRaftStorage storage = new FileRaftStorage(true, true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
-            
+
             assertTrue(storage.config().syncEnabled());
             assertTrue(storage.config().verifyWrites());
-            
+
             storage.close();
         }
 
@@ -921,7 +923,7 @@ class CoverageBoostTest {
         void testConfigConstructor() throws Exception {
             RaftStorageConfig config = RaftStorageConfig.builder()
                     .dataDir(tempDir)
-                    .syncEnabled(false)
+                    .syncEnabled(true)
                     .verifyWrites(true)
                     .minFreeSpaceMb(32)
                     .maxPayloadSizeMb(8)
@@ -932,7 +934,7 @@ class CoverageBoostTest {
 
             RaftStorageConfig actual = storage.config();
             assertEquals(tempDir, actual.dataDir());
-            assertFalse(actual.syncEnabled());
+            assertTrue(actual.syncEnabled());
             assertTrue(actual.verifyWrites());
             assertEquals(32, actual.minFreeSpaceMb());
             assertEquals(8, actual.maxPayloadSizeMb());

@@ -19,6 +19,9 @@ import dev.mars.raftlog.storage.FileRaftStorage;
 import dev.mars.raftlog.storage.RaftStorage.LogEntryData;
 import dev.mars.raftlog.storage.RaftStorage.PersistentMeta;
 import dev.mars.raftlog.storage.RaftStorageConfig;
+import dev.mars.raftlog.storage.WriteRejectionReason;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.RandomAccessFile;
@@ -32,7 +35,11 @@ import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -63,18 +70,19 @@ import java.util.concurrent.atomic.AtomicLong;
  * mvn package -pl raftlog-demo -am
  * 
  * # Run all chaos tests
- * java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos
+ * java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos
  * 
  * # Run specific test
- * java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos concurrent
- * java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos corruption
- * java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos boundary
- * java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos stress
+ * java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos concurrent
+ * java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos corruption
+ * java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos boundary
+ * java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos stress
  * </pre>
  *
  * @see FileRaftStorage
  */
 public class WalChaos {
+    private static final Logger LOG = LoggerFactory.getLogger(WalChaos.class);
 
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
     private static final int MAGIC = 0x52414654; // 'RAFT'
@@ -87,52 +95,72 @@ public class WalChaos {
         this.baseDir = baseDir;
     }
 
+    /** How many scenarios passed and failed. */
+    public record Summary(int passed, int failed) { }
+
     public static void main(String[] args) throws Exception {
-        System.out.println("╔═══════════════════════════════════════════════════════════════╗");
-        System.out.println("║              WAL CHAOS TESTING SUITE                          ║");
-        System.out.println("║  \"If it survives this, it survives anything\"                  ║");
-        System.out.println("╚═══════════════════════════════════════════════════════════════╝");
-        System.out.println();
+        try {
+            Summary summary = run(args.length > 0 ? args[0] : "all");
+            System.exit(summary.failed() > 0 ? 1 : 0);
+        } catch (IllegalArgumentException unknownCategory) {
+            LOG.error("{}", unknownCategory.getMessage());
+            System.exit(1);
+        }
+    }
+
+    /**
+     * Runs one category of scenarios, or all of them, and reports how many passed and failed.
+     * This is what the build runs, through WalChaosTest, so the chaos scenarios are tests in fact
+     * and not only in name. {@link #main} adds nothing but an exit code.
+     *
+     * @param category concurrent, corruption, boundary, stress, nasty or all, in any letter case
+     * @throws IllegalArgumentException for any other category: running nothing and reporting
+     *                                  success would be worse than refusing
+     */
+    public static Summary run(String category) throws Exception {
+        String testFilter = category == null ? "" : category.toLowerCase();
+        if (!java.util.Set.of("concurrent", "corruption", "boundary", "stress", "nasty", "all").contains(testFilter)) {
+            throw new IllegalArgumentException("Unknown chaos category '" + category
+                    + "'. Available: concurrent, corruption, boundary, stress, nasty, all");
+        }
+
+        LOG.info("╔═══════════════════════════════════════════════════════════════╗");
+        LOG.info("║              WAL CHAOS TESTING SUITE                          ║");
+        LOG.info("║  \"If it survives this, it survives anything\"                  ║");
+        LOG.info("╚═══════════════════════════════════════════════════════════════╝");
+        LOG.info("");
 
         Path chaosDir = Files.createTempDirectory("wal-chaos-");
-        System.out.println("Chaos directory: " + chaosDir.toAbsolutePath());
-        System.out.println();
+        LOG.info("Chaos directory: {}", chaosDir.toAbsolutePath());
+        LOG.info("");
 
         WalChaos chaos = new WalChaos(chaosDir);
-
-        String testFilter = args.length > 0 ? args[0].toLowerCase() : "all";
-
         try {
             switch (testFilter) {
                 case "concurrent" -> chaos.runConcurrencyTests();
                 case "corruption" -> chaos.runCorruptionTests();
                 case "boundary" -> chaos.runBoundaryTests();
                 case "stress" -> chaos.runStressTests();
-                case "all" -> {
+                case "nasty" -> chaos.runNastyEdgeCases();
+                default -> {
                     chaos.runConcurrencyTests();
                     chaos.runCorruptionTests();
                     chaos.runBoundaryTests();
                     chaos.runStressTests();
                     chaos.runNastyEdgeCases();
                 }
-                default -> {
-                    System.err.println("Unknown test filter: " + testFilter);
-                    System.err.println("Available: concurrent, corruption, boundary, stress, all");
-                    System.exit(1);
-                }
             }
         } finally {
-            System.out.println();
-            System.out.println("╔═══════════════════════════════════════════════════════════════╗");
-            System.out.printf("║  RESULTS: %d passed, %d failed                                 ║%n",
+            LOG.info("");
+            LOG.info("╔═══════════════════════════════════════════════════════════════╗");
+            LOG.info("║  RESULTS: {} passed, {} failed                                 ║",
                     chaos.testsPassed.get(), chaos.testsFailed.get());
-            System.out.println("╚═══════════════════════════════════════════════════════════════╝");
+            LOG.info("╚═══════════════════════════════════════════════════════════════╝");
 
             // Cleanup
             deleteRecursively(chaosDir);
         }
-
-        System.exit(chaos.testsFailed.get() > 0 ? 1 : 0);
+        return new Summary(chaos.testsPassed.get(), chaos.testsFailed.get());
     }
 
     // =========================================================================
@@ -150,18 +178,27 @@ public class WalChaos {
         chaosTest("Thread Interrupt Storm", this::threadInterruptStorm);
     }
 
+    /**
+     * Twenty threads race to append, each holding an index from a shared counter. A
+     * Raft node has one consensus thread, so this is misuse. The storage must not
+     * reorder or buffer: it accepts only the append that continues the tail and
+     * refuses the rest with a reason, leaving a contiguous log whatever the race did.
+     */
     private void concurrentWriterStorm() throws Exception {
         Path testDir = createTestDir("concurrent-storm");
         RaftStorageConfig config = RaftStorageConfig.builder()
                 .dataDir(testDir.toString())
-                .syncEnabled(false) // Speed up test
+                .syncEnabled(true)
                 .build();
 
         int numThreads = 20;
         int entriesPerThread = 100;
+        LOG.debug("    writer storm: {} threads x {} entries, every thread racing for the same indices", numThreads, entriesPerThread);
         AtomicLong indexCounter = new AtomicLong(1);
-        AtomicInteger successCount = new AtomicInteger(0);
-        AtomicInteger errorCount = new AtomicInteger(0);
+        AtomicInteger accepted = new AtomicInteger(0);
+        AtomicInteger refused = new AtomicInteger(0);
+        AtomicInteger unexpected = new AtomicInteger(0);
+        AtomicLong acceptedWalBytes = new AtomicLong(0);
 
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
@@ -179,11 +216,17 @@ public class WalChaos {
                             long index = indexCounter.getAndIncrement();
                             byte[] payload = ("Thread" + threadId + "-Entry" + i).getBytes(StandardCharsets.UTF_8);
                             LogEntryData entry = new LogEntryData(index, 1, payload);
-                            storage.appendEntries(List.of(entry)).join();
-                            successCount.incrementAndGet();
+                            switch (outcome(storage.appendEntries(List.of(entry)), WriteRejectionReason.INDEX_NOT_CONTIGUOUS)) {
+                                case ACCEPTED -> {
+                                    accepted.incrementAndGet();
+                                    acceptedWalBytes.addAndGet(walRecordBytes(payload.length));
+                                }
+                                case REFUSED -> refused.incrementAndGet();
+                                case FAILED -> unexpected.incrementAndGet();
+                            }
                         }
                     } catch (Exception e) {
-                        errorCount.incrementAndGet();
+                        unexpected.incrementAndGet();
                     } finally {
                         doneLatch.countDown();
                     }
@@ -195,13 +238,22 @@ public class WalChaos {
             storage.sync().join();
             executor.shutdown();
 
-            // Verify
+            // Verify. 1,999 refusals must have written nothing at all.
+            assertEveryWalByteIsAccountedFor(testDir, acceptedWalBytes.get());
             List<LogEntryData> entries = storage.replayLog().join();
-            int expectedTotal = numThreads * entriesPerThread;
+            int submitted = numThreads * entriesPerThread;
+            LOG.info("    {} submitted: {} accepted, {} refused as out of order", submitted, accepted.get(), refused.get());
 
-            if (entries.size() != expectedTotal) {
-                throw new AssertionError("Expected " + expectedTotal + " entries, got " + entries.size());
+            if (unexpected.get() != 0) {
+                throw new AssertionError(unexpected.get() + " appends failed for a reason other than INDEX_NOT_CONTIGUOUS");
             }
+            if (accepted.get() + refused.get() != submitted) {
+                throw new AssertionError("Every append must be accepted or refused");
+            }
+            if (entries.size() != accepted.get()) {
+                throw new AssertionError("Expected exactly the " + accepted.get() + " accepted entries, got " + entries.size());
+            }
+            assertContiguous(entries);
 
             // Verify no interleaved/corrupt payloads
             for (LogEntryData entry : entries) {
@@ -213,16 +265,25 @@ public class WalChaos {
         }
     }
 
+    /**
+     * Fifty threads persist terms in no particular order. A term that is lower than
+     * the one already on disk would let the node vote twice in a term, so every such
+     * update must be refused. The persisted state must end as the highest accepted
+     * term together with the vote that was cast in it.
+     */
     private void concurrentMetadataThrashing() throws Exception {
         Path testDir = createTestDir("metadata-thrash");
         RaftStorageConfig config = RaftStorageConfig.builder()
                 .dataDir(testDir.toString())
-                .syncEnabled(false)
+                .syncEnabled(true)
                 .build();
 
         int numThreads = 50;
         int updatesPerThread = 20;
-        AtomicInteger errorCount = new AtomicInteger(0);
+        LOG.debug("    metadata thrashing: {} threads x {} updates", numThreads, updatesPerThread);
+        AtomicInteger refused = new AtomicInteger(0);
+        AtomicInteger unexpected = new AtomicInteger(0);
+        Map<Long, String> acceptedVotes = new ConcurrentHashMap<>();
 
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
@@ -239,10 +300,14 @@ public class WalChaos {
                         for (int i = 0; i < updatesPerThread; i++) {
                             long term = threadId * 1000L + i;
                             String votedFor = "node-" + threadId + "-" + i;
-                            storage.updateMetadata(term, Optional.of(votedFor)).join();
+                            switch (outcome(storage.updateMetadata(term, Optional.of(votedFor)), WriteRejectionReason.TERM_REGRESSION)) {
+                                case ACCEPTED -> acceptedVotes.put(term, votedFor);
+                                case REFUSED -> refused.incrementAndGet();
+                                case FAILED -> unexpected.incrementAndGet();
+                            }
                         }
                     } catch (Exception e) {
-                        errorCount.incrementAndGet();
+                        unexpected.incrementAndGet();
                     } finally {
                         doneLatch.countDown();
                     }
@@ -253,30 +318,56 @@ public class WalChaos {
             doneLatch.await(60, TimeUnit.SECONDS);
             executor.shutdown();
 
-            // Verify metadata is still readable and consistent
+            // End on a refusal. An accepted update replaces the staging file, so a refusal
+            // that left one behind would otherwise be masked by the update after it.
+            expectRefusal(testDir, () -> storage.updateMetadata(-1, Optional.empty()), WriteRejectionReason.TERM_REGRESSION);
+            assertEveryWalByteIsAccountedFor(testDir, 0);
+
+            LOG.info("    {} updates: {} accepted, {} refused as term regressions",
+                    numThreads * updatesPerThread, acceptedVotes.size(), refused.get());
+            if (unexpected.get() != 0) {
+                throw new AssertionError(unexpected.get() + " updates failed for a reason other than TERM_REGRESSION");
+            }
+
+            // The persisted term is the highest accepted one, with its own vote
+            long highest = acceptedVotes.keySet().stream().mapToLong(Long::longValue).max().orElseThrow();
             PersistentMeta meta = storage.loadMetadata().join();
-            if (meta.currentTerm() < 0) {
-                throw new AssertionError("Corrupt term: " + meta.currentTerm());
+            if (meta.currentTerm() != highest) {
+                throw new AssertionError("Expected persisted term " + highest + ", got " + meta.currentTerm());
+            }
+            if (!meta.votedFor().equals(Optional.of(acceptedVotes.get(highest)))) {
+                throw new AssertionError("Persisted vote does not belong to term " + highest + ": " + meta.votedFor());
             }
         }
     }
 
+    /**
+     * Random appends, truncations and metadata updates from ten threads violate
+     * Raft's ordering rules constantly. Each violation must come back as a refusal
+     * with a reason, never as corruption, and what survives must be a contiguous log.
+     */
     private void mixedOperationsChaos() throws Exception {
         Path testDir = createTestDir("mixed-ops");
         RaftStorageConfig config = RaftStorageConfig.builder()
                 .dataDir(testDir.toString())
-                .syncEnabled(false)
+                .syncEnabled(true)
                 .build();
 
         int numThreads = 10;
         int opsPerThread = 50;
+        LOG.debug("    mixed operations: {} threads x {} operations", numThreads, opsPerThread);
 
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
 
             AtomicLong indexCounter = new AtomicLong(1);
             AtomicLong termCounter = new AtomicLong(1);
+            AtomicInteger refused = new AtomicInteger(0);
             AtomicInteger errorCount = new AtomicInteger(0);
+            AtomicLong acceptedWalBytes = new AtomicLong(0);
+            WriteRejectionReason[] orderingRules = {
+                    WriteRejectionReason.INDEX_NOT_CONTIGUOUS, WriteRejectionReason.INVALID_TRUNCATION,
+                    WriteRejectionReason.TERM_REGRESSION, WriteRejectionReason.VOTE_CHANGED};
 
             ExecutorService executor = Executors.newFixedThreadPool(numThreads);
             CountDownLatch doneLatch = new CountDownLatch(numThreads);
@@ -287,25 +378,31 @@ public class WalChaos {
                         ThreadLocalRandom random = ThreadLocalRandom.current();
                         for (int i = 0; i < opsPerThread; i++) {
                             int op = random.nextInt(4);
+                            long walBytesIfAccepted = 0;
+                            CompletableFuture<?> result;
                             switch (op) {
                                 case 0 -> { // Append
                                     long index = indexCounter.getAndIncrement();
                                     long term = termCounter.get();
-                                    storage.appendEntries(List.of(
-                                            new LogEntryData(index, term, ("data-" + index).getBytes())
-                                    )).join();
+                                    byte[] payload = ("data-" + index).getBytes();
+                                    walBytesIfAccepted = walRecordBytes(payload.length);
+                                    result = storage.appendEntries(List.of(new LogEntryData(index, term, payload)));
                                 }
                                 case 1 -> { // Metadata update
                                     long term = termCounter.incrementAndGet();
-                                    storage.updateMetadata(term, Optional.of("node-" + term)).join();
+                                    result = storage.updateMetadata(term, Optional.of("node-" + term));
                                 }
                                 case 2 -> { // Truncate
                                     long truncateFrom = Math.max(1, indexCounter.get() - random.nextInt(5));
-                                    storage.truncateSuffix(truncateFrom).join();
+                                    walBytesIfAccepted = walRecordBytes(0);
+                                    result = storage.truncateSuffix(truncateFrom);
                                 }
-                                case 3 -> { // Sync
-                                    storage.sync().join();
-                                }
+                                default -> result = storage.sync();
+                            }
+                            switch (outcome(result, orderingRules)) {
+                                case ACCEPTED -> acceptedWalBytes.addAndGet(walBytesIfAccepted);
+                                case REFUSED -> refused.incrementAndGet();
+                                case FAILED -> errorCount.incrementAndGet();
                             }
                         }
                     } catch (Exception e) {
@@ -320,9 +417,16 @@ public class WalChaos {
             storage.sync().join();
             executor.shutdown();
 
-            // Must be able to replay without crash
+            // End the metadata stream on a refusal so a leftover staging file cannot be masked.
+            expectRefusal(testDir, () -> storage.updateMetadata(-1, Optional.empty()), WriteRejectionReason.TERM_REGRESSION);
+            assertEveryWalByteIsAccountedFor(testDir, acceptedWalBytes.get());
             List<LogEntryData> entries = storage.replayLog().join();
-            System.out.printf("    Replayed %d entries after chaos%n", entries.size());
+            LOG.info("    Replayed {} entries after chaos; {} operations refused for breaking an ordering rule",
+                    entries.size(), refused.get());
+            if (errorCount.get() != 0) {
+                throw new AssertionError(errorCount.get() + " operations failed for a reason other than an ordering rule");
+            }
+            assertContiguous(entries);
         }
     }
 
@@ -333,17 +437,24 @@ public class WalChaos {
                 .build();
 
         int cycles = 50;
+        LOG.debug("    open/close: {} cycles against one directory", cycles);
         AtomicLong indexCounter = new AtomicLong(1);
 
         for (int i = 0; i < cycles; i++) {
             try (FileRaftStorage storage = new FileRaftStorage(config)) {
                 storage.open().join();
 
-                // Quick append
                 long index = indexCounter.getAndIncrement();
-                storage.appendEntries(List.of(
-                        new LogEntryData(index, 1, ("cycle-" + i).getBytes())
-                )).join();
+                LogEntryData entry = new LogEntryData(index, 1, ("cycle-" + i).getBytes());
+                if (i > 0) {
+                    // An existing log must be replayed before it is written to, so the
+                    // storage can check the append against the real tail.
+                    expectRefusal(testDir, () -> storage.appendEntries(List.of(entry)), WriteRejectionReason.LOG_STATE_UNKNOWN);
+                    storage.replayLog().join();
+                }
+
+                // Quick append
+                storage.appendEntries(List.of(entry)).join();
                 storage.sync().join();
             }
             // Immediately closed
@@ -363,7 +474,7 @@ public class WalChaos {
         Path testDir = createTestDir("replay-during-write");
         RaftStorageConfig config = RaftStorageConfig.builder()
                 .dataDir(testDir.toString())
-                .syncEnabled(false)
+                .syncEnabled(true)
                 .build();
 
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
@@ -409,7 +520,7 @@ public class WalChaos {
             writer.join(5000);
             replayer.join(5000);
 
-            System.out.printf("    Completed %d replays during writes%n", replayCount.get());
+            LOG.info("    Completed {} replays during writes", replayCount.get());
         }
     }
 
@@ -417,7 +528,7 @@ public class WalChaos {
         Path testDir = createTestDir("interrupt-storm");
         RaftStorageConfig config = RaftStorageConfig.builder()
                 .dataDir(testDir.toString())
-                .syncEnabled(false)
+                .syncEnabled(true)
                 .build();
 
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
@@ -425,19 +536,19 @@ public class WalChaos {
 
             int numThreads = 10;
             AtomicLong indexCounter = new AtomicLong(1);
+            AtomicLong acceptedWalBytes = new AtomicLong(0);
             List<Thread> threads = new ArrayList<>();
 
             for (int t = 0; t < numThreads; t++) {
                 Thread thread = new Thread(() -> {
                     while (!Thread.currentThread().isInterrupted()) {
-                        try {
-                            long index = indexCounter.getAndIncrement();
-                            storage.appendEntries(List.of(
-                                    new LogEntryData(index, 1, ("interrupt-test-" + index).getBytes())
-                            )).join();
-                        } catch (Exception e) {
-                            break;
-                        }
+                        long index = indexCounter.getAndIncrement();
+                        byte[] payload = ("interrupt-test-" + index).getBytes();
+                        CompletableFuture<Void> append = storage.appendEntries(List.of(new LogEntryData(index, 1, payload)));
+                        // Racing threads lose the tail and are refused; anything else ends the thread.
+                        Outcome result = outcome(append, WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+                        if (result == Outcome.ACCEPTED) acceptedWalBytes.addAndGet(walRecordBytes(payload.length));
+                        if (result == Outcome.FAILED) break;
                     }
                 });
                 threads.add(thread);
@@ -459,9 +570,12 @@ public class WalChaos {
 
             storage.sync().join();
 
-            // Must still be able to replay
+            // Interrupts or not, every byte must belong to an accepted append
+            assertEveryWalByteIsAccountedFor(testDir, acceptedWalBytes.get());
+            // Must still be able to replay, and what was accepted is contiguous
             List<LogEntryData> entries = storage.replayLog().join();
-            System.out.printf("    Survived with %d entries after interrupt storm%n", entries.size());
+            assertContiguous(entries);
+            LOG.info("    Survived with {} entries after interrupt storm", entries.size());
         }
     }
 
@@ -503,18 +617,60 @@ public class WalChaos {
         Path walFile = testDir.resolve("raft.log");
         byte[] data = Files.readAllBytes(walFile);
         int corruptionPoint = SECURE_RANDOM.nextInt(data.length / 2) + data.length / 2; // Corrupt in second half
+        LOG.debug("    inverting byte {} of {} in {} (was 0x{})", corruptionPoint, data.length, walFile,
+                Integer.toHexString(data[corruptionPoint] & 0xFF));
         data[corruptionPoint] = (byte) (data[corruptionPoint] ^ 0xFF);
         Files.write(walFile, data);
 
-        // Reopen and verify recovery
+        // Reopen and verify recovery. Damage in the last record is a torn tail and is
+        // truncated; damage with valid records after it is reported and left in place.
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
+            replayExpectingRepairOrReport(storage, "random corruption");
+        }
+    }
+
+    /**
+     * Replays a deliberately damaged WAL and accepts either outcome the replay
+     * policy allows: a repaired torn tail, or a corruption report that leaves the
+     * file untouched and fences the instance.
+     */
+    private static void replayExpectingRepairOrReport(FileRaftStorage storage, String what) {
+        try {
             List<LogEntryData> entries = storage.replayLog().join();
-            // Should recover at least some entries (before corruption)
-            if (entries.isEmpty()) {
-                throw new AssertionError("No entries recovered after corruption");
+            LOG.info("    Torn tail repaired: {} entries recovered after {}", entries.size(), what);
+        } catch (java.util.concurrent.CompletionException e) {
+            if (!(e.getCause() instanceof FileRaftStorage.CorruptLogException corrupt)) throw e;
+            LOG.info("    Corruption reported at byte {} after {}: {} entries precede it, file untouched",
+                    corrupt.corruptOffset(), what, corrupt.entriesBeforeCorruption());
+        }
+    }
+
+    /**
+     * Replays a WAL whose tail is ambiguous corruption and requires the strict
+     * outcome: a {@link FileRaftStorage.CorruptLogException} naming the expected
+     * number of clean entries before the damage, with the file left untouched.
+     */
+    private static void replayExpectingCorruptionReport(FileRaftStorage storage, String what,
+                                                        int expectedEntriesBefore) throws IOException {
+        Path walFile = storage.config().dataDir().resolve("raft.log");
+        long sizeBefore = Files.size(walFile);
+        try {
+            List<LogEntryData> entries = storage.replayLog().join();
+            throw new AssertionError("Expected corruption report after " + what
+                    + " but replay returned " + entries.size() + " entries");
+        } catch (java.util.concurrent.CompletionException e) {
+            if (!(e.getCause() instanceof FileRaftStorage.CorruptLogException corrupt)) throw e;
+            if (corrupt.entriesBeforeCorruption() != expectedEntriesBefore) {
+                throw new AssertionError("Expected " + expectedEntriesBefore + " entries before corruption, got "
+                        + corrupt.entriesBeforeCorruption());
             }
-            System.out.printf("    Recovered %d entries after random corruption%n", entries.size());
+            long sizeAfter = Files.size(walFile);
+            if (sizeAfter != sizeBefore) {
+                throw new AssertionError("WAL was modified: " + sizeBefore + " -> " + sizeAfter + " bytes");
+            }
+            LOG.info("    Corruption reported at byte {} after {}: {} entries precede it, file untouched",
+                    corrupt.corruptOffset(), what, corrupt.entriesBeforeCorruption());
         }
     }
 
@@ -539,16 +695,16 @@ public class WalChaos {
         Path walFile = testDir.resolve("raft.log");
         try (var channel = FileChannel.open(walFile, StandardOpenOption.WRITE, StandardOpenOption.APPEND)) {
             ByteBuffer zeros = ByteBuffer.allocate(4096);
+            LOG.debug("    appending {} zero bytes to {} at offset {}", zeros.remaining(), walFile, channel.size());
             channel.write(zeros);
         }
 
-        // Should recover entries before zeros
+        // A zeroed block longer than a record header is indistinguishable from
+        // acknowledged records that a failing device later returned as zeros. Replay
+        // must report it and leave the file untouched rather than truncate it.
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
-            List<LogEntryData> entries = storage.replayLog().join();
-            if (entries.size() != 5) {
-                throw new AssertionError("Expected 5 entries, got " + entries.size());
-            }
+            replayExpectingCorruptionReport(storage, "zero-filled tail", 5);
         }
     }
 
@@ -576,16 +732,15 @@ public class WalChaos {
             // Entry 1 header starts at 0
             // Estimate ~40 bytes per entry with small payloads
             long offset = 80; // Rough offset to 3rd entry
+            LOG.debug("    overwriting 4 bytes at offset {} of {} ({} bytes) with 0xDEADBEEF", offset, walFile, raf.length());
             raf.seek(offset);
             raf.writeInt(0xDEADBEEF); // Corrupt magic
         }
 
-        // Should recover entries 1-2 only
+        // Entries 4-5 remain valid after the damage, so this is reported, not truncated
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
-            List<LogEntryData> entries = storage.replayLog().join();
-            // Should have recovered some entries before corruption
-            System.out.printf("    Recovered %d entries after magic corruption%n", entries.size());
+            replayExpectingRepairOrReport(storage, "magic corruption");
         }
     }
 
@@ -610,14 +765,14 @@ public class WalChaos {
         Path walFile = testDir.resolve("raft.log");
         byte[] data = Files.readAllBytes(walFile);
         int payloadOffset = 30; // Somewhere in the payload of first entry
+        LOG.debug("    flipping bit 0 of byte {} of {} in {}", payloadOffset, data.length, walFile);
         data[payloadOffset] = (byte) (data[payloadOffset] ^ 0x01); // Single bit flip
         Files.write(walFile, data);
 
-        // CRC should detect and truncate
+        // The CRC detects the flip; entries 2-5 remain valid, so it is reported, not truncated
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
-            List<LogEntryData> entries = storage.replayLog().join();
-            System.out.printf("    Recovered %d entries after CRC bit flip%n", entries.size());
+            replayExpectingRepairOrReport(storage, "CRC bit flip");
         }
     }
 
@@ -647,6 +802,7 @@ public class WalChaos {
             partial.put((byte) 2); // TYPE_APPEND
             // Stop here - no index, term, payload, or CRC
             partial.flip();
+            LOG.debug("    appending a {}-byte record fragment to {} at offset {}", partial.remaining(), walFile, channel.size());
             channel.write(partial);
         }
 
@@ -675,6 +831,7 @@ public class WalChaos {
         // Corrupt metadata file
         Path metaFile = testDir.resolve("meta.dat");
         byte[] data = Files.readAllBytes(metaFile);
+        LOG.debug("    inverting byte 0 of {} in {}", data.length, metaFile);
         data[0] = (byte) (data[0] ^ 0xFF); // Corrupt first byte
         Files.write(metaFile, data);
 
@@ -684,9 +841,9 @@ public class WalChaos {
             try {
                 storage.loadMetadata().join();
                 // Some implementations may return defaults on corruption
-                System.out.println("    Metadata returned (possibly defaults)");
+                LOG.info("    Metadata returned (possibly defaults)");
             } catch (Exception e) {
-                System.out.println("    Corruption correctly detected: " + e.getMessage());
+                LOG.info("    Corruption correctly detected: {}", e.getMessage());
             }
         }
     }
@@ -712,15 +869,15 @@ public class WalChaos {
         Path walFile = testDir.resolve("raft.log");
         byte[] garbage = new byte[256];
         SECURE_RANDOM.nextBytes(garbage);
+        LOG.debug("    appending {} random bytes to {} at offset {}: {}", garbage.length, walFile, Files.size(walFile),
+                java.util.HexFormat.of().formatHex(garbage));
         Files.write(walFile, garbage, StandardOpenOption.APPEND);
 
-        // Should recover valid entries
+        // Garbage longer than a record header may be acknowledged data damaged after
+        // the write, so replay reports it and preserves the file instead of truncating.
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
-            List<LogEntryData> entries = storage.replayLog().join();
-            if (entries.size() != 5) {
-                throw new AssertionError("Expected 5 entries, got " + entries.size());
-            }
+            replayExpectingCorruptionReport(storage, "garbage tail", 5);
         }
     }
 
@@ -757,7 +914,7 @@ public class WalChaos {
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
-            
+
             // Should have entries 1-4 with term 1, and 5-7 with term 2
             if (entries.size() != 7) {
                 throw new AssertionError("Expected 7 entries, got " + entries.size());
@@ -923,6 +1080,12 @@ public class WalChaos {
 
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
+            // A fresh log starts at 1, so the only way to reach Long.MAX_VALUE is as the
+            // continuation of a log compacted through Long.MAX_VALUE - 1.
+            expectRefusal(testDir, () -> storage.appendEntries(List.of(
+                    new LogEntryData(Long.MAX_VALUE, 1, "max-index".getBytes())
+            )), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+            storage.truncatePrefix(Long.MAX_VALUE - 1).join();
             storage.appendEntries(List.of(
                     new LogEntryData(Long.MAX_VALUE, 1, "max-index".getBytes())
             )).join();
@@ -932,8 +1095,8 @@ public class WalChaos {
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
-            if (entries.get(0).index() != Long.MAX_VALUE) {
-                throw new AssertionError("Max index not preserved");
+            if (entries.size() != 1 || entries.get(0).index() != Long.MAX_VALUE) {
+                throw new AssertionError("Max index not preserved across the persisted compaction boundary");
             }
         }
     }
@@ -1086,10 +1249,11 @@ public class WalChaos {
         Path testDir = createTestDir("many-small");
         RaftStorageConfig config = RaftStorageConfig.builder()
                 .dataDir(testDir.toString())
-                .syncEnabled(false)
+                .syncEnabled(true)
                 .build();
 
         int count = 10000;
+        LOG.debug("    small entries: {} appends", count);
 
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
@@ -1115,10 +1279,11 @@ public class WalChaos {
         Path testDir = createTestDir("meta-toggle");
         RaftStorageConfig config = RaftStorageConfig.builder()
                 .dataDir(testDir.toString())
-                .syncEnabled(false)
+                .syncEnabled(true)
                 .build();
 
         int toggles = 1000;
+        LOG.debug("    metadata toggle: {} updates", toggles);
 
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
@@ -1143,10 +1308,11 @@ public class WalChaos {
         Path testDir = createTestDir("truncate-cycles");
         RaftStorageConfig config = RaftStorageConfig.builder()
                 .dataDir(testDir.toString())
-                .syncEnabled(false)
+                .syncEnabled(true)
                 .build();
 
         int cycles = 100;
+        LOG.debug("    append/truncate: {} cycles", cycles);
 
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
@@ -1169,7 +1335,7 @@ public class WalChaos {
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
             List<LogEntryData> entries = storage.replayLog().join();
-            System.out.printf("    Final log size after %d truncate cycles: %d entries%n", cycles, entries.size());
+            LOG.info("    Final log size after {} truncate cycles: {} entries", cycles, entries.size());
         }
     }
 
@@ -1177,13 +1343,14 @@ public class WalChaos {
         Path testDir = createTestDir("memory-pressure");
         RaftStorageConfig config = RaftStorageConfig.builder()
                 .dataDir(testDir.toString())
-                .syncEnabled(false)
+                .syncEnabled(true)
                 .build();
 
         // Large batches to stress memory
         int batchSize = 1000;
         int payloadSize = 4096;
         int batches = 10;
+        LOG.debug("    memory pressure: {} batches x {} entries x {} bytes", batches, batchSize, payloadSize);
 
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
@@ -1217,6 +1384,7 @@ public class WalChaos {
                 .build();
 
         int operations = 100;
+        LOG.debug("    fsync hammer: {} append+sync operations", operations);
 
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
@@ -1271,9 +1439,9 @@ public class WalChaos {
                 try {
                     storage2.open().join();
                     // If locking is enabled, this should fail
-                    System.out.println("    Second instance opened (no locking?)");
+                    LOG.info("    Second instance opened (no locking?)");
                 } catch (Exception e) {
-                    System.out.println("    Second instance blocked: " + e.getMessage());
+                    LOG.info("    Second instance blocked: {}", e.getMessage());
                 }
             }
         }
@@ -1287,8 +1455,8 @@ public class WalChaos {
 
         FileRaftStorage storage = new FileRaftStorage(config);
         storage.open().join();
-        storage.close();
-        storage.close(); // Should not throw
+        storage.closeAsync().join();
+        storage.closeAsync().join(); // Should not throw
     }
 
     private void opsAfterClose() throws Exception {
@@ -1299,7 +1467,7 @@ public class WalChaos {
 
         FileRaftStorage storage = new FileRaftStorage(config);
         storage.open().join();
-        storage.close();
+        storage.closeAsync().join();
 
         try {
             storage.appendEntries(List.of(
@@ -1307,7 +1475,7 @@ public class WalChaos {
             )).join();
             throw new AssertionError("Should have thrown on closed storage");
         } catch (Exception e) {
-            System.out.println("    Correctly rejected: " + e.getMessage());
+                LOG.info("    Correctly rejected: {}", e.getMessage());
         }
     }
 
@@ -1319,20 +1487,14 @@ public class WalChaos {
 
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
-            // Storage layer doesn't validate - it just stores
-            storage.appendEntries(List.of(
+            // Raft log indices start at 1. The storage refuses before writing anything.
+            expectRefusal(testDir, () -> storage.appendEntries(List.of(
                     new LogEntryData(-1, 1, "negative".getBytes())
-            )).join();
+            )), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
             storage.sync().join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config)) {
-            storage.open().join();
-            List<LogEntryData> entries = storage.replayLog().join();
-            if (entries.get(0).index() != -1) {
-                throw new AssertionError("Negative index not preserved");
-            }
-        }
+        assertReplays(config, 0);
     }
 
     private void negativeTerm() throws Exception {
@@ -1343,19 +1505,13 @@ public class WalChaos {
 
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
-            storage.appendEntries(List.of(
+            expectRefusal(testDir, () -> storage.appendEntries(List.of(
                     new LogEntryData(1, -1, "negative-term".getBytes())
-            )).join();
+            )), WriteRejectionReason.TERM_REGRESSION);
             storage.sync().join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config)) {
-            storage.open().join();
-            List<LogEntryData> entries = storage.replayLog().join();
-            if (entries.get(0).term() != -1) {
-                throw new AssertionError("Negative term not preserved");
-            }
-        }
+        assertReplays(config, 0);
     }
 
     private void nonSequentialIndices() throws Exception {
@@ -1366,23 +1522,18 @@ public class WalChaos {
 
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
-            storage.appendEntries(List.of(
+            // The whole batch is validated before the first byte is written, so a gap
+            // anywhere in it refuses the batch and entry 1 is not written either.
+            expectRefusal(testDir, () -> storage.appendEntries(List.of(
                     new LogEntryData(1, 1, "first".getBytes()),
                     new LogEntryData(5, 1, "fifth".getBytes()),  // Gap!
                     new LogEntryData(3, 1, "third".getBytes()),  // Out of order!
                     new LogEntryData(100, 1, "hundredth".getBytes())
-            )).join();
+            )), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
             storage.sync().join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config)) {
-            storage.open().join();
-            List<LogEntryData> entries = storage.replayLog().join();
-            // Storage layer stores as-is
-            if (entries.size() != 4) {
-                throw new AssertionError("Expected 4 entries");
-            }
-        }
+        assertReplays(config, 0);
     }
 
     private void duplicateIndices() throws Exception {
@@ -1393,22 +1544,22 @@ public class WalChaos {
 
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
-            storage.appendEntries(List.of(
+            expectRefusal(testDir, () -> storage.appendEntries(List.of(
                     new LogEntryData(1, 1, "first".getBytes()),
                     new LogEntryData(1, 1, "duplicate!".getBytes()),
                     new LogEntryData(1, 2, "different-term".getBytes())
-            )).join();
+            )), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
+
+            // Re-sending an index the log already holds is refused too; a conflicting
+            // leader must truncate first, which is what AppendPlan produces.
+            storage.appendEntries(List.of(new LogEntryData(1, 1, "first".getBytes()))).join();
+            expectRefusal(testDir, () -> storage.appendEntries(List.of(
+                    new LogEntryData(1, 2, "different-term".getBytes())
+            )), WriteRejectionReason.INDEX_NOT_CONTIGUOUS);
             storage.sync().join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config)) {
-            storage.open().join();
-            List<LogEntryData> entries = storage.replayLog().join();
-            // Storage stores all - deduplication is protocol layer's job
-            if (entries.size() != 3) {
-                throw new AssertionError("Expected 3 entries");
-            }
-        }
+        assertReplays(config, 1);
     }
 
     private void emptyBatchAppend() throws Exception {
@@ -1419,25 +1570,19 @@ public class WalChaos {
 
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
-            
+
             // Append empty list
             storage.appendEntries(List.of()).join();
-            
+
             // Append real entry
             storage.appendEntries(List.of(
                     new LogEntryData(1, 1, "real".getBytes())
             )).join();
-            
+
             storage.sync().join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config)) {
-            storage.open().join();
-            List<LogEntryData> entries = storage.replayLog().join();
-            if (entries.size() != 1) {
-                throw new AssertionError("Expected 1 entry");
-            }
-        }
+        assertReplays(config, 1);
     }
 
     private void truncateToNegative() throws Exception {
@@ -1448,25 +1593,19 @@ public class WalChaos {
 
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
-            
+
             storage.appendEntries(List.of(
                     new LogEntryData(1, 1, "one".getBytes()),
                     new LogEntryData(2, 1, "two".getBytes())
             )).join();
-            
-            // Truncate to -1 (should remove everything)
-            storage.truncateSuffix(-1).join();
+
+            // A boundary below 1 is meaningless for a Raft log and is refused.
+            expectRefusal(testDir, () -> storage.truncateSuffix(-1), WriteRejectionReason.INVALID_TRUNCATION);
+            expectRefusal(testDir, () -> storage.truncateSuffix(0), WriteRejectionReason.INVALID_TRUNCATION);
             storage.sync().join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config)) {
-            storage.open().join();
-            List<LogEntryData> entries = storage.replayLog().join();
-            // All entries should be gone
-            if (!entries.isEmpty()) {
-                throw new AssertionError("Expected empty log after truncate to -1");
-            }
-        }
+        assertReplays(config, 2);
     }
 
     private void truncateBeyondLog() throws Exception {
@@ -1477,25 +1616,20 @@ public class WalChaos {
 
         try (FileRaftStorage storage = new FileRaftStorage(config)) {
             storage.open().join();
-            
+
             storage.appendEntries(List.of(
                     new LogEntryData(1, 1, "one".getBytes()),
                     new LogEntryData(2, 1, "two".getBytes())
             )).join();
-            
-            // Truncate from index 1000 (way beyond log)
-            storage.truncateSuffix(1000).join();
+
+            // A node never truncates past its own tail; the storage surfaces the bug.
+            expectRefusal(testDir, () -> storage.truncateSuffix(1000), WriteRejectionReason.INVALID_TRUNCATION);
+            // Truncating exactly at the tail is a legal no-op.
+            storage.truncateSuffix(3).join();
             storage.sync().join();
         }
 
-        try (FileRaftStorage storage = new FileRaftStorage(config)) {
-            storage.open().join();
-            List<LogEntryData> entries = storage.replayLog().join();
-            // Should be a no-op
-            if (entries.size() != 2) {
-                throw new AssertionError("Expected 2 entries (truncate beyond should be no-op)");
-            }
-        }
+        assertReplays(config, 2);
     }
 
     // =========================================================================
@@ -1503,29 +1637,149 @@ public class WalChaos {
     // =========================================================================
 
     private void printSection(String name) {
-        System.out.println();
-        System.out.println("┌───────────────────────────────────────────────────────────────┐");
-        System.out.printf("│  %-61s │%n", name);
-        System.out.println("└───────────────────────────────────────────────────────────────┘");
+        LOG.info("");
+        LOG.info("┌───────────────────────────────────────────────────────────────┐");
+        LOG.info("│  {} │", String.format("%-61s", name));
+        LOG.info("└───────────────────────────────────────────────────────────────┘");
+    }
+
+    private enum Outcome { ACCEPTED, REFUSED, FAILED }
+
+    /**
+     * Classifies how the storage answered: accepted, refused for one of the given
+     * Raft ordering rules, or failed for any other reason.
+     */
+    private static Outcome outcome(CompletableFuture<?> future, WriteRejectionReason... acceptableRefusals) {
+        try {
+            future.join();
+            return Outcome.ACCEPTED;
+        } catch (CompletionException e) {
+            if (e.getCause() instanceof FileRaftStorage.WriteRejectedException rejected) {
+                for (WriteRejectionReason reason : acceptableRefusals) {
+                    if (rejected.reason() == reason) {
+                        return Outcome.REFUSED;
+                    }
+                }
+            }
+            // Counted by the caller as a failure of the scenario; this is the only place the cause is known.
+            LOG.error("    Operation failed with something other than an acceptable refusal {}",
+                    java.util.Arrays.toString(acceptableRefusals), e.getCause());
+            return Outcome.FAILED;
+        }
+    }
+
+    /**
+     * Requires the storage to refuse the operation with exactly this reason, and to have
+     * left every file in the data directory byte-for-byte as it was. "Refused" proves
+     * nothing about the disk on its own.
+     */
+    private static void expectRefusal(Path dataDir, java.util.function.Supplier<CompletableFuture<?>> operation,
+                                      WriteRejectionReason reason) {
+        Map<String, String> before = durableState(dataDir);
+        try {
+            operation.get().join();
+        } catch (CompletionException e) {
+            if (e.getCause() instanceof FileRaftStorage.WriteRejectedException rejected && rejected.reason() == reason) {
+                Map<String, String> after = durableState(dataDir);
+                if (!before.equals(after)) {
+                    throw new AssertionError("Refused with " + reason + " but the data directory changed: "
+                            + before + " -> " + after);
+                }
+                LOG.info("    Refused as expected ({}), directory untouched: {}", reason, rejected.getMessage());
+                return;
+            }
+            throw e;
+        }
+        throw new AssertionError("Expected the storage to refuse with " + reason + " but it accepted");
+    }
+
+    /** Size and SHA-256 of every file in the data directory except the lock file. */
+    private static Map<String, String> durableState(Path dataDir) {
+        Map<String, String> files = new java.util.TreeMap<>();
+        try (var listing = Files.list(dataDir)) {
+            for (Path file : (Iterable<Path>) listing::iterator) {
+                String name = file.getFileName().toString();
+                if (name.equals("raft.lock") || !Files.isRegularFile(file)) continue;
+                byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(file));
+                files.put(name, Files.size(file) + ":" + java.util.HexFormat.of().formatHex(digest));
+            }
+        } catch (IOException | java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+        return files;
+    }
+
+    /** On-disk size of one WAL record: 27-byte header, payload, 4-byte CRC. */
+    private static long walRecordBytes(int payloadLength) {
+        return 27L + payloadLength + 4L;
+    }
+
+    /**
+     * Exact accounting for scenarios where many threads write at once. The WAL is
+     * append-only, so its length must equal the records of the accepted operations and
+     * nothing more. A refusal that wrote anything would make it longer. No staging file
+     * may remain either.
+     */
+    private static void assertEveryWalByteIsAccountedFor(Path dataDir, long acceptedBytes) throws IOException {
+        long actual = Files.size(dataDir.resolve("raft.log"));
+        LOG.debug("    WAL accounting: {} bytes on disk, {} bytes from accepted operations", actual, acceptedBytes);
+        if (actual != acceptedBytes) {
+            throw new AssertionError("WAL is " + actual + " bytes but accepted operations account for "
+                    + acceptedBytes + ": " + (actual - acceptedBytes) + " bytes were written by something that was refused");
+        }
+        java.util.Set<String> stray = new java.util.TreeSet<>(durableState(dataDir).keySet());
+        stray.removeAll(java.util.Set.of("raft.log", "meta.dat"));
+        if (!stray.isEmpty()) throw new AssertionError("Staging files were left behind: " + stray);
+    }
+
+    /** A never-compacted log must run contiguously from index 1. */
+    private static void assertContiguous(List<LogEntryData> entries) {
+        LOG.debug("    checking {} replayed entries run contiguously from index 1", entries.size());
+        for (int i = 0; i < entries.size(); i++) {
+            if (entries.get(i).index() != i + 1) {
+                throw new AssertionError("Log is not contiguous from 1: position " + i
+                        + " holds index " + entries.get(i).index());
+            }
+        }
+    }
+
+    private static void assertReplays(RaftStorageConfig config, int expectedEntries) {
+        try (FileRaftStorage storage = new FileRaftStorage(config)) {
+            storage.open().join();
+            List<LogEntryData> entries = storage.replayLog().join();
+            LOG.debug("    reopened {}: replayed {} entries, expected {}", config.dataDir(), entries.size(), expectedEntries);
+            if (entries.size() != expectedEntries) {
+                throw new AssertionError("Expected " + expectedEntries + " entries after reopen, got " + entries.size());
+            }
+            assertContiguous(entries);
+        }
     }
 
     private void chaosTest(String name, ChaosTestRunnable test) {
-        System.out.printf("  %-50s ", name);
+        LOG.info("  {} ", String.format("%-50s", name));
+        long started = System.nanoTime();
         try {
             test.run();
-            System.out.println("[PASS]");
+            LOG.info("[PASS]");
+            LOG.debug("    {} passed in {} ms", name, (System.nanoTime() - started) / 1_000_000);
             testsPassed.incrementAndGet();
         } catch (Throwable e) {
-            System.out.println("[FAIL]");
-            System.err.println("    Error: " + e.getMessage());
-            e.printStackTrace(System.err);
+            LOG.error("[FAIL]");
+            LOG.error("    {} failed after {} ms: {}", name, (System.nanoTime() - started) / 1_000_000, e.getMessage(), e);
             testsFailed.incrementAndGet();
         }
     }
 
+    /**
+     * Try-with-resources closes resources in reverse declaration order, so declaring
+     * this after the storage waits for the asynchronous close to finish before the
+     * block exits. Chaos scenarios reopen the same directory immediately and need
+     * the exclusive lock released first.
+     */
     private Path createTestDir(String name) throws IOException {
         Path dir = baseDir.resolve(name + "-" + System.nanoTime());
         Files.createDirectories(dir);
+        LOG.debug("    data directory: {}", dir);
         return dir;
     }
 

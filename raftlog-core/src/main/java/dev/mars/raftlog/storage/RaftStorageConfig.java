@@ -15,6 +15,9 @@
  */
 package dev.mars.raftlog.storage;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
@@ -66,23 +69,24 @@ import java.util.Properties;
  * </pre>
  */
 public final class RaftStorageConfig {
+    private static final Logger LOG = LoggerFactory.getLogger(RaftStorageConfig.class);
 
     private static final String PROPERTIES_FILE = "raftlog.properties";
-    
+
     // Property keys
     private static final String PROP_DATA_DIR = "raftlog.dataDir";
     private static final String PROP_SYNC_ENABLED = "raftlog.syncEnabled";
     private static final String PROP_VERIFY_WRITES = "raftlog.verifyWrites";
     private static final String PROP_MIN_FREE_SPACE_MB = "raftlog.minFreeSpaceMb";
     private static final String PROP_MAX_PAYLOAD_SIZE_MB = "raftlog.maxPayloadSizeMb";
-    
+
     // Environment variable keys
     private static final String ENV_DATA_DIR = "RAFTLOG_DATA_DIR";
     private static final String ENV_SYNC_ENABLED = "RAFTLOG_SYNC_ENABLED";
     private static final String ENV_VERIFY_WRITES = "RAFTLOG_VERIFY_WRITES";
     private static final String ENV_MIN_FREE_SPACE_MB = "RAFTLOG_MIN_FREE_SPACE_MB";
     private static final String ENV_MAX_PAYLOAD_SIZE_MB = "RAFTLOG_MAX_PAYLOAD_SIZE_MB";
-    
+
     // Defaults
     private static final Path DEFAULT_DATA_DIR = Path.of(System.getProperty("user.home"), ".raftlog", "data");
     private static final boolean DEFAULT_SYNC_ENABLED = true;
@@ -95,6 +99,15 @@ public final class RaftStorageConfig {
     private final boolean verifyWrites;
     private final int minFreeSpaceMb;
     private final int maxPayloadSizeMb;
+
+    /** Largest payload limit whose size in bytes still fits an int: 2047 MB. */
+    static final int MAX_PAYLOAD_SIZE_MB_LIMIT = Integer.MAX_VALUE / (1024 * 1024);
+
+    /** Where environment variables are read from. A seam: the JVM cannot change its own environment. */
+    static java.util.function.UnaryOperator<String> environment = System::getenv;
+
+    /** Where the properties file is loaded from. A seam, for the same reason. */
+    static java.util.function.Supplier<Properties> propertiesFile = Builder::loadPropertiesFile;
 
     private RaftStorageConfig(Builder builder) {
         this.dataDir = builder.dataDir;
@@ -109,12 +122,16 @@ public final class RaftStorageConfig {
         return dataDir;
     }
 
-    /** Whether fsync is enabled (should be true in production). */
+    /** Whether fsync is enabled. Always true for public configurations. */
     public boolean syncEnabled() {
         return syncEnabled;
     }
 
-    /** Whether to verify writes by reading back and checking CRC. */
+    /**
+     * Whether each record is forced and read back through the page cache with its CRC
+     * re-checked. Detects in-process encoding faults and write errors that surface on
+     * read; it cannot detect controller or media faults. Slower, off by default.
+     */
     public boolean verifyWrites() {
         return verifyWrites;
     }
@@ -178,12 +195,12 @@ public final class RaftStorageConfig {
         private Boolean verifyWrites;
         private Integer minFreeSpaceMb;
         private Integer maxPayloadSizeMb;
-        
+
         private Properties fileProperties;
 
         private Builder() {
             // Load properties file once
-            this.fileProperties = loadPropertiesFile();
+            this.fileProperties = propertiesFile.get();
         }
 
         /** Sets the data directory. */
@@ -198,13 +215,25 @@ public final class RaftStorageConfig {
             return this;
         }
 
-        /** Enables or disables fsync (default: true). */
+        /**
+         * Retained for source compatibility. Fsync is mandatory, so only
+         * {@code true} is accepted.
+         *
+         * @throws IllegalArgumentException if {@code syncEnabled} is {@code false}
+         */
         public Builder syncEnabled(boolean syncEnabled) {
+            if (!syncEnabled) {
+                throw new IllegalArgumentException(
+                        "syncEnabled=false is unsafe and is not supported by public configuration");
+            }
             this.syncEnabled = syncEnabled;
             return this;
         }
 
-        /** Enables or disables write verification (default: false). */
+        /**
+         * Enables or disables read-after-write verification (default: false).
+         * See {@link RaftStorageConfig#verifyWrites()} for what it can and cannot detect.
+         */
         public Builder verifyWrites(boolean verifyWrites) {
             this.verifyWrites = verifyWrites;
             return this;
@@ -234,6 +263,10 @@ public final class RaftStorageConfig {
             if (syncEnabled == null) {
                 syncEnabled = resolveBoolean(PROP_SYNC_ENABLED, ENV_SYNC_ENABLED, DEFAULT_SYNC_ENABLED);
             }
+            if (!syncEnabled) {
+                throw new IllegalArgumentException(
+                        "syncEnabled=false is unsafe and is not supported by public configuration");
+            }
             if (verifyWrites == null) {
                 verifyWrites = resolveBoolean(PROP_VERIFY_WRITES, ENV_VERIFY_WRITES, DEFAULT_VERIFY_WRITES);
             }
@@ -243,105 +276,122 @@ public final class RaftStorageConfig {
             if (maxPayloadSizeMb == null) {
                 maxPayloadSizeMb = resolveInt(PROP_MAX_PAYLOAD_SIZE_MB, ENV_MAX_PAYLOAD_SIZE_MB, DEFAULT_MAX_PAYLOAD_SIZE_MB);
             }
-            
+
+            // Validated after resolution, so the rule holds whichever source supplied the value.
+            if (maxPayloadSizeMb < 1 || maxPayloadSizeMb > MAX_PAYLOAD_SIZE_MB_LIMIT) {
+                throw new IllegalArgumentException("maxPayloadSizeMb must be between 1 and " + MAX_PAYLOAD_SIZE_MB_LIMIT
+                        + ", because a record's payload length is a 32-bit byte count; got " + maxPayloadSizeMb);
+            }
+            if (minFreeSpaceMb < 0) {
+                throw new IllegalArgumentException("minFreeSpaceMb must not be negative; got " + minFreeSpaceMb);
+            }
+
+            LOG.atDebug().addKeyValue("event", "config.resolved")
+                    .log("Resolved RaftStorageConfig: dataDir={}, syncEnabled={}, verifyWrites={}, minFreeSpaceMb={}, maxPayloadSizeMb={}",
+                    dataDir, syncEnabled, verifyWrites, minFreeSpaceMb, maxPayloadSizeMb);
+
             return new RaftStorageConfig(this);
         }
 
         private Path resolvePath(String sysProp, String envVar, Path defaultValue) {
-            // 1. System property
-            String value = System.getProperty(sysProp);
-            if (value != null && !value.isBlank()) {
-                return Path.of(value);
-            }
-            
-            // 2. Environment variable
-            value = System.getenv(envVar);
-            if (value != null && !value.isBlank()) {
-                return Path.of(value);
-            }
-            
-            // 3. Properties file
-            value = fileProperties.getProperty(sysProp);
-            if (value != null && !value.isBlank()) {
-                return Path.of(value);
-            }
-            
-            // 4. Default
-            return defaultValue;
+            return resolve(sysProp, envVar, defaultValue, "path", Path::of);
         }
 
         private boolean resolveBoolean(String sysProp, String envVar, boolean defaultValue) {
-            // 1. System property
-            String value = System.getProperty(sysProp);
-            if (value != null && !value.isBlank()) {
-                return Boolean.parseBoolean(value);
-            }
-            
-            // 2. Environment variable
-            value = System.getenv(envVar);
-            if (value != null && !value.isBlank()) {
-                return Boolean.parseBoolean(value);
-            }
-            
-            // 3. Properties file
-            value = fileProperties.getProperty(sysProp);
-            if (value != null && !value.isBlank()) {
-                return Boolean.parseBoolean(value);
-            }
-            
-            // 4. Default
-            return defaultValue;
+            return resolve(sysProp, envVar, defaultValue, "boolean", Builder::parseBooleanStrict);
         }
 
         private int resolveInt(String sysProp, String envVar, int defaultValue) {
-            // 1. System property
-            String value = System.getProperty(sysProp);
-            if (value != null && !value.isBlank()) {
+            return resolve(sysProp, envVar, defaultValue, "integer", Integer::parseInt);
+        }
+
+        /**
+         * Resolves one setting from, in order of precedence, its system property, its environment
+         * variable and the properties file, falling back to the default when none supplies it.
+         * <p>
+         * A value that is present but cannot be parsed is an error, never a reason to move on to
+         * the next source. An operator who writes {@code 32MB} or {@code ture} must be told, not
+         * silently given the default. Every source that supplies the setting is checked, including
+         * those a higher-priority source overrides, so a bad value cannot lie in wait for the day
+         * the override is removed. A blank value means the setting is absent from that source,
+         * which is how shells and compose files express "unset". Surrounding whitespace is ignored.
+         */
+        private <T> T resolve(String sysProp, String envVar, T defaultValue, String kind,
+                              java.util.function.Function<String, T> parser) {
+            String[][] candidates = {
+                    {"system property " + sysProp, System.getProperty(sysProp)},
+                    {"environment variable " + envVar, environment.apply(envVar)},
+                    {"properties file " + PROPERTIES_FILE, fileProperties.getProperty(sysProp)},
+            };
+            T chosen = null;
+            for (String[] candidate : candidates) {
+                String source = candidate[0];
+                String value = candidate[1];
+                if (value == null || value.isBlank()) continue;
+                T parsed;
                 try {
-                    return Integer.parseInt(value);
-                } catch (NumberFormatException ignored) {}
+                    parsed = parser.apply(value.strip());
+                } catch (IllegalArgumentException e) {
+                    // NumberFormatException and InvalidPathException are both IllegalArgumentExceptions.
+                    throw new IllegalArgumentException("Invalid " + kind + " for " + sysProp + " from " + source
+                            + ": '" + value + "'", e);
+                }
+                if (chosen == null) {
+                    chosen = parsed;
+                    LOG.atDebug().addKeyValue("event", "config.setting.resolved")
+                            .log("Resolved {} from {}: {}", sysProp, source, value);
+                }
             }
-            
-            // 2. Environment variable
-            value = System.getenv(envVar);
-            if (value != null && !value.isBlank()) {
-                try {
-                    return Integer.parseInt(value);
-                } catch (NumberFormatException ignored) {}
-            }
-            
-            // 3. Properties file
-            value = fileProperties.getProperty(sysProp);
-            if (value != null && !value.isBlank()) {
-                try {
-                    return Integer.parseInt(value);
-                } catch (NumberFormatException ignored) {}
-            }
-            
-            // 4. Default
+            if (chosen != null) return chosen;
+            LOG.atDebug().addKeyValue("event", "config.setting.default")
+                    .log("Using default {} for {} (not set by any source)", defaultValue, sysProp);
             return defaultValue;
         }
 
+        private static Boolean parseBooleanStrict(String value) {
+            if ("true".equalsIgnoreCase(value)) return true;
+            if ("false".equalsIgnoreCase(value)) return false;
+            throw new IllegalArgumentException("expected true or false");
+        }
+
         private static Properties loadPropertiesFile() {
+            return loadPropertiesFile(RaftStorageConfig.class.getClassLoader(), Path.of(""));
+        }
+
+        /** Package-private so both locations can be tested without touching the real classpath or working directory. */
+        static Properties loadPropertiesFile(ClassLoader classpath, Path workingDirectory) {
             Properties props = new Properties();
-            
-            // Try classpath first
-            try (InputStream is = RaftStorageConfig.class.getClassLoader()
-                    .getResourceAsStream(PROPERTIES_FILE)) {
+
+            // The classpath first. A file that is there but cannot be read is an error: moving on
+            // to another file, or to the defaults, would hide the operator's file from them.
+            try (InputStream is = classpath.getResourceAsStream(PROPERTIES_FILE)) {
                 if (is != null) {
                     props.load(is);
+                    LOG.atDebug().addKeyValue("event", "config.properties.loaded")
+                            .log("Loaded properties file from classpath: {}", PROPERTIES_FILE);
                     return props;
                 }
-            } catch (IOException ignored) {}
-            
-            // Try working directory
-            Path localFile = Path.of(PROPERTIES_FILE);
+                LOG.atDebug().addKeyValue("event", "config.properties.absent")
+                        .log("No {} found on classpath", PROPERTIES_FILE);
+            } catch (IOException e) {
+                throw new java.io.UncheckedIOException("Cannot read " + PROPERTIES_FILE + " from the classpath", e);
+            }
+
+            // Then the working directory, under the same rule.
+            Path localFile = workingDirectory.resolve(PROPERTIES_FILE);
             if (Files.exists(localFile)) {
                 try (InputStream is = Files.newInputStream(localFile)) {
                     props.load(is);
-                } catch (IOException ignored) {}
+                    LOG.atDebug().addKeyValue("event", "config.properties.loaded")
+                            .log("Loaded properties file from working directory: {}", localFile.toAbsolutePath());
+                } catch (IOException e) {
+                    throw new java.io.UncheckedIOException("Cannot read " + localFile.toAbsolutePath(), e);
+                }
+            } else {
+                LOG.atDebug().addKeyValue("event", "config.properties.absent")
+                        .log("No {} in working directory", localFile.toAbsolutePath());
             }
-            
+
             return props;
         }
     }

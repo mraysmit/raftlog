@@ -22,6 +22,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
@@ -44,6 +46,7 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 @DisplayName("Enhanced Protection Tests")
 class EnhancedProtectionTest {
+    private static final Logger LOG = LoggerFactory.getLogger(EnhancedProtectionTest.class);
 
     @TempDir
     Path tempDir;
@@ -84,8 +87,10 @@ class EnhancedProtectionTest {
 
             // Second instance should fail
             FileRaftStorage storage2 = new FileRaftStorage(true);
+            DurableState untouchedAtLine90 = DurableState.expectUnchanged(tempDir);
             ExecutionException ex = assertThrows(ExecutionException.class, () ->
                     storage2.open(tempDir).get(5, TimeUnit.SECONDS));
+            untouchedAtLine90.close();
 
             assertTrue(ex.getCause() instanceof StorageException);
             assertTrue(ex.getCause().getMessage().contains("exclusive lock") ||
@@ -106,9 +111,6 @@ class EnhancedProtectionTest {
             storage.sync().get(5, TimeUnit.SECONDS);
             storage.close();
             storage = null;
-
-            // Wait a moment for lock release
-            Thread.sleep(100);
 
             // Second instance should succeed
             FileRaftStorage storage2 = new FileRaftStorage(true);
@@ -136,8 +138,10 @@ class EnhancedProtectionTest {
 
                 // Our storage should fail to open
                 storage = new FileRaftStorage(true);
+                DurableState untouchedAtLine139 = DurableState.expectUnchanged(tempDir);
                 ExecutionException ex = assertThrows(ExecutionException.class, () ->
                         storage.open(tempDir).get(5, TimeUnit.SECONDS));
+                untouchedAtLine139.close();
 
                 assertTrue(ex.getCause() instanceof StorageException);
             }
@@ -330,8 +334,8 @@ class EnhancedProtectionTest {
 
             // Verification should be slower (we just document this, not assert)
             // In practice it's about 2x slower due to read-back
-            System.out.println("Non-verified: " + nonVerifiedTime / 1_000_000 + " ms");
-            System.out.println("Verified: " + verifiedTime / 1_000_000 + " ms");
+            LOG.info("Non-verified: {} ms", nonVerifiedTime / 1_000_000);
+            LOG.info("Verified: {} ms", verifiedTime / 1_000_000);
         }
 
         @Test
@@ -339,7 +343,7 @@ class EnhancedProtectionTest {
         void verificationSkippedWhenFsyncDisabled() throws Exception {
             // When fsync is disabled (test mode), verification is also skipped
             // because there's nothing meaningful to verify
-            storage = new FileRaftStorage(false, true);
+            storage = FileRaftStorage.unsafeWithoutFsyncForTesting(true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             // Should succeed (verification skipped)
@@ -381,13 +385,14 @@ class EnhancedProtectionTest {
 
             // Second instance blocked
             FileRaftStorage blocked = new FileRaftStorage(true, true);
-            assertThrows(ExecutionException.class, () ->
-                    blocked.open(tempDir).get(5, TimeUnit.SECONDS));
+            try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
+                assertThrows(ExecutionException.class, () ->
+                        blocked.open(tempDir).get(5, TimeUnit.SECONDS));
+            }
             blocked.close();
 
             // Close and reopen
             storage.close();
-            Thread.sleep(100);
 
             storage = new FileRaftStorage(true, true);
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
@@ -411,8 +416,10 @@ class EnhancedProtectionTest {
 
             // Attempt second instance fails gracefully
             FileRaftStorage reader = new FileRaftStorage(true);
+            DurableState untouchedAtLine413 = DurableState.expectUnchanged(tempDir);
             ExecutionException ex = assertThrows(ExecutionException.class, () ->
                     reader.open(tempDir).get(5, TimeUnit.SECONDS));
+            untouchedAtLine413.close();
 
             // Error message should be helpful
             String message = ex.getCause().getMessage();

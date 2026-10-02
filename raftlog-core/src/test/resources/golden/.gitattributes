@@ -1,0 +1,3 @@
+raft.log binary
+meta.dat binary
+SHA256SUMS text eol=lf

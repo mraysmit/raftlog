@@ -21,5 +21,7 @@
  * the Raft WAL storage layer.
  * 
  * @see dev.mars.raftlog.demo.WalDemo
+ * @see dev.mars.raftlog.demo.KeyValueExample
+ * @see dev.mars.raftlog.demo.WalChaos
  */
 package dev.mars.raftlog.demo;

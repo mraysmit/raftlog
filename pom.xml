@@ -4,7 +4,7 @@
 
     <groupId>io.github.mraysmit</groupId>
     <artifactId>raftlog</artifactId>
-    <version>1.2.0</version>
+    <version>1.4.0</version>
     <packaging>pom</packaging>
 
     <name>RaftLog</name>
@@ -52,31 +52,33 @@
 
     <properties>
         <!-- Java Version -->
-        <maven.compiler.source>21</maven.compiler.source>
-        <maven.compiler.target>21</maven.compiler.target>
-        <maven.compiler.release>21</maven.compiler.release>
+        <maven.compiler.source>25</maven.compiler.source>
+        <maven.compiler.target>25</maven.compiler.target>
+        <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+        <maven.build.timestamp.format>yyyy-MM-dd_HH-mm-ss</maven.build.timestamp.format>
 
         <!-- Dependency Versions -->
         <slf4j.version>2.0.12</slf4j.version>
         <logback.version>1.5.6</logback.version>
+        <logstash.logback.encoder.version>8.1</logstash.logback.encoder.version>
         <junit.version>5.10.2</junit.version>
         <junit.platform.version>1.10.2</junit.platform.version>
 
         <!-- Plugin Versions -->
-        <maven.compiler.plugin.version>3.12.1</maven.compiler.plugin.version>
-        <maven.surefire.plugin.version>3.2.5</maven.surefire.plugin.version>
-        <maven.failsafe.plugin.version>3.2.5</maven.failsafe.plugin.version>
+        <maven.compiler.plugin.version>3.14.0</maven.compiler.plugin.version>
+        <maven.surefire.plugin.version>3.5.3</maven.surefire.plugin.version>
+        <maven.failsafe.plugin.version>3.5.3</maven.failsafe.plugin.version>
         <maven.jar.plugin.version>3.3.0</maven.jar.plugin.version>
         <maven.source.plugin.version>3.3.0</maven.source.plugin.version>
         <maven.javadoc.plugin.version>3.6.3</maven.javadoc.plugin.version>
         <maven.gpg.plugin.version>3.2.7</maven.gpg.plugin.version>
         <maven.release.plugin.version>3.0.1</maven.release.plugin.version>
-        <maven.enforcer.plugin.version>3.4.1</maven.enforcer.plugin.version>
+        <maven.enforcer.plugin.version>3.6.1</maven.enforcer.plugin.version>
         <maven.toolchains.plugin.version>3.1.0</maven.toolchains.plugin.version>
         <maven.shade.plugin.version>3.5.2</maven.shade.plugin.version>
-        <jacoco.plugin.version>0.8.12</jacoco.plugin.version>
+        <jacoco.plugin.version>0.8.14</jacoco.plugin.version>
         <central.publishing.plugin.version>0.10.0</central.publishing.plugin.version>
 
         <!-- Test Configuration -->
@@ -84,6 +86,8 @@
         <test.threadCount>4</test.threadCount>
         <test.groups />
         <test.excludedGroups />
+        <test.log.directory>${maven.multiModuleProjectDirectory}/logs</test.log.directory>
+        <test.log.configuration>${maven.multiModuleProjectDirectory}/config/logback-test.xml</test.log.configuration>
     </properties>
 
     <dependencyManagement>
@@ -124,6 +128,11 @@
                 <groupId>ch.qos.logback</groupId>
                 <artifactId>logback-core</artifactId>
                 <version>${logback.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>net.logstash.logback</groupId>
+                <artifactId>logstash-logback-encoder</artifactId>
+                <version>${logstash.logback.encoder.version}</version>
             </dependency>
 
             <!-- ======================= -->
@@ -202,7 +211,7 @@
                     <configuration>
                         <toolchains>
                             <jdk>
-                                <version>21</version>
+                                <version>25</version>
                             </jdk>
                         </toolchains>
                     </configuration>
@@ -226,8 +235,8 @@
                                         <message>Maven 3.8.0 or higher is required.</message>
                                     </requireMavenVersion>
                                     <requireJavaVersion>
-                                        <version>[21,)</version>
-                                        <message>Java 21 or higher is required.</message>
+                                        <version>[25,)</version>
+                                        <message>Java 25 or higher is required.</message>
                                     </requireJavaVersion>
                                     <banDuplicatePomDependencyVersions />
                                     <dependencyConvergence />
@@ -252,6 +261,8 @@
                         <argLine>-XX:+EnableDynamicAgentLoading</argLine>
                         <systemPropertyVariables>
                             <java.io.tmpdir>${project.build.directory}/test-tmp</java.io.tmpdir>
+                            <raftlog.test.log.dir>${test.log.directory}</raftlog.test.log.dir>
+                            <logback.configurationFile>${test.log.configuration}</logback.configurationFile>
                         </systemPropertyVariables>
                     </configuration>
                 </plugin>
@@ -265,6 +276,11 @@
                         <groups>${test.groups}</groups>
                         <excludedGroups>${test.excludedGroups}</excludedGroups>
                         <argLine>-XX:+EnableDynamicAgentLoading</argLine>
+                        <systemPropertyVariables>
+                            <java.io.tmpdir>${project.build.directory}/test-tmp</java.io.tmpdir>
+                            <raftlog.test.log.dir>${test.log.directory}</raftlog.test.log.dir>
+                            <logback.configurationFile>${test.log.configuration}</logback.configurationFile>
+                        </systemPropertyVariables>
                     </configuration>
                     <executions>
                         <execution>
@@ -328,6 +344,31 @@
                             </goals>
                             <configuration>
                                 <rules>
+                                    <!--
+                                        The storage package is held to a far higher bar than the bundle.
+                                        Every line and branch of it is executed across Windows and Linux; the
+                                        little that one platform cannot reach is the other platform's half of
+                                        CompactionIo.forceDirectory. A new refusal or failure path without a
+                                        test fails the build here instead of waiting for someone to look.
+                                    -->
+                                    <rule>
+                                        <element>PACKAGE</element>
+                                        <includes>
+                                            <include>dev.mars.raftlog.storage</include>
+                                        </includes>
+                                        <limits>
+                                            <limit>
+                                                <counter>LINE</counter>
+                                                <value>COVEREDRATIO</value>
+                                                <minimum>0.99</minimum>
+                                            </limit>
+                                            <limit>
+                                                <counter>BRANCH</counter>
+                                                <value>COVEREDRATIO</value>
+                                                <minimum>0.99</minimum>
+                                            </limit>
+                                        </limits>
+                                    </rule>
                                     <rule>
                                         <element>BUNDLE</element>
                                         <limits>
@@ -527,13 +568,17 @@
                             </execution>
                         </executions>
                     </plugin>
-                    <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-surefire-plugin</artifactId>
-                        <configuration>
-                            <argLine>${argLine} -XX:+EnableDynamicAgentLoading</argLine>
-                        </configuration>
-                    </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <configuration>
+                        <argLine>${argLine} -XX:+EnableDynamicAgentLoading</argLine>
+                        <systemPropertyVariables>
+                            <raftlog.test.log.dir>${test.log.directory}</raftlog.test.log.dir>
+                            <logback.configurationFile>${test.log.configuration}</logback.configurationFile>
+                        </systemPropertyVariables>
+                    </configuration>
+                </plugin>
                 </plugins>
             </build>
         </profile>
@@ -598,13 +643,17 @@
                             </execution>
                         </executions>
                     </plugin>
-                    <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-surefire-plugin</artifactId>
-                        <configuration>
-                            <argLine>${argLine} -XX:+EnableDynamicAgentLoading</argLine>
-                        </configuration>
-                    </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <configuration>
+                        <argLine>${argLine} -XX:+EnableDynamicAgentLoading</argLine>
+                        <systemPropertyVariables>
+                            <raftlog.test.log.dir>${test.log.directory}</raftlog.test.log.dir>
+                            <logback.configurationFile>${test.log.configuration}</logback.configurationFile>
+                        </systemPropertyVariables>
+                    </configuration>
+                </plugin>
                 </plugins>
             </build>
             <properties>

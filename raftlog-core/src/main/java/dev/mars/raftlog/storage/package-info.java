@@ -26,7 +26,8 @@
  * <b>Key Design Principles:</b>
  * <ul>
  *   <li><b>Persist-before-response:</b> All mutations are durable before RPC acknowledgment</li>
- *   <li><b>Crash safety:</b> WAL survives process crashes and power failures</li>
+ *   <li><b>Crash safety:</b> Forced writes and atomic publication, subject to filesystem durability guarantees</li>
+ *   <li><b>Prefix compaction:</b> Reclaims old WAL records after caller-owned durable snapshots</li>
  *   <li><b>Sequential replay:</b> Log can be fully reconstructed on startup</li>
  * </ul>
  * <p>
@@ -34,7 +35,8 @@
  * <pre>
  * data/
  *  ├─ meta.dat     // currentTerm + votedFor (atomic replace)
- *  └─ raft.log     // append-only WAL with TRUNCATE and APPEND records
+ *  ├─ raft.log     // WAL with TRUNCATE and APPEND records
+ *  └─ raft.log.tmp // unpublished rewrite; discarded on recovery if raft.log exists
  * </pre>
  *
  * @see dev.mars.raftlog.storage.RaftStorage

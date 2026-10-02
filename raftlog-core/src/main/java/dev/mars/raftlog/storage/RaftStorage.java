@@ -30,8 +30,9 @@ import java.util.concurrent.CompletableFuture;
  * <p>
  * The RaftNode depends solely on this interface, not on concrete implementations.
  * <p>
- * <b>Critical Contract:</b> All methods that modify state must ensure durability
- * (fsync) before the returned Future completes successfully.
+ * <b>Critical Contract:</b> Append and suffix-truncation operations require
+ * {@link #sync()} before acknowledgment. Metadata updates and prefix compaction
+ * provide their own durability barriers, subject to the configured filesystem.
  *
  * @see FileRaftStorage
  */
@@ -54,6 +55,19 @@ public interface RaftStorage extends Closeable {
      * <p>
      * Implementation MUST ensure durability (fsync) before returning.
      * This is critical for preventing double-voting after crash/restart.
+     * <p>
+     * A failure to force the staging file or, on non-Windows providers, the data
+     * directory is a durability failure: the instance is fenced and every later
+     * operation fails until it is closed and a fresh instance is opened.
+     * <p>
+     * <b>Invariants enforced:</b> the term must not be lower than the persisted term,
+     * and a vote already cast in the persisted term cannot be changed within that
+     * term. Either is a node bug that would allow double voting, and is refused with a
+     * {@link WriteRejection} whose reason is {@link WriteRejectionReason#TERM_REGRESSION}
+     * or {@link WriteRejectionReason#VOTE_CHANGED} before anything is written. If the
+     * metadata file exists but cannot be read, the persisted term is unknown and every
+     * update is refused with {@link WriteRejectionReason#METADATA_UNREADABLE} rather
+     * than risk overwriting a higher term.
      *
      * @param currentTerm the current Raft term
      * @param votedFor    the candidate ID voted for (empty if no vote cast)
@@ -87,6 +101,21 @@ public interface RaftStorage extends Closeable {
      * <p>
      * NOT required to fsync immediately - use {@link #sync()} for that.
      * This allows batching multiple appends before a single fsync.
+     * <p>
+     * <b>Invariants enforced:</b> the batch must continue the log at its tail with
+     * contiguous indices starting at 1, and terms must not decrease. The whole batch
+     * is validated before the first byte is written, so a refused batch leaves the
+     * WAL untouched. A fresh log starts at index 1; a compacted log continues at the
+     * persisted boundary plus one. Violations are refused with
+     * {@link WriteRejectionReason#INDEX_NOT_CONTIGUOUS} or
+     * {@link WriteRejectionReason#TERM_REGRESSION}.
+     * <p>
+     * <b>Precondition:</b> a non-empty log must be replayed with {@link #replayLog()}
+     * before the first write after open, so the tail is known. Until then writes are
+     * refused with {@link WriteRejectionReason#LOG_STATE_UNKNOWN}. A write that fails
+     * part way, for any reason, also leaves the tail unknown until the next replay, so a
+     * blind retry cannot duplicate records that did reach the file. A null element fails
+     * the returned future with IllegalArgumentException; nothing is thrown synchronously.
      *
      * @param entries the log entries to append
      * @return a Future that completes when entries are written (but not necessarily synced)
@@ -119,27 +148,39 @@ public interface RaftStorage extends Closeable {
      *    .thenAccept(v -> plan.applyTo(memoryLog));
      * }</pre>
      *
+     * <b>Invariants enforced:</b> {@code fromIndex} must be at least 1 and no greater
+     * than the next index after the tail (truncating exactly at the tail is a legal
+     * no-op). Anything else is refused with
+     * {@link WriteRejectionReason#INVALID_TRUNCATION}. The same replay precondition
+     * as {@link #appendEntries(List)} applies.
+     *
      * @param fromIndex the first index to delete (inclusive)
      * @return a Future that completes when the truncation record is written (but NOT synced)
      */
     CompletableFuture<Void> truncateSuffix(long fromIndex);
 
     /**
-     * Deletes all log entries with index <= toIndex, compacting the journal on disk.
-     * <p>
-     * Used after a snapshot has captured the state machine up to {@code toIndex}. Later
-     * entries keep their indices; the journal is rewritten so that earlier records, including
-     * resolved suffix truncations, no longer occupy space or replay time.
-     * <p>
-     * <b>Safety:</b> only call this after a snapshot that includes every entry up to
-     * {@code toIndex} has been made durable. The rewrite is atomic: a crash leaves either the
-     * old journal or the compacted one, never a mixture.
+     * Reclaims WAL records at indexes less than or equal to {@code toIndex}.
+     * The caller must durably publish a covering application snapshot first.
+     * Retained entries keep their indexes, terms, payloads and replay order.
+     * Successful completion is a durability barrier for the replacement WAL;
+     * no separate {@link #sync()} is required. Zero is a no-op; negatives fail.
+     * FileRaftStorage always forces the replacement file, even when append sync
+     * is disabled. Directory force is required on non-Windows providers; the
+     * Java Windows provider supports only file force and atomic replacement.
+     * A publication failure requires closing and opening a fresh storage instance.
+     * The boundary is persisted as the first record of the rewritten WAL, so both
+     * this instance and any later restart know that the log continues at
+     * {@code toIndex + 1} even when nothing was retained. The caller still owns its
+     * snapshot index and term.
+     * Implementations without compaction fail explicitly for compatibility.
      *
-     * @param toIndex the last index to delete (inclusive); a value below the first retained
-     *                index is a no-op
-     * @return a Future that completes when the compacted journal is durable
+     * @param toIndex inclusive last index to remove
+     * @return completion of durable compaction, subject to filesystem guarantees
      */
-    CompletableFuture<Void> truncatePrefix(long toIndex);
+    default CompletableFuture<Void> truncatePrefix(long toIndex) {
+        return CompletableFuture.failedFuture(new UnsupportedOperationException("Prefix compaction is not supported"));
+    }
 
     /**
      * Universal Durability Barrier.
@@ -149,6 +190,11 @@ public interface RaftStorage extends Closeable {
      * <p>
      * This is the critical "persist-before-response" barrier that ensures
      * Raft safety.
+     * <p>
+     * A failed force must not be retried: the operating system may already have
+     * discarded the dirty pages, so a retry can succeed for data that is gone.
+     * FileRaftStorage therefore fences the instance on failure; close it and open
+     * a fresh instance, which replays from the last state known to be on disk.
      *
      * @return a Future that completes when all data is durable
      */
@@ -160,14 +206,44 @@ public interface RaftStorage extends Closeable {
      * For FileRaftStorage: Scans the append-only file sequentially.
      * For RocksDB: Scans keys {@code log:1} to {@code log:N}.
      * <p>
-     * This method also truncates any corrupt/partial records at the tail.
+     * Replay is destructive only for a structurally incomplete EOF fragment, which
+     * is treated as a torn write and physically truncated. A complete record with a
+     * bad CRC, malformed header, arbitrary garbage, or an invalid record followed by
+     * a valid record may be acknowledged data damaged later; FileRaftStorage fails
+     * with {@link FileRaftStorage.CorruptLogException}, leaves the file unchanged and
+     * fences the instance. Such a node must be restored from its peers rather than
+     * repaired by truncation.
+     * <p>
+     * The reconstructed log must be a well-formed Raft log: contiguous indices and
+     * non-decreasing terms. Anything else fails with a StorageException, since the
+     * file was not written by a conforming node. Replay establishes the tail that
+     * later writes are checked against.
      *
      * @return a Future containing all valid log entries in order
      */
     CompletableFuture<List<LogEntryData>> replayLog();
 
     /**
-     * Closes the storage, releasing all resources.
+     * Starts closing the storage and completes after all resources have been released.
+     * <p>
+     * Implementations must make this operation idempotent. The default preserves
+     * compatibility for implementations whose {@link #close()} is synchronous.
+     *
+     * @return a future that completes when the storage is fully closed
+     */
+    default CompletableFuture<Void> closeAsync() {
+        try {
+            close();
+            return CompletableFuture.completedFuture(null);
+        } catch (Throwable error) {
+            return CompletableFuture.failedFuture(error);
+        }
+    }
+
+    /**
+     * Closes the storage and releases all resources before returning, so that a new
+     * instance may open the same directory immediately afterwards. Use
+     * {@link #closeAsync()} to observe completion without blocking.
      * <p>
      * After close, no other methods should be called.
      */

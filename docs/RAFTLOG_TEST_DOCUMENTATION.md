@@ -2,18 +2,172 @@
 
 This document provides a comprehensive overview of all test cases in the RaftLog project, organized by test class and category.
 
+## Running Tests
+
+### Run everything
+
+```bash
+mvn -Pcoverage clean verify
+```
+
+Run this from the repository root for the Maven build, both modules' tests, packaging, and
+the 99% line and branch coverage gate on the storage package. For a release or a change to
+storage, the planner, or configuration, also perform these separate checks:
+
+1. Inspect the Maven test reports for unexpected skipped tests. Three permission tests are
+   expected to skip on Windows and must run on Linux.
+2. Run `WalDemo` and `KeyValueExample` from the packaged demo JAR, twice each against the
+   same data directory. Commands are below.
+3. Run the packaged `WalChaos` program with no category argument and require zero failures.
+4. Run the model soak with 2000 additional seeds, using the Maven command below. Require
+   `MODEL SOAK: ran 2000 seeds` in the output.
+5. Repeat the build, packaged examples, chaos run, and model soak on Linux as an unprivileged
+   user. Permission tests must not skip there.
+
+The former Java verification runner and mutation gate were removed with their directory.
+No current Maven goal replaces the mutation gate, and there is no single command that
+performs the complete checklist. Do not report mutation testing as passed without running
+a replacement.
+
+Do not substitute a subset because a change "only touches" one area. Past gaps included a soak
+that ran no seeds, packaged programs that were never actually run, and a whole-reactor coverage
+build that failed while modules were built one at a time. The focused commands below support
+development; the full checklist above is the release procedure.
+
+### Unit Tests (JUnit)
+
+```bash
+# Run all tests
+mvn test
+
+# Run specific test class
+mvn test -Dtest=FileRaftStorageAdversarialTest
+
+# Run specific test category
+mvn test '-Dtest=ProtectionGuaranteeTest$ThreadSafetyGuarantees'
+
+# Run with verbose output
+mvn test -Dtest=EnhancedProtectionTest -Dsurefire.useFile=false
+```
+
+### Demo Examples
+
+Run these commands from the project root:
+
+```powershell
+# Build the executable demo JAR and its dependencies
+mvn package -pl raftlog-demo -am -DskipTests
+
+# Run the main WAL example
+java -jar raftlog-demo/target/raftlog-demo-1.4.0.jar .\run-data\wal-demo
+
+# Run the key/value replay example
+java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.KeyValueExample .\run-data\key-values
+```
+
+Run each example a second time with the same directory to exercise restart and replay.
+
+### Extended Model Soak
+
+```bash
+mvn -pl raftlog-core test -Dtest=FileRaftStorageInvariantEdgeCaseTest#soakWritePathAndReplayPathAgainstTheModel -Draftlog.model.soakSeeds=2000
+```
+
+Check the output for `MODEL SOAK: ran 2000 seeds`; a successful exit without that line does
+not establish that the extra seeds ran.
+
+### Chaos Tests (WalChaos)
+
+WalChaos is an interactive chaos testing suite that runs as a standalone Java application:
+
+```bash
+# Build the demo module
+mvn package -pl raftlog-demo -am -DskipTests
+
+# Run all 38 chaos tests
+java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos
+
+# Run specific category
+java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos concurrent
+java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos corruption
+java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos boundary
+java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos stress
+```
+
+**WalChaos Output:**
+
+- Creates temporary directory for test files
+- Runs tests with real-time pass/fail indication
+- Reports total passed/failed at end
+- Returns exit code 0 on success, 1 on any failure
+- Automatically cleans up temporary files
+
+---
+
+## Prefix compaction and recovery contract tests
+
+- `FileRaftStoragePrefixCompactionTest`: 9 cases covering reclaiming bytes, inclusive boundaries, retained entries/metadata, repeated operations and restart.
+- `FileRaftStorageCompactionFailureTest`: 14 cases covering real filesystem failures, publication ordering, fencing, corruption, and four abruptly terminated child JVMs.
+- `FileRaftStorageRecoveryContractTest`: 38 cases covering append/truncate/replay semantics, torn-tail fixtures, and lifecycle races: close draining accepted work, immediate reopen after close, idempotent concurrent opens, operations queued before or behind a failed open, and `sync()` as an ordering barrier with fsync disabled. Also the Raft invariant checks: contiguous appends, term regression, vote change within a term, truncation bounds, the replay-before-write precondition, and `AppendPlan` position arithmetic after prefix compaction.
+- `FileRaftStorageInvariantEdgeCaseTest`: 57 cases attacking the invariant checks. The governing property is that the write path and the replay path agree. Covers the last term surviving suffix truncation and compaction, batches that fail part way (a torn record from a device error, an unchecked failure, a disk filling up) never leaving a stale tail, unreadable `meta.dat` refusing updates, index arithmetic at `Long.MAX_VALUE` including a batch that wraps to `Long.MIN_VALUE`, format versioning, the compaction boundary accessor with `AppendPlan`, and null arguments failing the future. Forty seeds of a model-based test drive random operation sequences with restarts against a reference model; `mvn -pl raftlog-core test -Dtest='FileRaftStorageInvariantEdgeCaseTest#soakWritePathAndReplayPathAgainstTheModel' -Draftlog.model.soakSeeds=N` runs the same check over N further seeds. Pass it as a plain Maven property; passing it through `-DargLine` does not reach the forked test JVM, and the soak then runs no seeds and passes in milliseconds. The test prints `MODEL SOAK: ran N seeds`. Two thousand seeds take several minutes; a soak that finishes instantly ran nothing.
+- `DurableState` (test support) and `DurableStateTest` (9 cases): the rule that a refusal test must prove more than the refusal. `DurableState.expectUnchanged(dir)` hashes every file under the test directory, except the lock file, and fails if a block of code changed, added or removed any of them, which also catches a leftover staging file. `DurableState.assertRestartAgrees(storage, dir)` closes the instance, reopens the directory, and requires the replayed log to match what the live instance replayed, payload bytes included. Every refusal in the suite is wrapped in the first, and every refusal test ends with a restart. This covers validation rejections, operations on closed, unopened or fenced instances, a second instance blocked by the lock, and every helper that asserts corruption was reported with the file left intact. Injected I/O failures are deliberately not wrapped: those may leave a staging file or a torn record by design. `DurableStateTest` proves the checker itself notices appended bytes, a same-size content change, truncation, a new file, a removed file and a change in a nested directory.
+- `WalRecords` (test support) and `WalRecordsTest` (8 cases): exact accounting for tests where many threads write at once. A single refusal cannot be checked byte-for-byte while other threads are legitimately writing, but the end state can: the WAL is append-only, so every record in it must come from an operation the storage accepted, and every accepted operation must be in it. The reader is written independently of the production decoder from the documented record format, and is strict about CRCs and trailing bytes. `assertNoStrayFiles` rejects leftover staging files. The concurrent tests in `ProtectionGuaranteeTest` and `FileRaftStorageAdversarialTest` record what was accepted and assert this, then restart. The concurrent metadata test ends on a guaranteed refusal, because an accepted update replaces the staging file and would otherwise mask a refusal that left one behind. `WalChaos` applies the same rule: `expectRefusal` compares a hash of the data directory before and after, and the concurrent scenarios require the WAL length to equal the bytes of the accepted records.
+- **Historical mutation checks.** The removed mutation program once inverted safety rules and required the tests to fail. That gate is no longer available; coverage and the current tests do not establish equivalent mutation sensitivity. A replacement must be added before mutation checks can again be claimed as part of release verification.
+- **How the first guards were validated historically.** These guards were validated by deliberately breaking the storage, first so that a refused append writes a record before validation and then so that a refused metadata update leaves its staging file. The guarded tests and the chaos program must fail under those mutations. One guard, the concurrent metadata test, did not fail at first, which is how its masking problem was found. A future mutation check should cover each new kind of refusal.
+- `FileRaftStorageFailurePathTest` (56 cases), `LogSanitizationTest` (10) and `RaftStorageDefaultsTest` (4): one test for every refusal and failure path that line coverage showed no test had ever executed. The list came from `mvn -Pcoverage test`, not from intuition, and it was long: the replay shape checks (gap, duplicate, term regression, first entry not following the boundary, misplaced prefix marker) had never run in any test. Also covered: historical truncate records below 1 or below the compaction boundary, torn-tail classification for a newer format, an unknown type, a version-0 record, a torn TRUNCATE record, a torn payload that contains the magic bytes or spans several scan windows, and a valid record several windows beyond an apparently torn header. Open: an orphaned compaction output, a second directory on an open instance, a lock held by another process (child JVM), failure after the channel exists, and close racing a failing open. Close: on the executor thread, a refused close task, and failure to close either channel or release the lock. Metadata: an unusable staging path and a metadata path that cannot be read at all. Writes: checked and unchecked failure writing a TRUNCATE record, failure to measure disk space, compaction running out of disk before publication, close or cleanup failing inside a failed compaction, and write verification catching a changed payload, a damaged stored checksum and a short write. Fencing: operations queued before a fence fail with the fencing failure and write nothing. Each test asserts the failure seen, the bytes on disk afterwards, and what the instance will and will not do next.
+- **Coverage as the work list.** Every line of `FileRaftStorage`, `AppendPlan` and `RaftStorage` is now executed by a test. Between Windows and Linux every line of `CompactionIo` is executed too: the directory force body runs on Linux and its early return runs on Windows. No partly taken branches remain in the storage package. Previously: `if (warn)` logging branches, and three defensive branches that are unreachable by construction (a second fence, a scheduling failure on an already-fenced instance, and a stale failed-open future). Before adding a refusal or failure path, run the coverage profile and confirm no `throw`, `fence` or failed-future line is unexecuted.
+- **Run it on Linux as an unprivileged user.** Root ignores read-only permissions, so as root the permission-based tests skip themselves and their paths go unexecuted. From the repository root, with Docker running: mount the repository read-only into `maven:3.9-eclipse-temurin-25`, copy it to a scratch directory inside the container, write a `toolchains.xml` pointing at `$JAVA_HOME`, install the parent POM with `mvn -N install`, then run `mvn -pl raftlog-core -Pcoverage install` with `--user 1000:1000`. The expected result is no skipped tests at all. A path whose only test depends on the platform or the user also needs a deterministic test through a `CompactionIo` seam; the replay I/O failure has both.
+- **Give each seam one meaning.** Replay briefly shared the `reopen` seam with compaction. Two compaction tests count and fail `reopen` calls, and they broke, because compaction reads the log before it rewrites it. Replay now has `openForReplay`. Run the whole suite after touching a seam, not just the test that needed it.
+- **A test that silently stopped testing.** `verifyWritesForceFailureFencesTheInstance` passed for two days without fencing anything: the replay precondition refused its append with `LOG_STATE_UNKNOWN`, which is also a `StorageException`, so its loose type check was satisfied. `assertFenced` now requires the identical failure instance for every operation and rejects an ordinary refusal. Assert the specific failure, never just its supertype.
+- `GoldenFileCompatibilityTest` (27 cases) and `src/test/resources/golden`: reference data directories kept as binary fixtures. They are organised by WAL record format, which is what decides whether a file can be read: `format-1` holds `APPEND` and `TRUNCATE` records only and was written by a published jar downloaded from Maven Central and verified against its published checksum, never rebuilt from source; `format-2` is the current format, in which a compacted log begins with a `PREFIX` record, and was written by the current build. The test pins the number of scenarios in each (13 and 8) and requires every binary fixture to be listed in `SHA256SUMS`. `GoldenFileGenerator.java.txt` beside the fixtures is the program that produced them, with the instructions for adding more. Each scenario carries `expected.txt`, the replay recorded by the jar that wrote the files, so the oracle is recorded behaviour and not an expectation of it. Contract one: a well-formed directory replays exactly as recorded, payload bytes included, keeps its metadata, is not rewritten by replay, can be continued, and survives a restart. Contract two: a log that is not a valid Raft log (a gap, a duplicate index, a term regression) is refused without being modified. Fixtures are copied before use, because the storage locks the directory and may repair a torn tail. `SHA256SUMS` plus a `.gitattributes` in that directory guard against a checkout rewriting line endings inside a binary fixture. Generate fixtures with every release; without them, existing data directories still replaying is only an assumption.
+- **Reads that come back short** (in `FileRaftStorageFailurePathTest`): a positional-read seam simulates the WAL shrinking underneath replay. Before the fix a short read during tail classification answered "incomplete", which is the answer that gets a record truncated: it destroyed a complete record with a bad checksum, and in the scan it destroyed an intact record lying beyond a damaged length field. A short header read in the main loop declared a healthy log corrupt and fenced the instance.
+- `AppendPlanStrictnessTest` (50 cases): `AppendPlan` is not lenient. Every inconsistency in its arguments throws: null lists or elements, a start index that disagrees with the entries or is below 1, a negative boundary, gaps, duplicates, decreasing or negative terms, indices that wrap past `Long.MAX_VALUE`, a log that does not begin right after its boundary, a gap between the log and the incoming entries, a term lower than the entry it would follow, and two entries with the same index and term but different payloads, which means the logs have diverged. The record constructor and `applyTo` are covered as well, including that a refused `applyTo` leaves the log untouched. What stays legal is pinned too: a heartbeat, entries already held, entries covered by the snapshot, and a conflicting tail. Eleven older tests asserted the previous leniency, for example that planning entries 3 and 4 onto a log ending at 1 was fine; each now asserts the refusal.
+- `RaftStorageConfigSourcesTest` (32 cases): configuration arrives from the builder, system properties, environment variables and a properties file. Only the first two had ever been tested. Seams replace the environment and the properties file, since a JVM cannot change its own environment. Covers precedence, blank values, that fsync cannot be disabled from any source, and validation of the resolved limits whatever supplied them. Configuration is never guessed: a value that cannot be parsed is refused from every source with a message naming the setting, the source and the value, even when a higher-priority source overrides it, and a properties file that exists but cannot be read is an error. Six older tests asserted the opposite, one of them that `yes` quietly means false; each now asserts the refusal. The payload limit must be 1 to 2047 MB, because its size in bytes is computed in 32-bit arithmetic and 2048 overflows to a negative number.
+- **The write limit is not a read limit** (in `FileRaftStorageFailurePathTest`): lowering `maxPayloadSizeMb` below the size of an entry already in the log must not make a healthy log replay as corrupt. A record being read is bounded by the file that holds it, and the CRC decides whether it is genuine. The limit still applies to new writes, and still serves as a plausibility check on torn writes.
+- **The coverage gate.** `mvn -Pcoverage verify` fails if the `dev.mars.raftlog.storage` package drops below 99% of lines or branches. It was validated by setting it to 100%, which Windows alone cannot reach, and confirming the build broke. The remaining fraction is the half of `CompactionIo.forceDirectory` that the other platform runs.
+- `WalChaosTest` (7 cases, in `raftlog-demo`): runs the chaos suite as part of the build. A chaos program that somebody has to remember to launch lets the build be green while every scenario is failing, so `WalChaos.run(category)` returns a summary, and `main` only turns it into an exit code. The test runs each category and the whole suite, requires zero failures, and pins the number of scenarios per category (6, 8, 9, 5 and 10, which is 38), so a scenario that is deleted or silently stops being registered fails the build. An unknown category throws, because running nothing and reporting success is worse than refusing. Every category, `nasty` included, can be run on its own.
+- `FileRaftStorageDiagnosticLoggingTest` (31 cases): the log must explain every decision the storage takes. A refusal reaches the caller only as a failed future, which the caller may drop, so each of the eight `WriteRejectionReason` values produces an ERROR event `storage.write.rejected` carrying the reason, operation and state. Repeated refusals with the same reason are sampled at powers of two and an INFO `storage.write.rejection_summary` reports the exact total and suppressed count when the storage closes. This prevents concurrent misuse and chaos tests from producing thousands of duplicate lines while retaining the first failure, growth rate and final count. A refusal does not fence the storage. The state is also reported where it is established (`storage.open.completed`, `wal.replay.completed` with the tail, boundary and boundary source) and where it is lost (`wal.tail.unknown` after a partial write failure). A file of intact records that is not a valid Raft log is logged with its violation, every verdict on an undecodable record is a WARN that names the defect, and compaction reports the boundary it stored and bytes reclaimed. One test reads the main sources and fails on any statement at DEBUG or above without an `event` key. Another scans Java sources for `System.out`, `System.err` or `printStackTrace`. Maven tests log at INFO by default; set `RAFTLOG_TEST_LOG_LEVEL=DEBUG` for detailed per-operation diagnostics. The former logging mutants are no longer run.
+- `FileRaftStorageFencingTest`: 13 cases covering fencing after a failed WAL, metadata or directory force, and the replay classification of torn tails versus corruption inside the committed region.
+
+Replay policy: only a structurally incomplete EOF fragment is treated as a torn write and truncated. A complete record with a bad CRC, a malformed header, arbitrary garbage, or an invalid record followed by a valid record is reported as `CorruptLogException`; the file is left untouched and the instance is fenced.
+
+The 23 compaction cases were retained as behavioral failures before implementation and then passed. See [Prefix compaction](RAFTLOG_RAFT_WAL_DESIGN.md#139-prefix-compaction-implementation-notes).
+
 ## Test Summary
 
-| Test Class | Tests | Purpose |
-|------------|-------|---------|
-| `AppendPlanTest` | 15 | Pure function tests for append plan calculation |
-| `FileRaftStorageTest` | 18 | Core storage functionality |
-| `FileRaftStorageAdversarialTest` | 64 | Break-the-system stress tests |
-| `ProtectionGuaranteeTest` | 24 | Thread safety and crash consistency |
-| `EnhancedProtectionTest` | 16 | File locking, disk space, verification |
-| `NastyEdgeCaseTest` | 17 | JVM/OS/Hardware interaction failure modes |
-| `WalChaos` | 38 | Interactive chaos testing suite |
-| **Total** | **192** | |
+| Module | Test Class | Tests | Purpose |
+|--------|------------|-------|---------|
+| `raftlog-core` | `AppendPlanTest` | 15 | Append plan calculation |
+| `raftlog-core` | `AppendPlanStrictnessTest` | 50 | Every inconsistent `AppendPlan` argument is an error |
+| `raftlog-core` | `FileRaftStorageTest` | 18 | Core storage functionality |
+| `raftlog-core` | `FileRaftStorageAdversarialTest` | 65 | Break-the-system stress tests |
+| `raftlog-core` | `FileRaftStorageInvariantEdgeCaseTest` | 57 | Raft log and metadata invariants, written and replayed in the same test |
+| `raftlog-core` | `FileRaftStorageFailurePathTest` | 56 | Every refusal and failure path |
+| `raftlog-core` | `FileRaftStorageRecoveryContractTest` | 38 | Replay and recovery contract |
+| `raftlog-core` | `FileRaftStorageFencingTest` | 13 | Fencing after a failed force; torn tail versus corruption |
+| `raftlog-core` | `FileRaftStorageCompactionFailureTest` | 14 | Prefix compaction under injected I/O failure |
+| `raftlog-core` | `FileRaftStoragePrefixCompactionTest` | 9 | Prefix compaction |
+| `raftlog-core` | `FileRaftStorageLoggingTest` | 5 | Bounded, single-line, correlated log output |
+| `raftlog-core` | `FileRaftStorageDiagnosticLoggingTest` | 31 | Every refusal, verdict, state change and compaction publication step is logged |
+| `raftlog-core` | `LogSanitizationTest` | 10 | Untrusted text never reaches the log unbounded or multi-line |
+| `raftlog-core` | `GoldenFileCompatibilityTest` | 27 | Existing data directories, by WAL format |
+| `raftlog-core` | `ProtectionGuaranteeTest` | 24 | Thread safety and crash consistency |
+| `raftlog-core` | `EnhancedProtectionTest` | 16 | File locking, disk space, verification |
+| `raftlog-core` | `NastyEdgeCaseTest` | 18 | JVM/OS/hardware interaction failure modes |
+| `raftlog-core` | `ConfigResolverTest` | 33 | Configuration resolution |
+| `raftlog-core` | `RaftStorageConfigSourcesTest` | 32 | Every configuration source, strictly parsed |
+| `raftlog-core` | `RaftStorageDefaultsTest` | 4 | Defaults of the `RaftStorage` interface |
+| `raftlog-core` | `CoverageBoostTest` | 47 | Paths no other test reaches |
+| `raftlog-core` | `HighCoverageTest` | 40 | Paths no other test reaches |
+| `raftlog-core` | `DurableStateTest` | 9 | The test support that proves a directory is untouched |
+| `raftlog-core` | `WalRecordsTest` | 8 | The independent raw WAL reader used by the tests |
+| `raftlog-demo` | `WalChaosTest` | 7 | Runs all 38 chaos scenarios in the build |
+| `raftlog-demo` | `KeyValueExampleTest` | 4 | Key/value replay example |
+| `raftlog-demo` | `DemoInfoLoggingSafetyTest` | 2 | Demo logging |
+| `raftlog-demo` | `ExampleInfoLoggingTest` | 2 | Example logging |
+| | **Total** | **654** | 639 in `raftlog-core`, 15 in `raftlog-demo` |
+
+Three core tests need POSIX file permissions and are skipped on Windows. Run the Maven verification on Linux as an unprivileged user and check that none are skipped there.
 
 ---
 
@@ -85,7 +239,7 @@ Tests core WAL functionality including append, replay, metadata, and basic recov
 |------|-------------|
 | `testReplay_SurvivesRestart` | Log survives close and reopen |
 | `testRecovery_TornWrite_PartialHeader` | Partial header at end is ignored |
-| `testRecovery_CorruptCRC` | Corrupt CRC causes truncation at that point |
+| `testRecovery_CorruptCRC` | Corrupt CRC on the last record is reported and preserved |
 
 ### Edge Cases
 
@@ -102,19 +256,20 @@ Tests core WAL functionality including append, replay, metadata, and basic recov
 
 Adversarial tests that attempt to break the storage implementation through corruption, boundary conditions, concurrency, and stress.
 
-### WAL Corruption Tests (13 tests)
+### WAL Corruption Tests (14 tests)
 
 | Test | Description |
 |------|-------------|
-| `corruptMagicNumber` | Bad magic number causes truncation |
-| `corruptVersionNumber` | Invalid version causes truncation |
-| `unknownRecordType` | Unknown type byte causes truncation |
-| `negativePayloadLength` | Negative length causes truncation |
-| `payloadLengthExceedsMax` | Length > 16 MB causes truncation |
+| `corruptMagicNumber` | Bad magic with a valid record after it is reported, file untouched |
+| `corruptMagicNumberAtTail` | Bad magic on the last record is reported and preserved |
+| `corruptVersionNumber` | Invalid version on the last record is reported and preserved |
+| `unknownRecordType` | Unknown type byte is reported and preserved |
+| `negativePayloadLength` | Negative length is reported and preserved |
+| `payloadLengthExceedsMax` | Length > 16 MB is reported and preserved |
 | `truncatedPayload` | Incomplete payload causes truncation |
 | `truncatedCrc` | Missing CRC bytes causes truncation |
-| `zeroFilledGarbage` | Zeros at end ignored (no valid magic) |
-| `randomGarbageAtEnd` | Random bytes at end truncated |
+| `zeroFilledGarbage` | Zeros at the end are reported as ambiguous corruption |
+| `randomGarbageAtEnd` | Random bytes at the end are reported as ambiguous corruption |
 | `bitFlipInPayload` | Single bit flip detected by CRC |
 | `emptyWalFile` | Empty file returns empty log |
 | `partialFirstHeader` | Partial first record returns empty |
@@ -135,7 +290,7 @@ Adversarial tests that attempt to break the storage implementation through corru
 
 | Test | Description |
 |------|-------------|
-| `maxIndexValue` | `Long.MAX_VALUE` index works |
+| `maxIndexValue` | `Long.MAX_VALUE` index works as the continuation of a log compacted through `Long.MAX_VALUE - 1` |
 | `maxTermValue` | `Long.MAX_VALUE` term works |
 | `zeroIndex` | Index 0 is valid |
 | `zeroTerm` | Term 0 is valid |
@@ -215,13 +370,13 @@ An interactive chaos testing suite that throws every nasty scenario at the WAL t
 mvn package -pl raftlog-demo -am -DskipTests
 
 # Run all chaos tests
-java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos
+java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos
 
 # Run specific test category
-java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos concurrent
-java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos corruption
-java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos boundary
-java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos stress
+java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos concurrent
+java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos corruption
+java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos boundary
+java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos stress
 ```
 
 ### Concurrency Chaos Tests (6 tests)
@@ -230,15 +385,16 @@ Tests for race conditions, deadlocks, and concurrent access patterns.
 
 | Test | Description | Validation |
 |------|-------------|------------|
-| `Concurrent Writer Storm` | 20 threads × 100 entries all writing simultaneously | All 2,000 entries written without corruption or data loss |
-| `Concurrent Metadata Thrashing` | 50 threads rapidly updating metadata | Final metadata readable and consistent |
-| `Mixed Operations Chaos` | 10 threads performing random append/truncate/metadata/sync ops | Log replays successfully after chaos |
-| `Rapid Open/Close Cycles` | 50 cycles of open, write single entry, close immediately | All 50 entries survive across restarts |
+| `Concurrent Writer Storm` | 20 threads × 100 entries racing to append indices from a shared counter | Only appends that continue the tail are accepted; every other one is refused with `INDEX_NOT_CONTIGUOUS`; accepted + refused = 2,000; replay returns exactly the accepted entries, contiguous, with intact payloads |
+| `Concurrent Metadata Thrashing` | 50 threads persisting unordered terms | Lower terms refused with `TERM_REGRESSION`; persisted term is the highest accepted one with its own vote |
+| `Mixed Operations Chaos` | 10 threads performing random append/truncate/metadata/sync ops | Every ordering violation refused with a reason, nothing else fails; surviving log is contiguous |
+| `Rapid Open/Close Cycles` | 50 cycles of open, write single entry, close immediately | Writing before replay is refused with `LOG_STATE_UNKNOWN`; after replay all 50 entries survive across restarts |
 | `Concurrent Replay During Writes` | Writer thread and replay thread running in parallel for 2 seconds | No crashes, deadlocks, or corruption |
-| `Thread Interrupt Storm` | 10 threads writing while being randomly interrupted | Log survives with partial data intact |
+| `Thread Interrupt Storm` | 10 threads racing to write while being randomly interrupted | Out-of-order appends refused; log survives contiguous |
 
 **What these tests catch:**
 - Race conditions between concurrent writers
+- Silent reordering or duplication when the caller breaks Raft's single-writer rule
 - Deadlocks in internal synchronization
 - Data interleaving between writers
 - Resource cleanup issues during interrupts
@@ -250,13 +406,13 @@ Tests for resilience against file-level corruption scenarios.
 
 | Test | Description | Validation |
 |------|-------------|------------|
-| `Random Byte Corruption in WAL` | Flip random byte in second half of WAL file | Entries before corruption point recovered |
-| `Zero-Fill Corruption` | Append 4KB of zeros (SSD block failure simulation) | All 5 valid entries recovered, zeros ignored |
-| `Magic Number Corruption` | Corrupt magic number of 3rd entry to `0xDEADBEEF` | Entries before corruption recovered |
-| `CRC Bit Flip` | Single bit flip in payload of first entry | CRC mismatch detected, file truncated at corruption |
+| `Random Byte Corruption in WAL` | Flip random byte in second half of WAL file | Torn tail repaired, or corruption reported with file untouched |
+| `Zero-Fill Corruption` | Append 4KB of zeros (SSD block failure simulation) | Corruption reported and file preserved |
+| `Magic Number Corruption` | Corrupt magic number of 3rd entry to `0xDEADBEEF` | Corruption reported; entries 4-5 not discarded |
+| `CRC Bit Flip` | Single bit flip in payload of first entry | CRC mismatch reported; file untouched, instance fenced |
 | `Partial Record (Torn Write)` | Append partial 10-byte header (no index/term/payload/CRC) | All 5 valid entries recovered, partial record ignored |
 | `Metadata File Corruption` | Flip first byte of `meta.dat` file | Corruption detected on metadata load |
-| `Garbage Append After Valid Data` | Append 256 bytes of random garbage after valid entries | All 5 valid entries recovered |
+| `Garbage Append After Valid Data` | Append 256 bytes of random garbage after valid entries | Corruption reported and file preserved |
 | `Truncation Point Corruption` | Write 10 entries, truncate at 5, write 3 more | Correct 7 entries with proper terms after recovery |
 
 **What these tests catch:**
@@ -277,7 +433,7 @@ Tests for extreme values and boundary conditions.
 | `Empty Payload` | Store 3 entries with zero-length payloads | All 3 entries with `payload.length == 0` |
 | `Binary Payload (All Bytes 0x00-0xFF)` | Store payload containing all 256 possible byte values | Exact byte-for-byte match on replay |
 | `Unicode Payload Storm` | 10 entries with various Unicode (Chinese, Arabic, Cyrillic, Emoji, control chars, supplementary) | All UTF-8 encoded strings survive intact |
-| `Max Long Index` | Entry with `index = Long.MAX_VALUE` | Index preserved exactly |
+| `Max Long Index` | Entry with `index = Long.MAX_VALUE` after compaction through `Long.MAX_VALUE - 1` | Refused on a fresh log; accepted after compaction and preserved across restart via the persisted boundary |
 | `Max Long Term` | Entry and metadata with `term = Long.MAX_VALUE` | Term preserved in both entry and metadata |
 | `Very Long VotedFor String` | 10,000+ character node ID in votedFor | String preserved exactly |
 | `Null-like Payloads` | Payloads: `{0}`, `{0,0,0,0}`, `"null"`, `"NULL"`, `"\0\0\0\0"`, `{0xFF,0xFF,0xFF,0xFF}` | Each preserved exactly |
@@ -318,21 +474,21 @@ Tests for subtle protocol violations and API misuse.
 | Test | Description | Validation |
 |------|-------------|------------|
 | `Double Open Same Directory` | Open two FileRaftStorage instances on same directory | Second instance blocked by file lock |
-| `Double Close` | Call `close()` twice on same instance | No exception thrown (idempotent close) |
+| `Double Close` | Call `close()` twice on same instance | No exception thrown (idempotent close); `close()` returns only after the lock is released |
 | `Operations After Close` | Attempt append after `close()` | Operation rejected with appropriate exception |
-| `Negative Index (Protocol Violation)` | Store entry with `index = -1` | Value stored as-is (storage doesn't validate) |
-| `Negative Term (Protocol Violation)` | Store entry with `term = -1` | Value stored as-is |
-| `Non-Sequential Indices` | Batch with indices [1, 5, 3, 100] (gaps and out-of-order) | All 4 entries stored as-is |
-| `Duplicate Indices in Batch` | Batch with 3 entries all having `index = 1` | All 3 entries stored (dedup is protocol layer's job) |
+| `Negative Index (Protocol Violation)` | Append entry with `index = -1` | Refused with `INDEX_NOT_CONTIGUOUS`; nothing written |
+| `Negative Term (Protocol Violation)` | Append entry with `term = -1` | Refused with `TERM_REGRESSION`; nothing written |
+| `Non-Sequential Indices` | Batch with indices [1, 5, 3, 100] (gaps and out-of-order) | Whole batch refused with `INDEX_NOT_CONTIGUOUS`; entry 1 not written either |
+| `Duplicate Indices in Batch` | Batch with 3 entries all having `index = 1`; then re-send of an existing index | Both refused with `INDEX_NOT_CONTIGUOUS`; only the one valid append survives |
 | `Empty Batch Append` | Append empty `List.of()` followed by real entry | No-op for empty, real entry stored |
-| `Truncate to Negative` | `truncateSuffix(-1)` after writing 2 entries | All entries removed (truncate everything) |
-| `Truncate Beyond Log` | `truncateSuffix(1000)` on 2-entry log | No-op (both entries preserved) |
+| `Truncate to Negative` | `truncateSuffix(-1)` and `truncateSuffix(0)` after writing 2 entries | Both refused with `INVALID_TRUNCATION`; both entries preserved |
+| `Truncate Beyond Log` | `truncateSuffix(1000)` on 2-entry log, then `truncateSuffix(3)` | 1000 refused with `INVALID_TRUNCATION`; 3 (exactly at the tail) is a legal no-op |
 
 **What these tests catch:**
 - File locking mechanism effectiveness
 - Resource cleanup on close
 - Idempotent operations
-- Storage layer vs protocol layer responsibility separation
+- Storage layer refusing sequences that are not a valid Raft log
 - Edge cases in truncation logic
 - Handling of invalid/malicious input
 
@@ -361,7 +517,7 @@ Tests that verify the documented protection guarantees around thread safety, cra
 | `G6: crcDetectsBitFlipInHeader` | Single bit flip in header detected |
 | `G7: crcDetectsBitFlipInPayload` | Single bit flip in payload detected |
 | `G8: crcDetectsBitFlipInCrcField` | Bit flip in CRC field itself detected |
-| `G9: recoveryPreservesValidEntriesBeforeCorruption` | Entries before corruption point survive |
+| `G9: recoveryPreservesValidEntriesBeforeCorruption` | Mid-log corruption reported with the count of clean entries before it; file untouched |
 | `G10: atomicMetadataUpdate` | Partial metadata write detected |
 | `G11: walTruncationOnRecovery` | Torn tail removed on recovery |
 | `G12: multipleBitFlipsDetected` | Burst errors detected |
@@ -374,7 +530,7 @@ Tests that verify the documented protection guarantees around thread safety, cra
 | `F2: recoveryAfterMultipleRestarts` | 5 restart cycles all data intact |
 | `F3: gracefulDiskFullHandling` | IOException doesn't corrupt existing data |
 | `F4: crc32cCollisionResistance` | 10,000 random payloads produce >9,000 unique CRCs |
-| `F5: recoveryWithInterleavedCorruption` | Corruption mid-log truncates at that point |
+| `F5: recoveryWithInterleavedCorruption` | Corruption mid-log is reported, not truncated |
 
 ### Ordering Guarantees (3 tests)
 
@@ -443,7 +599,7 @@ Tests for SSD/VM crash scenarios that leave zero-filled blocks.
 | Test | Description |
 |------|-------------|
 | `zeroFilledFileIsEmptyLog` | 4KB zero-filled file treated as empty (not parsed as records) |
-| `zeroFilledTailTruncated` | Zero-filled region after valid entries is truncated |
+| `zeroFilledTailIsReported` | Zero-filled region after valid entries is reported and preserved |
 | `zeroMagicRejected` | Record with magic=0x00000000 correctly rejected |
 
 ### Directory Metadata Loss (3 tests)
@@ -465,18 +621,19 @@ Tests for integer overflow in batch size calculations.
 | `largeBatchSizeHandled` | Batch with total size near Integer.MAX_VALUE handled |
 | `manySmallEntriesBatch` | 10,000 small entries in single batch doesn't overflow |
 | `payloadLengthOverflowRejected` | Negative payload length (overflow) rejected |
-| `indexWrapAround` | Index at Long.MAX_VALUE handled correctly |
+| `indexWrapAround` | Index at Long.MAX_VALUE handled correctly after compaction through `Long.MAX_VALUE - 1` |
 
-### Middle-of-the-Log Corruption (4 tests)
+### Middle-of-the-Log Corruption (5 tests)
 
 **CRITICAL**: Tests for corruption in middle of log (not just tail).
 
 | Test | Description |
 |------|-------------|
-| `corruptionInMiddleReturnsOnlyPriorEntries` | Corruption at entry #5 of 10 returns only entries 1-4 |
-| `fileTruncatedAtCorruptionPoint` | File truncated at corruption point (no orphaned entries 6-10) |
-| `appendAfterMiddleCorruptionWorks` | New append after middle corruption continues correctly |
-| `corruptionAtFirstEntryReturnsEmpty` | Corruption at first entry returns empty log |
+| `corruptionInMiddleIsReported` | Corruption at entry #5 of 10 is reported with offset and 4 clean entries; file untouched |
+| `corruptInstanceIsFenced` | After the report, appends, sync and replay all fail and nothing is written |
+| `operatorTruncationAtReportedOffsetRecovers` | Truncating at the reported offset, once the tail is known to be unacknowledged, recovers entries 1-4 |
+| `corruptionAtFirstEntryIsReported` | Corruption at entry 1 with a valid entry 2 is reported, not truncated to empty |
+| `corruptionInLastRecordIsReported` | Corruption in the last record is reported and preserved |
 
 ### Clock Skew and File Timestamps (3 tests)
 
@@ -498,14 +655,14 @@ Tests that verify we never rely on file timestamps.
 |--------|---------------------|---------------|
 | **Concurrent writes (same process)** | Single-threaded executor | G1-G5, WalChaos Concurrency |
 | **Concurrent writes (different processes)** | Exclusive file lock | File Locking Tests, WalChaos Double Open |
-| **Torn writes / power loss** | CRC32C + recovery truncation | G6-G12, F1-F5, WalChaos Corruption |
+| **Torn writes / power loss** | Structurally incomplete EOF recovery; ambiguous corruption is fenced | G6-G12, F1-F5, WalChaos Corruption |
 | **Bit rot / bit flips** | CRC32C checksums | G6-G8, F4, WalChaos CRC Bit Flip |
 | **Process crashes** | WAL replay on restart | Recovery Tests, WalChaos Open/Close Cycles |
 | **Partial metadata updates** | Atomic rename | G10, WalChaos Metadata Corruption |
 | **Disk full** | Pre-flight space check | Disk Space Tests |
 | **Silent filesystem corruption** | Read-after-write verification | Verification Tests |
 | **Zero-fill persistence trap** | MAGIC != 0x00000000 | NastyEdgeCaseTest, WalChaos Zero-Fill |
-| **Middle-of-log corruption** | Truncate at corruption point | NastyEdgeCaseTest, WalChaos Random Corruption |
+| **WAL corruption** | Report, preserve the file, and fence the instance | NastyEdgeCaseTest, FileRaftStorageFencingTest, WalChaos Random Corruption |
 | **Integer overflow in batches** | Payload size limits | NastyEdgeCaseTest, WalChaos Boundary |
 | **Clock skew / timestamp attacks** | Atomic rename only | NastyEdgeCaseTest |
 | **Thread interrupts during I/O** | Graceful handling | WalChaos Thread Interrupt Storm |
@@ -540,51 +697,6 @@ The implementation relies on the following assumptions about the underlying syst
 3. **No "Ghost" Writes**: Data written before a crash either appears completely or not at all.
    - No partial block corruption that produces valid-looking data
    - CRC32C provides detection for bit-level corruption
-
----
-
-## Running Tests
-
-### Unit Tests (JUnit)
-
-```bash
-# Run all tests
-mvn test
-
-# Run specific test class
-mvn test -Dtest=FileRaftStorageAdversarialTest
-
-# Run specific test category
-mvn test -Dtest=ProtectionGuaranteeTest$ThreadSafetyGuarantees
-
-# Run with verbose output
-mvn test -Dtest=EnhancedProtectionTest -Dsurefire.useFile=false
-```
-
-### Chaos Tests (WalChaos)
-
-WalChaos is an interactive chaos testing suite that runs as a standalone Java application:
-
-```bash
-# Build the demo module
-mvn package -pl raftlog-demo -am -DskipTests
-
-# Run all 38 chaos tests
-java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos
-
-# Run specific category
-java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos concurrent
-java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos corruption
-java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos boundary
-java -cp raftlog-demo/target/raftlog-demo-1.0-SNAPSHOT.jar dev.mars.raftlog.demo.WalChaos stress
-```
-
-**WalChaos Output:**
-- Creates temporary directory for test files
-- Runs tests with real-time pass/fail indication
-- Reports total passed/failed at end
-- Returns exit code 0 on success, 1 on any failure
-- Automatically cleans up temporary files
 
 ---
 
