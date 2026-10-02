@@ -71,7 +71,7 @@ class EnhancedProtectionTest {
         @Test
         @DisplayName("Lock file is created on open")
         void lockFileCreatedOnOpen() throws Exception {
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             Path lockPath = tempDir.resolve("raft.lock");
@@ -82,11 +82,11 @@ class EnhancedProtectionTest {
         @DisplayName("Second instance cannot open same directory")
         void secondInstanceCannotOpenSameDirectory() throws Exception {
             // First instance
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             // Second instance should fail
-            FileRaftStorage storage2 = new FileRaftStorage(true);
+            FileRaftStorage storage2 = new FileRaftStorage(RaftStorageConfig.builder().build());
             DurableState untouchedAtLine90 = DurableState.expectUnchanged(tempDir);
             ExecutionException ex = assertThrows(ExecutionException.class, () ->
                     storage2.open(tempDir).get(5, TimeUnit.SECONDS));
@@ -103,7 +103,7 @@ class EnhancedProtectionTest {
         @DisplayName("Lock released on close allows new instance")
         void lockReleasedOnCloseAllowsNewInstance() throws Exception {
             // First instance
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             storage.appendEntries(List.of(
                     new LogEntryData(1, 1, "data".getBytes())
@@ -113,7 +113,7 @@ class EnhancedProtectionTest {
             storage = null;
 
             // Second instance should succeed
-            FileRaftStorage storage2 = new FileRaftStorage(true);
+            FileRaftStorage storage2 = new FileRaftStorage(RaftStorageConfig.builder().build());
             assertDoesNotThrow(() -> storage2.open(tempDir).get(5, TimeUnit.SECONDS));
 
             // Should be able to read the data
@@ -137,7 +137,7 @@ class EnhancedProtectionTest {
                  FileLock externalLock = lockChannel.lock()) {
 
                 // Our storage should fail to open
-                storage = new FileRaftStorage(true);
+                storage = new FileRaftStorage(RaftStorageConfig.builder().build());
                 DurableState untouchedAtLine139 = DurableState.expectUnchanged(tempDir);
                 ExecutionException ex = assertThrows(ExecutionException.class, () ->
                         storage.open(tempDir).get(5, TimeUnit.SECONDS));
@@ -157,7 +157,7 @@ class EnhancedProtectionTest {
 
             // New instance should still be able to acquire lock
             // (file exists but no active lock)
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             assertDoesNotThrow(() -> storage.open(tempDir).get(5, TimeUnit.SECONDS));
         }
     }
@@ -173,14 +173,14 @@ class EnhancedProtectionTest {
         @Test
         @DisplayName("Open succeeds when sufficient space available")
         void openSucceedsWithSufficientSpace() throws Exception {
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             assertDoesNotThrow(() -> storage.open(tempDir).get(5, TimeUnit.SECONDS));
         }
 
         @Test
         @DisplayName("Normal writes succeed without disk space error")
         void normalWritesSucceed() throws Exception {
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             // Normal sized write should succeed
@@ -198,7 +198,7 @@ class EnhancedProtectionTest {
         @Test
         @DisplayName("Large write triggers disk space check")
         void largeWriteTriggersDiskSpaceCheck() throws Exception {
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             // Large write (> 1MB) should trigger disk space check
@@ -242,7 +242,7 @@ class EnhancedProtectionTest {
         @DisplayName("Verification mode can be enabled")
         void verificationModeCanBeEnabled() throws Exception {
             // Create storage with verification enabled
-            storage = new FileRaftStorage(true, true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().verifyWrites(true).build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             // Write should succeed with verification
@@ -260,7 +260,7 @@ class EnhancedProtectionTest {
         @Test
         @DisplayName("Multiple verified writes maintain consistency")
         void multipleVerifiedWritesMaintainConsistency() throws Exception {
-            storage = new FileRaftStorage(true, true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().verifyWrites(true).build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             // Write multiple entries with verification
@@ -283,7 +283,7 @@ class EnhancedProtectionTest {
         @Test
         @DisplayName("Large verified write completes successfully")
         void largeVerifiedWriteCompletes() throws Exception {
-            storage = new FileRaftStorage(true, true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().verifyWrites(true).build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             // Large payload with verification
@@ -321,7 +321,7 @@ class EnhancedProtectionTest {
             storage.close();
 
             // With verification enabled
-            storage = new FileRaftStorage(true, true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().verifyWrites(true).build());
             storage.open(tempDir.resolve("verified")).get(5, TimeUnit.SECONDS);
 
             start = System.nanoTime();
@@ -368,7 +368,7 @@ class EnhancedProtectionTest {
         @DisplayName("All protections work together")
         void allProtectionsWorkTogether() throws Exception {
             // Enable all protections
-            storage = new FileRaftStorage(true, true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().verifyWrites(true).build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             // Verify lock is held
@@ -384,7 +384,7 @@ class EnhancedProtectionTest {
             storage.sync().get(5, TimeUnit.SECONDS);
 
             // Second instance blocked
-            FileRaftStorage blocked = new FileRaftStorage(true, true);
+            FileRaftStorage blocked = new FileRaftStorage(RaftStorageConfig.builder().verifyWrites(true).build());
             try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
                 assertThrows(ExecutionException.class, () ->
                         blocked.open(tempDir).get(5, TimeUnit.SECONDS));
@@ -394,7 +394,7 @@ class EnhancedProtectionTest {
             // Close and reopen
             storage.close();
 
-            storage = new FileRaftStorage(true, true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().verifyWrites(true).build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             // Data should be intact
@@ -405,7 +405,7 @@ class EnhancedProtectionTest {
         @Test
         @DisplayName("Graceful degradation when lock already held")
         void gracefulDegradationWhenLocked() throws Exception {
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             // Write some data
@@ -415,7 +415,7 @@ class EnhancedProtectionTest {
             storage.sync().get(5, TimeUnit.SECONDS);
 
             // Attempt second instance fails gracefully
-            FileRaftStorage reader = new FileRaftStorage(true);
+            FileRaftStorage reader = new FileRaftStorage(RaftStorageConfig.builder().build());
             DurableState untouchedAtLine413 = DurableState.expectUnchanged(tempDir);
             ExecutionException ex = assertThrows(ExecutionException.class, () ->
                     reader.open(tempDir).get(5, TimeUnit.SECONDS));

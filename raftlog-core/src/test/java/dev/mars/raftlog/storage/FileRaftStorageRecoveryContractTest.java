@@ -36,7 +36,7 @@ class FileRaftStorageRecoveryContractTest {
     }
 
     private static FileRaftStorage open(Path dir) throws Exception {
-        FileRaftStorage storage = new FileRaftStorage(true);
+        FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
         await(storage.open(dir));
         return storage;
     }
@@ -87,7 +87,7 @@ class FileRaftStorageRecoveryContractTest {
     }
 
     @Test void concurrentOpenOfSameDirectoryIsIdempotent() throws Exception {
-        FileRaftStorage storage = new FileRaftStorage(true);
+        FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
         CompletableFuture<Void> firstOpen = storage.open(tempDir);
         CompletableFuture<Void> secondOpen = storage.open(tempDir);
 
@@ -131,7 +131,7 @@ class FileRaftStorageRecoveryContractTest {
             // The holder is idle from here on, so the failed open and everything queued
             // behind it must leave the directory byte-for-byte as it was.
             try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
-                FileRaftStorage storage = new FileRaftStorage(true);
+                FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
                 CompletableFuture<Void> opening = storage.open(tempDir);
                 CompletableFuture<Void> append = storage.appendEntries(List.of(entry(3, 1)));
                 CompletableFuture<Void> truncate = storage.truncateSuffix(1);
@@ -159,7 +159,7 @@ class FileRaftStorageRecoveryContractTest {
     }
 
     @Test void operationsBeforeOpenFailWithStorageException() throws Exception {
-        FileRaftStorage storage = new FileRaftStorage(true);
+        FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
         DurableState untouchedAtLine145 = DurableState.expectUnchanged(tempDir);
         Throwable cause = assertThrows(java.util.concurrent.ExecutionException.class,
                 () -> await(storage.appendEntries(List.of(entry(1, 1))))).getCause();
@@ -211,7 +211,7 @@ class FileRaftStorageRecoveryContractTest {
     }
 
     @Test void executorRefusalIsReportedThroughFailedFuture() throws Exception {
-        FileRaftStorage storage = new FileRaftStorage(true);
+        FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
         Field executorField = FileRaftStorage.class.getDeclaredField("walExecutor");
         executorField.setAccessible(true);
         ((ExecutorService) executorField.get(storage)).shutdown();

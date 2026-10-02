@@ -570,7 +570,7 @@ Tests for the enhanced protection mechanisms: file locking, disk space checking,
 
 | Test | Description |
 |------|-------------|
-| `verificationModeCanBeEnabled` | `new FileRaftStorage(true, true)` enables verification |
+| `verificationModeCanBeEnabled` | `RaftStorageConfig.verifyWrites` enables verification |
 | `multipleVerifiedWritesMaintainConsistency` | 10 verified writes all succeed |
 | `largeVerifiedWriteCompletes` | 100 KB verified write works |
 | `verificationDisabledByDefault` | Default constructor doesn't verify (faster) |

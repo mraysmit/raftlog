@@ -56,7 +56,7 @@ class FileRaftStorageTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        storage = new FileRaftStorage(true);
+        storage = new FileRaftStorage(RaftStorageConfig.builder().build());
         storage.open(tempDir).get(5, TimeUnit.SECONDS);
     }
 
@@ -136,7 +136,7 @@ class FileRaftStorageTest {
         storage.close();
 
         // Reopen storage
-        storage = new FileRaftStorage(true);
+        storage = new FileRaftStorage(RaftStorageConfig.builder().build());
         storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
         PersistentMeta meta = storage.loadMetadata().get(5, TimeUnit.SECONDS);
@@ -330,7 +330,7 @@ class FileRaftStorageTest {
         storage.close();
 
         // Reopen
-        storage = new FileRaftStorage(true);
+        storage = new FileRaftStorage(RaftStorageConfig.builder().build());
         storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
         List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
@@ -362,7 +362,7 @@ class FileRaftStorageTest {
         }
 
         // Reopen and replay
-        storage = new FileRaftStorage(true);
+        storage = new FileRaftStorage(RaftStorageConfig.builder().build());
         storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
         List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
@@ -404,7 +404,7 @@ class FileRaftStorageTest {
         }
 
         // Reopen and replay
-        storage = new FileRaftStorage(true);
+        storage = new FileRaftStorage(RaftStorageConfig.builder().build());
         storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
         byte[] before = Files.readAllBytes(logPath);
@@ -456,10 +456,11 @@ class FileRaftStorageTest {
     }
 
     @Test
-    void deprecatedConstructorsStillRefuseToDisableSync() {
-        assertThrows(IllegalArgumentException.class, () -> new FileRaftStorage(false));
-        assertThrows(IllegalArgumentException.class, () -> new FileRaftStorage(false, true));
-        try (FileRaftStorage verifying = new FileRaftStorage(true, true)) {
+    void configurationRefusesToDisableSyncAndCanEnableVerification() {
+        assertThrows(IllegalArgumentException.class,
+                () -> RaftStorageConfig.builder().syncEnabled(false));
+        try (FileRaftStorage verifying = new FileRaftStorage(
+                RaftStorageConfig.builder().verifyWrites(true).build())) {
             assertTrue(verifying.config().syncEnabled());
             assertTrue(verifying.config().verifyWrites());
         }
@@ -468,7 +469,7 @@ class FileRaftStorageTest {
     @Test
     void openFailsWhenTheDataDirectoryPathIsARegularFile() throws Exception {
         Path regularFile = Files.createFile(tempDir.resolve("not-a-directory"));
-        try (FileRaftStorage other = new FileRaftStorage(true)) {
+        try (FileRaftStorage other = new FileRaftStorage(RaftStorageConfig.builder().build())) {
             ExecutionException failure = assertThrows(ExecutionException.class,
                     () -> other.open(regularFile).get(5, TimeUnit.SECONDS));
             assertInstanceOf(FileRaftStorage.StorageException.class, failure.getCause());

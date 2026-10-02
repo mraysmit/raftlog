@@ -80,7 +80,7 @@ class FileRaftStorageFencingTest {
     }
 
     private void seed() throws Exception {
-        FileRaftStorage storage = new FileRaftStorage(true);
+        FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
         await(storage.open(dir));
         try {
             await(storage.appendEntries(SEED));
@@ -148,7 +148,7 @@ class FileRaftStorageFencingTest {
         } finally { close(storage, dir); }
 
         // A fresh instance recovers whatever actually reached the file.
-        FileRaftStorage fresh = new FileRaftStorage(true);
+        FileRaftStorage fresh = new FileRaftStorage(RaftStorageConfig.builder().build());
         await(fresh.open(dir));
         try {
             List<LogEntryData> replayed = await(fresh.replayLog());
@@ -162,7 +162,7 @@ class FileRaftStorageFencingTest {
 
     @Test void failedMetadataStagingForceFencesTheInstanceAndKeepsOldMetadata() throws Exception {
         seed();
-        FileRaftStorage seeded = new FileRaftStorage(true);
+        FileRaftStorage seeded = new FileRaftStorage(RaftStorageConfig.builder().build());
         await(seeded.open(dir));
         try { await(seeded.updateMetadata(5, Optional.of("node-a"))); } finally { close(seeded, dir); }
 
@@ -177,7 +177,7 @@ class FileRaftStorageFencingTest {
             }
         } finally { close(storage, dir); }
 
-        FileRaftStorage fresh = new FileRaftStorage(true);
+        FileRaftStorage fresh = new FileRaftStorage(RaftStorageConfig.builder().build());
         await(fresh.open(dir));
         try {
             RaftStorage.PersistentMeta meta = await(fresh.loadMetadata());
@@ -280,7 +280,7 @@ class FileRaftStorageFencingTest {
         flip(offset);
         byte[] before = Files.readAllBytes(dir.resolve("raft.log"));
 
-        FileRaftStorage storage = new FileRaftStorage(true);
+        FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
         await(storage.open(dir));
         try {
             Throwable cause = failureOf(storage.replayLog());
@@ -302,7 +302,7 @@ class FileRaftStorageFencingTest {
         flip(third + 27 + 1);
         byte[] before = Files.readAllBytes(dir.resolve("raft.log"));
 
-        FileRaftStorage storage = new FileRaftStorage(true);
+        FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
         await(storage.open(dir));
         try {
             var corrupt = assertInstanceOf(FileRaftStorage.CorruptLogException.class,
@@ -328,7 +328,7 @@ class FileRaftStorageFencingTest {
         }
         byte[] before = Files.readAllBytes(log);
 
-        FileRaftStorage storage = new FileRaftStorage(true);
+        FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
         await(storage.open(dir));
         try {
             var corrupt = assertInstanceOf(FileRaftStorage.CorruptLogException.class, failureOf(storage.replayLog()));
@@ -345,7 +345,7 @@ class FileRaftStorageFencingTest {
         for (int i = 0; i < 4096; i++) garbage[garbage.length - 1 - i] = 0;
         Files.write(dir.resolve("raft.log"), garbage, StandardOpenOption.APPEND);
 
-        FileRaftStorage storage = new FileRaftStorage(true);
+        FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
         await(storage.open(dir));
         try {
             var corrupt = assertInstanceOf(FileRaftStorage.CorruptLogException.class,
@@ -366,7 +366,7 @@ class FileRaftStorageFencingTest {
         // Written raw: the storage itself refuses to append behind a tail it has not replayed.
         Files.write(dir.resolve("raft.log"), encode(entry(4, 1)), StandardOpenOption.APPEND);
 
-        FileRaftStorage storage = new FileRaftStorage(true);
+        FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
         await(storage.open(dir));
         try {
             var corrupt = assertInstanceOf(FileRaftStorage.CorruptLogException.class, failureOf(storage.replayLog()));
@@ -380,7 +380,7 @@ class FileRaftStorageFencingTest {
         flip(recordStart(1) + 27 + 1);
         byte[] before = Files.readAllBytes(dir.resolve("raft.log"));
 
-        FileRaftStorage storage = new FileRaftStorage(true);
+        FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
         await(storage.open(dir));
         try {
             try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {

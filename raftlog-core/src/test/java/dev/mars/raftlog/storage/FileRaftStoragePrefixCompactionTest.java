@@ -27,7 +27,7 @@ class FileRaftStoragePrefixCompactionTest {
     }
 
     static FileRaftStorage open(Path dir) {
-        FileRaftStorage storage = new FileRaftStorage(true);
+        FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
         await(storage.open(dir));
         return storage;
     }

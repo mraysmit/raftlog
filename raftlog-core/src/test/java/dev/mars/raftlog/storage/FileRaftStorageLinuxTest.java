@@ -60,7 +60,7 @@ class FileRaftStorageLinuxTest {
             assumeFalse(readOnlyDir.toFile().canWrite(),
                     "Skipped: read-only enforcement not available (running as root?)");
 
-            FileRaftStorage storage = new FileRaftStorage(true);
+            FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             Path target = readOnlyDir.resolve("subdir");
 
             ExecutionException ex = assertThrows(ExecutionException.class,
@@ -77,7 +77,7 @@ class FileRaftStorageLinuxTest {
     @Test
     @DisplayName("raft.lock is not world-writable or group-writable after open")
     void testLockFileIsNotWorldWritable() throws Exception {
-        FileRaftStorage storage = new FileRaftStorage(true);
+        FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
         storage.open(tempDir).get(5, TimeUnit.SECONDS);
         try {
             Path lockFile = tempDir.resolve("raft.lock");
@@ -101,7 +101,7 @@ class FileRaftStorageLinuxTest {
         Path symlink = symlinkParent.resolve("link");
         Files.createSymbolicLink(symlink, realDir);
         try {
-            FileRaftStorage storage = new FileRaftStorage(true);
+            FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(symlink).get(5, TimeUnit.SECONDS);
 
             List<LogEntryData> entries = List.of(new LogEntryData(1, 1, "data".getBytes()));

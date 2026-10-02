@@ -1733,7 +1733,7 @@ class FileRaftStorageRecoveryTest {
     @Test
     void testRecoverFromTornWrite() throws Exception {
         // 1. Initialize WAL and write 2 perfectly valid entries
-        FileRaftStorage wal = new FileRaftStorage(true);
+        FileRaftStorage wal = new FileRaftStorage(RaftStorageConfig.builder().build());
         wal.open(tempDir).get();
 
         var entry1 = new RaftStorage.LogEntryData(1, 1, "First Entry".getBytes());
@@ -1756,7 +1756,7 @@ class FileRaftStorageRecoveryTest {
         }
 
         // 3. Re-open the WAL and attempt replay
-        FileRaftStorage recoveryWal = new FileRaftStorage(true);
+        FileRaftStorage recoveryWal = new FileRaftStorage(RaftStorageConfig.builder().build());
         recoveryWal.open(tempDir).get();
 
         List<RaftStorage.LogEntryData> entries = recoveryWal.replayLog().get();

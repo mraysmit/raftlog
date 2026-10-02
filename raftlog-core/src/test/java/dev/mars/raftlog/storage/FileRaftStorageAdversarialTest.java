@@ -70,7 +70,7 @@ class FileRaftStorageAdversarialTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        storage = new FileRaftStorage(true);
+        storage = new FileRaftStorage(RaftStorageConfig.builder().build());
         storage.open(tempDir).get(5, TimeUnit.SECONDS);
     }
 
@@ -312,7 +312,7 @@ class FileRaftStorageAdversarialTest {
                 fc.truncate(0);
             }
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
             assertEquals(0, replayed.size());
@@ -334,7 +334,7 @@ class FileRaftStorageAdversarialTest {
                 fc.write(buf);
             }
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
             assertEquals(0, replayed.size());
@@ -359,7 +359,7 @@ class FileRaftStorageAdversarialTest {
                 fc.write(buf);
             }
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             assertCorruptReplay(storage);
         }
@@ -385,7 +385,7 @@ class FileRaftStorageAdversarialTest {
             data[data.length - 1] ^= 0xFF; // Flip bits in CRC
             Files.write(metaPath, data);
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             assertThrows(ExecutionException.class, () ->
@@ -404,7 +404,7 @@ class FileRaftStorageAdversarialTest {
                 fc.truncate(5); // Cut off most of the file
             }
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
@@ -429,7 +429,7 @@ class FileRaftStorageAdversarialTest {
                 fc.write(buf);
             }
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             assertThrows(ExecutionException.class, () ->
@@ -451,7 +451,7 @@ class FileRaftStorageAdversarialTest {
                 fc.write(buf);
             }
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             assertThrows(ExecutionException.class, () ->
@@ -468,7 +468,7 @@ class FileRaftStorageAdversarialTest {
             Path metaPath = tempDir.resolve("meta.dat");
             Files.write(metaPath, new byte[0]);
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             try (var ignoredUntouched = DurableState.expectUnchanged(tempDir)) {
@@ -485,7 +485,7 @@ class FileRaftStorageAdversarialTest {
             Path metaPath = tempDir.resolve("meta.dat");
             Files.write(metaPath, new byte[20]); // All zeros
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             // Should throw due to CRC mismatch (unless zeros happen to be valid)
@@ -1129,7 +1129,7 @@ class FileRaftStorageAdversarialTest {
                 fc.write(header);
             }
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
 
@@ -1156,7 +1156,7 @@ class FileRaftStorageAdversarialTest {
                 fc.write(header);
             }
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
 
@@ -1183,7 +1183,7 @@ class FileRaftStorageAdversarialTest {
                 fc.write(buf);
             }
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
 
@@ -1210,7 +1210,7 @@ class FileRaftStorageAdversarialTest {
                 }
             }
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             assertCorruptReplay(storage);
         }
@@ -1225,7 +1225,7 @@ class FileRaftStorageAdversarialTest {
             Path tmpPath = tempDir.resolve("meta.dat.tmp");
             Files.write(tmpPath, "garbage".getBytes());
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             // Should load the valid metadata, ignore temp file
@@ -1261,7 +1261,7 @@ class FileRaftStorageAdversarialTest {
 
     private void reopenStorage() throws Exception {
         storage.close();
-        storage = new FileRaftStorage(true);
+        storage = new FileRaftStorage(RaftStorageConfig.builder().build());
         storage.open(tempDir).get(5, TimeUnit.SECONDS);
     }
 

@@ -319,36 +319,6 @@ public final class FileRaftStorage implements RaftStorage {
     }
 
     /**
-     * Creates a new FileRaftStorage with specified sync setting.
-     * <p>
-     * <b>Deprecated:</b> Use {@link #FileRaftStorage(RaftStorageConfig)} instead.
-     *
-     * @param syncEnabled must be true; false is rejected
-     * @throws IllegalArgumentException if {@code syncEnabled} is false
-     */
-    @Deprecated(since = "1.4.0", forRemoval = true)
-    public FileRaftStorage(boolean syncEnabled) {
-        this(RaftStorageConfig.builder().syncEnabled(syncEnabled).build());
-    }
-
-    /**
-     * Creates a new FileRaftStorage with specified sync and verify settings.
-     * <p>
-     * <b>Deprecated:</b> Use {@link #FileRaftStorage(RaftStorageConfig)} instead.
-     *
-     * @param syncEnabled   must be true; false is rejected
-     * @param verifyWrites  if true, perform read-after-write verification
-     * @throws IllegalArgumentException if {@code syncEnabled} is false
-     */
-    @Deprecated(since = "1.4.0", forRemoval = true)
-    public FileRaftStorage(boolean syncEnabled, boolean verifyWrites) {
-        this(RaftStorageConfig.builder()
-                .syncEnabled(syncEnabled)
-                .verifyWrites(verifyWrites)
-                .build());
-    }
-
-    /**
      * Returns the configuration used by this storage instance.
      */
     public RaftStorageConfig config() {

@@ -63,7 +63,7 @@ class NastyEdgeCaseTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        storage = new FileRaftStorage(true);
+        storage = new FileRaftStorage(RaftStorageConfig.builder().build());
         storage.open(tempDir).get(5, TimeUnit.SECONDS);
     }
 
@@ -92,7 +92,7 @@ class NastyEdgeCaseTest {
             byte[] zeros = new byte[4096]; // 4KB of zeros
             Files.write(logPath, zeros);
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             ExecutionException failure = assertThrows(ExecutionException.class,
@@ -121,7 +121,7 @@ class NastyEdgeCaseTest {
                 fc.write(ByteBuffer.allocate(4096)); // 4KB zeros
             }
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             ExecutionException failure = assertThrows(ExecutionException.class,
                     () -> storage.replayLog().get(5, TimeUnit.SECONDS));
@@ -154,7 +154,7 @@ class NastyEdgeCaseTest {
                 fc.write(buf);
             }
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             ExecutionException failure = assertThrows(ExecutionException.class,
                     () -> storage.replayLog().get(5, TimeUnit.SECONDS));
@@ -203,7 +203,7 @@ class NastyEdgeCaseTest {
             // (temp has new data, meta has old data)
             Files.write(tmpPath, "garbage-incomplete".getBytes());
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             // Should load the valid (old) metadata, ignore incomplete temp
@@ -308,7 +308,7 @@ class NastyEdgeCaseTest {
                 fc.write(buf);
             }
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             ExecutionException failure = assertThrows(ExecutionException.class,
                     () -> storage.replayLog().get(5, TimeUnit.SECONDS));
@@ -372,7 +372,7 @@ class NastyEdgeCaseTest {
             corruptByteAt(logPath, entry5Start + 27 + 2, (byte) 0xFF); // into the payload
             byte[] before = Files.readAllBytes(logPath);
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             FileRaftStorage.CorruptLogException corrupt = replayFails();
 
@@ -395,7 +395,7 @@ class NastyEdgeCaseTest {
             corruptByteAt(logPath, entry5Start + 20, (byte) 0xFF);
             byte[] before = Files.readAllBytes(logPath);
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             replayFails();
 
@@ -420,7 +420,7 @@ class NastyEdgeCaseTest {
             long entry5Start = findRecordStart(logPath, 4);
             corruptByteAt(logPath, entry5Start + 15, (byte) 0xFF);
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             FileRaftStorage.CorruptLogException corrupt = replayFails();
             storage.close();
@@ -430,7 +430,7 @@ class NastyEdgeCaseTest {
                 fc.truncate(corrupt.corruptOffset());
             }
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
             assertEquals(4, replayed.size());
@@ -453,7 +453,7 @@ class NastyEdgeCaseTest {
             corruptByteAt(logPath, 10, (byte) 0xFF);
             long sizeBefore = Files.size(logPath);
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             FileRaftStorage.CorruptLogException corrupt = replayFails();
 
@@ -472,7 +472,7 @@ class NastyEdgeCaseTest {
             long entry3Start = findRecordStart(logPath, 2);
             corruptByteAt(logPath, entry3Start + 27 + 1, (byte) 0xFF);
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             FileRaftStorage.CorruptLogException corrupt = replayFails();
             assertEquals(entry3Start, corrupt.corruptOffset());
@@ -507,7 +507,7 @@ class NastyEdgeCaseTest {
             // The implementation should:
             // 1. Load meta.dat (the atomically renamed file)
             // 2. Ignore meta.dat.tmp (incomplete transaction)
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             PersistentMeta meta = storage.loadMetadata().get(5, TimeUnit.SECONDS);
@@ -560,7 +560,7 @@ class NastyEdgeCaseTest {
                     java.nio.file.attribute.FileTime.fromMillis(0));
 
             // Recovery should work based on file content, not timestamps
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
 

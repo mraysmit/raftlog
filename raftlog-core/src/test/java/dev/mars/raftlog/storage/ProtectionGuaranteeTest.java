@@ -114,7 +114,7 @@ class ProtectionGuaranteeTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        storage = new FileRaftStorage(true);
+        storage = new FileRaftStorage(RaftStorageConfig.builder().build());
         storage.open(tempDir).get(5, TimeUnit.SECONDS);
     }
 
@@ -492,7 +492,7 @@ class ProtectionGuaranteeTest {
             Path logPath = tempDir.resolve("raft.log");
             flipBitAt(logPath, 15, 0);
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             assertCorruptReplay(storage);
         }
@@ -510,7 +510,7 @@ class ProtectionGuaranteeTest {
             Path logPath = tempDir.resolve("raft.log");
             flipBitAt(logPath, 30, 3); // Somewhere in the payload
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             assertCorruptReplay(storage);
         }
@@ -529,7 +529,7 @@ class ProtectionGuaranteeTest {
             long fileSize = Files.size(logPath);
             flipBitAt(logPath, fileSize - 2, 5);
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             assertCorruptReplay(storage);
         }
@@ -552,7 +552,7 @@ class ProtectionGuaranteeTest {
             flipBitAt(logPath, entry7Start + 20, 0);
 
             byte[] before = Files.readAllBytes(logPath);
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             // Entries 8-10 after the damage may have been acknowledged: replay must not
             // discard them unilaterally. It reports the damage and leaves the file intact.
@@ -579,7 +579,7 @@ class ProtectionGuaranteeTest {
                 fc.truncate(5); // Truncate to simulate partial write
             }
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             // Should fail to load (corrupt) or return empty
@@ -615,7 +615,7 @@ class ProtectionGuaranteeTest {
 
             // Arbitrary garbage may be acknowledged data damaged later, so recovery
             // reports it rather than guessing that it is an unacknowledged write.
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             assertCorruptReplay(storage);
             assertEquals(corruptedSize, Files.size(logPath), "Ambiguous tail must be preserved");
@@ -637,7 +637,7 @@ class ProtectionGuaranteeTest {
                 fc.write(ByteBuffer.wrap(new byte[]{(byte)0xFF, (byte)0xFF, (byte)0xFF}));
             }
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             assertCorruptReplay(storage);
         }
@@ -682,7 +682,7 @@ class ProtectionGuaranteeTest {
                     fc.write(partial);
                 }
 
-                storage = new FileRaftStorage(true);
+                storage = new FileRaftStorage(RaftStorageConfig.builder().build());
                 storage.open(tempDir).get(5, TimeUnit.SECONDS);
                 List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
 
@@ -714,7 +714,7 @@ class ProtectionGuaranteeTest {
 
                 // Simulate restart
                 storage.close();
-                storage = new FileRaftStorage(true);
+                storage = new FileRaftStorage(RaftStorageConfig.builder().build());
                 storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
                 // Replay and verify
@@ -785,7 +785,7 @@ class ProtectionGuaranteeTest {
             long entry2Start = findRecordStart(logPath, 1);
             flipBitAt(logPath, entry2Start + 10, 0);
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             // Entry 3 after the damage is valid, so this is corruption, not a torn tail
@@ -846,7 +846,7 @@ class ProtectionGuaranteeTest {
             // After sync returns, data should survive "crash"
             storage.close();
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
             List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
 
@@ -869,7 +869,7 @@ class ProtectionGuaranteeTest {
             // Verify both persist correctly
             storage.close();
 
-            storage = new FileRaftStorage(true);
+            storage = new FileRaftStorage(RaftStorageConfig.builder().build());
             storage.open(tempDir).get(5, TimeUnit.SECONDS);
 
             PersistentMeta meta = storage.loadMetadata().get(5, TimeUnit.SECONDS);
