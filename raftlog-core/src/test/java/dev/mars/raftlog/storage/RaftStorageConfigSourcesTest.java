@@ -19,6 +19,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.Isolated;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -42,6 +43,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * cosmetic problem: the payload limit is converted to bytes in 32-bit arithmetic, and a value that
  * overflows it, or is zero or negative, would make every payload too large.
  */
+@Isolated("Replaces JVM-wide system properties and configuration seams")
 class RaftStorageConfigSourcesTest {
     private static final List<String> PROPERTIES = List.of("raftlog.dataDir", "raftlog.syncEnabled",
             "raftlog.verifyWrites", "raftlog.minFreeSpaceMb", "raftlog.maxPayloadSizeMb");

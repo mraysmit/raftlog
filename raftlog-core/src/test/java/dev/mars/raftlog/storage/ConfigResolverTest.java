@@ -17,6 +17,7 @@ package dev.mars.raftlog.storage;
 
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.Isolated;
 
 import java.nio.file.Path;
 import static org.junit.jupiter.api.Assertions.*;
@@ -26,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * <p>
  * Tests system properties, default values, and configuration building.
  */
+@Isolated("Replaces JVM-wide system properties and configuration seams")
 class ConfigResolverTest {
 
     @TempDir
@@ -519,6 +521,47 @@ class ConfigResolverTest {
             } finally {
                 storage.close();
             }
+        }
+    }
+
+    // ========================================================================
+    // Shorthand and Rendering
+    // ========================================================================
+
+    @Nested
+    @DisplayName("Shorthand and Rendering")
+    class ShorthandAndRenderingTests {
+
+        @Test
+        @DisplayName("load() is shorthand for builder().build()")
+        void testLoadIsShorthandForBuild() {
+            RaftStorageConfig loaded = RaftStorageConfig.load();
+            RaftStorageConfig built = RaftStorageConfig.builder().build();
+
+            assertEquals(built.dataDir(), loaded.dataDir());
+            assertEquals(built.syncEnabled(), loaded.syncEnabled());
+            assertEquals(built.verifyWrites(), loaded.verifyWrites());
+            assertEquals(built.minFreeSpaceMb(), loaded.minFreeSpaceMb());
+            assertEquals(built.maxPayloadSizeMb(), loaded.maxPayloadSizeMb());
+        }
+
+        @Test
+        @DisplayName("toString() names every setting")
+        void testToStringNamesEverySetting() {
+            String text = RaftStorageConfig.builder()
+                    .dataDir(tempDir)
+                    .verifyWrites(true)
+                    .minFreeSpaceMb(128)
+                    .maxPayloadSizeMb(32)
+                    .build()
+                    .toString();
+
+            assertTrue(text.startsWith("RaftStorageConfig{"), text);
+            assertTrue(text.contains("dataDir=" + tempDir), text);
+            assertTrue(text.contains("syncEnabled=true"), text);
+            assertTrue(text.contains("verifyWrites=true"), text);
+            assertTrue(text.contains("minFreeSpaceMb=128"), text);
+            assertTrue(text.contains("maxPayloadSizeMb=32"), text);
         }
     }
 }

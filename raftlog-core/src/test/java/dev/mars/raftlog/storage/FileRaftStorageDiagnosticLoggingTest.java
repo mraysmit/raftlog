@@ -24,6 +24,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.Isolated;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
@@ -63,6 +64,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * reported when it is established (open and replay) and when it is lost (a write that failed part
  * way), so a refusal can be traced back to its cause from the log alone.
  */
+@Isolated("Changes the level of a shared logger and captures its output")
 class FileRaftStorageDiagnosticLoggingTest {
 
     @TempDir
@@ -214,6 +216,33 @@ class FileRaftStorageDiagnosticLoggingTest {
                     WriteRejectionReason.PAYLOAD_TOO_LARGE, "append");
             assertKeyValue(refusal, "entryIndex", 1L);
         } finally { await(storage.closeAsync()); }
+    }
+
+    @Test void repeatedOversizedPayloadsAreSampledLikeEveryOtherRefusal() throws Exception {
+        // This refusal is decided on the caller's thread, by its own copy of the sampling rule.
+        FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().maxPayloadSizeMb(1).build());
+        await(storage.open(dir));
+        byte[] oversized = new byte[1024 * 1024 + 1];
+        for (int i = 0; i < 5; i++) {
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> await(storage.appendEntries(List.of(new LogEntryData(1, 1, oversized)))));
+            var rejected = assertInstanceOf(FileRaftStorage.WriteRejectedException.class, failure.getCause());
+            assertEquals(WriteRejectionReason.PAYLOAD_TOO_LARGE, rejected.reason());
+        }
+
+        List<ILoggingEvent> sampled = events("storage.write.rejected");
+        List<Long> expectedCounts = List.of(1L, 2L, 4L);
+        assertEquals(expectedCounts.size(), sampled.size());
+        for (int i = 0; i < expectedCounts.size(); i++) {
+            assertKeyValue(sampled.get(i), "rejectionCount", expectedCounts.get(i));
+        }
+
+        await(storage.closeAsync());
+        ILoggingEvent summary = only("storage.write.rejection_summary");
+        assertKeyValue(summary, "reason", WriteRejectionReason.PAYLOAD_TOO_LARGE.name());
+        assertKeyValue(summary, "rejectionCount", 5L);
+        assertKeyValue(summary, "loggedCount", 3L);
+        assertKeyValue(summary, "suppressedCount", 2L);
     }
 
     @Test void fullDiskIsLoggedLikeEveryOtherRefusal() throws Exception {

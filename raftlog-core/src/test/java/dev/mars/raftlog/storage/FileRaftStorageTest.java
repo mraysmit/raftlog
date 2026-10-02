@@ -431,4 +431,64 @@ class FileRaftStorageTest {
         List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
         assertEquals(0, replayed.size());
     }
+
+    // ========================================================================
+    // Construction and Opening
+    // ========================================================================
+
+    @Test
+    void configAccessorReturnsTheConfigurationAndNoArgOpenUsesItsDataDirectory() throws Exception {
+        Path configured = tempDir.resolve("configured");
+        RaftStorageConfig config = RaftStorageConfig.builder().dataDir(configured).build();
+        try (FileRaftStorage other = new FileRaftStorage(config)) {
+            assertSame(config, other.config());
+            other.open().get(5, TimeUnit.SECONDS);
+            assertTrue(Files.exists(configured.resolve("raft.lock")));
+        }
+    }
+
+    @Test
+    void defaultConstructorLoadsTheConfigurationFromItsSources() {
+        try (FileRaftStorage other = new FileRaftStorage()) {
+            assertEquals(RaftStorageConfig.load().dataDir(), other.config().dataDir());
+            assertTrue(other.config().syncEnabled());
+        }
+    }
+
+    @Test
+    void deprecatedConstructorsStillRefuseToDisableSync() {
+        assertThrows(IllegalArgumentException.class, () -> new FileRaftStorage(false));
+        assertThrows(IllegalArgumentException.class, () -> new FileRaftStorage(false, true));
+        try (FileRaftStorage verifying = new FileRaftStorage(true, true)) {
+            assertTrue(verifying.config().syncEnabled());
+            assertTrue(verifying.config().verifyWrites());
+        }
+    }
+
+    @Test
+    void openFailsWhenTheDataDirectoryPathIsARegularFile() throws Exception {
+        Path regularFile = Files.createFile(tempDir.resolve("not-a-directory"));
+        try (FileRaftStorage other = new FileRaftStorage(true)) {
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> other.open(regularFile).get(5, TimeUnit.SECONDS));
+            assertInstanceOf(FileRaftStorage.StorageException.class, failure.getCause());
+        }
+        assertTrue(Files.isRegularFile(regularFile), "a failed open must not replace the file");
+    }
+
+    @Test
+    void replayOfAWalFileRemovedAfterOpenIsAnEmptyLog() throws Exception {
+        Files.delete(tempDir.resolve("raft.log"));
+
+        assertTrue(storage.replayLog().get(5, TimeUnit.SECONDS).isEmpty());
+    }
+
+    @Test
+    void voteCastInTermZeroIsPersisted() throws Exception {
+        storage.updateMetadata(0L, Optional.of("node-a")).get(5, TimeUnit.SECONDS);
+
+        PersistentMeta meta = storage.loadMetadata().get(5, TimeUnit.SECONDS);
+        assertEquals(0L, meta.currentTerm());
+        assertEquals(Optional.of("node-a"), meta.votedFor());
+    }
 }

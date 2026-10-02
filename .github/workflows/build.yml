@@ -1,0 +1,48 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each platform executes the half of CompactionIo.forceDirectory the other cannot,
+        # and only Linux can run the POSIX permission and symbolic link tests.
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      - name: Build, test and enforce the coverage gate
+        run: mvn -B -ntp -Pcoverage clean verify
+
+      # The runner is an unprivileged user, so the permission tests must not skip themselves.
+      - name: Require that no test was skipped on Linux
+        if: runner.os == 'Linux'
+        run: |
+          if grep -l '<skipped' raftlog-core/target/surefire-reports/TEST-*.xml raftlog-demo/target/surefire-reports/TEST-*.xml; then
+            echo "The reports above contain skipped tests. None may be skipped on Linux." >&2
+            exit 1
+          fi
+
+      - name: Keep the test reports when the build fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports-${{ matrix.os }}
+          path: '**/target/surefire-reports/'
+          if-no-files-found: ignore

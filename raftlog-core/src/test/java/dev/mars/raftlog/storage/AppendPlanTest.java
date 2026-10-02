@@ -296,4 +296,26 @@ class AppendPlanTest {
 
         assertEquals(1, plan.entriesToAppend().size());
     }
+
+    // ========================================================================
+    // What a Plan Requires
+    // ========================================================================
+
+    @Test
+    void testRequiresPersistence_ForEachShapeOfPlan() {
+        AppendPlan nothing = AppendPlan.empty();
+        assertFalse(nothing.requiresTruncation());
+        assertFalse(nothing.hasEntriesToAppend());
+        assertFalse(nothing.requiresPersistence());
+
+        AppendPlan truncationOnly = new AppendPlan(5L, List.of());
+        assertTrue(truncationOnly.requiresTruncation());
+        assertFalse(truncationOnly.hasEntriesToAppend());
+        assertTrue(truncationOnly.requiresPersistence());
+
+        AppendPlan appendOnly = new AppendPlan(null, List.of(new LogEntryData(1, 1, "a".getBytes())));
+        assertFalse(appendOnly.requiresTruncation());
+        assertTrue(appendOnly.hasEntriesToAppend());
+        assertTrue(appendOnly.requiresPersistence());
+    }
 }

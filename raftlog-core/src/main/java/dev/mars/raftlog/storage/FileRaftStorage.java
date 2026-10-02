@@ -238,6 +238,13 @@ public final class FileRaftStorage implements RaftStorage {
      */
     private volatile StorageException fatalFailure;
 
+    /** A path and its rendering for the log. */
+    private record RenderedPath(Path path, String text) {
+    }
+
+    /** The path rendered last by {@link #operationPathForLog(Path)}; starts as "not open". */
+    private volatile RenderedPath renderedPath = new RenderedPath(null, pathForLog(null));
+
     // ========================================================================
     // Constructor
     // ========================================================================
@@ -1092,7 +1099,7 @@ public final class FileRaftStorage implements RaftStorage {
     }
 
     private static boolean isPowerOfTwo(long value) {
-        return value > 0 && (value & (value - 1)) == 0;
+        return Long.bitCount(value) == 1;
     }
 
     /** Reports exact totals after sampling repeated refusals. */
@@ -1305,7 +1312,7 @@ public final class FileRaftStorage implements RaftStorage {
         LOG.atDebug().addKeyValue("event", "storage.operation.queued")
                 .addKeyValue("storageId", storageId).addKeyValue("operationId", operationId)
                 .addKeyValue("operation", operation)
-                .log("Queued WAL operation {} at {}", operation, pathForLog(path));
+                .log("Queued WAL operation {} at {}", operation, operationPathForLog(path));
         try {
             return CompletableFuture.runAsync(
                     () -> withLogContext(operation, operationId, path, queuedAtNanos, () -> {
@@ -1330,7 +1337,7 @@ public final class FileRaftStorage implements RaftStorage {
         LOG.atDebug().addKeyValue("event", "storage.operation.queued")
                 .addKeyValue("storageId", storageId).addKeyValue("operationId", operationId)
                 .addKeyValue("operation", operation)
-                .log("Queued WAL operation {} at {}", operation, pathForLog(path));
+                .log("Queued WAL operation {} at {}", operation, operationPathForLog(path));
         try {
             return CompletableFuture.supplyAsync(() -> withLogContext(operation, operationId, path, queuedAtNanos, action), walExecutor);
         } catch (java.util.concurrent.RejectedExecutionException error) {
@@ -1354,7 +1361,7 @@ public final class FileRaftStorage implements RaftStorage {
         currentOperation = operation;
         try (MDC.MDCCloseable ignoredStorage = MDC.putCloseable("storageId", storageId);
              MDC.MDCCloseable ignoredOperation = MDC.putCloseable("operationId", operationId);
-             MDC.MDCCloseable ignoredPath = MDC.putCloseable("storagePath", pathForLog(path))) {
+             MDC.MDCCloseable ignoredPath = MDC.putCloseable("storagePath", operationPathForLog(path))) {
             long startedAtNanos = System.nanoTime();
             LOG.atDebug().addKeyValue("event", "storage.operation.started")
                     .addKeyValue("operation", operation)
@@ -1389,6 +1396,20 @@ public final class FileRaftStorage implements RaftStorage {
     private static String pathForLog(Path path) {
         if (path == null) return "(not-open)";
         return boundedSingleLine(path.toAbsolutePath().normalize().toString(), MAX_LOGGED_PATH_CHARS);
+    }
+
+    /**
+     * The same text as {@link #pathForLog(Path)}, remembered for the path asked about last. Every
+     * operation names the data directory twice, when it is queued and in its log context, and
+     * rendering it normalises the path and scans every character. Callers that race render twice
+     * at worst.
+     */
+    private String operationPathForLog(Path path) {
+        RenderedPath remembered = renderedPath;
+        if (remembered.path() == path) return remembered.text();
+        RenderedPath rendered = new RenderedPath(path, pathForLog(path));
+        renderedPath = rendered;
+        return rendered.text();
     }
 
     static String boundedSingleLine(String value, int limit) {
