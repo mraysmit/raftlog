@@ -236,6 +236,32 @@ class GoldenFileCompatibilityTest {
         assertEquals(6, DurableState.replayAfterRestart(dir).getFirst().index());
     }
 
+    @Test void inferredBoundarySurvivesRestartAfterTheWholeRetainedSuffixIsTruncated() throws Exception {
+        Path dir = copyOf("format-1/compacted-with-retained-entries");
+        FileRaftStorage storage = open(dir);
+        try {
+            await(storage.replayLog());
+            await(storage.truncateSuffix(6));
+            await(storage.sync());
+        } finally { await(storage.closeAsync()); }
+
+        FileRaftStorage restarted = open(dir);
+        try {
+            assertTrue(await(restarted.replayLog()).isEmpty());
+            assertEquals(5L, await(restarted.compactionBoundary()));
+            for (long into : new long[]{1, 3, 5}) {
+                var rejected = assertInstanceOf(FileRaftStorage.WriteRejectedException.class,
+                        assertThrows(ExecutionException.class, () -> await(restarted.truncateSuffix(into))).getCause());
+                assertEquals(WriteRejectionReason.INVALID_TRUNCATION, rejected.reason());
+            }
+            var rejected = assertInstanceOf(FileRaftStorage.WriteRejectedException.class,
+                    assertThrows(ExecutionException.class,
+                            () -> await(restarted.appendEntries(List.of(new LogEntryData(5, 2, new byte[0]))))).getCause());
+            assertEquals(WriteRejectionReason.INDEX_NOT_CONTIGUOUS, rejected.reason());
+            await(restarted.appendEntries(List.of(new LogEntryData(6, 2, new byte[]{1}))));
+        } finally { await(restarted.closeAsync()); }
+    }
+
     @Test void nextCompactionOfAFormatOneLogWritesTheBoundaryRecordWithoutLosingTheInferredBoundary() throws Exception {
         Path dir = copyOf("format-1/compacted-with-retained-entries");
         FileRaftStorage storage = open(dir);

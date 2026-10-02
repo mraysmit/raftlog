@@ -17,6 +17,7 @@ package dev.mars.raftlog.storage;
 
 import java.io.Closeable;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -70,7 +71,7 @@ public interface RaftStorage extends Closeable {
      * than risk overwriting a higher term.
      *
      * @param currentTerm the current Raft term
-     * @param votedFor    the candidate ID voted for (empty if no vote cast)
+     * @param votedFor    the candidate ID voted for (empty if no vote cast), never {@code null}
      * @return a Future that completes when metadata is durable
      */
     CompletableFuture<Void> updateMetadata(long currentTerm, Optional<String> votedFor);
@@ -130,6 +131,25 @@ public interface RaftStorage extends Closeable {
      * @param payload the command payload (opaque bytes)
      */
     record LogEntryData(long index, long term, byte[] payload) {
+        @Override
+        public boolean equals(Object other) {
+            return this == other || other instanceof LogEntryData entry
+                    && index == entry.index
+                    && term == entry.term
+                    && Arrays.equals(payload, entry.payload);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Long.hashCode(index);
+            result = 31 * result + Long.hashCode(term);
+            return 31 * result + Arrays.hashCode(payload);
+        }
+
+        @Override
+        public String toString() {
+            return "LogEntryData[index=" + index + ", term=" + term + ", payload=" + Arrays.toString(payload) + "]";
+        }
     }
 
     /**
@@ -206,13 +226,15 @@ public interface RaftStorage extends Closeable {
      * For FileRaftStorage: Scans the append-only file sequentially.
      * For RocksDB: Scans keys {@code log:1} to {@code log:N}.
      * <p>
-     * Replay is destructive only for a structurally incomplete EOF fragment, which
-     * is treated as a torn write and physically truncated. A complete record with a
-     * bad CRC, malformed header, arbitrary garbage, or an invalid record followed by
-     * a valid record may be acknowledged data damaged later; FileRaftStorage fails
-     * with {@link FileRaftStorage.CorruptLogException}, leaves the file unchanged and
-     * fences the instance. Such a node must be restored from its peers rather than
-     * repaired by truncation.
+     * Replay is destructive only for a structurally incomplete EOF fragment whose header
+     * describes the operation that could validly follow the reconstructed log. That fragment
+     * is treated as a torn write and physically truncated. Classification is independent of
+     * the current write-time payload limit, so damage to the length field of the otherwise-next
+     * final record can be indistinguishable from a genuine torn write. A complete record with
+     * a bad CRC, malformed header, arbitrary garbage, or an invalid record followed by a valid
+     * record may be acknowledged data damaged later; FileRaftStorage fails with
+     * {@link FileRaftStorage.CorruptLogException}, leaves the file unchanged and fences the
+     * instance. Such a node must be restored from its peers rather than repaired by truncation.
      * <p>
      * The reconstructed log must be a well-formed Raft log: contiguous indices and
      * non-decreasing terms. Anything else fails with a StorageException, since the

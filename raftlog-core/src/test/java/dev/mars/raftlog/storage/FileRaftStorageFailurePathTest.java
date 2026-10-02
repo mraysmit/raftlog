@@ -152,6 +152,14 @@ class FileRaftStorageFailurePathTest {
         assertReplayRefusesMalformedLog("compacted through index 10");
     }
 
+    @Test void formatOneBoundaryCannotBeResetByHistoricalTruncateIntoTheInferredPrefix() throws Exception {
+        // A permissive format-1 writer could produce this exact shape. The first APPEND implies
+        // that indexes through 10 live in a snapshot; a later TRUNCATE 0 cannot safely authorize
+        // overlapping entries 1 and 2, even though the old reader replayed them.
+        writeWal(append(11, 1), append(12, 1), truncate(0), append(1, 2), append(2, 2));
+        assertReplayRefusesMalformedLog("compacted through index 10");
+    }
+
     @Test void replayRefusesAPrefixMarkerThatIsNotTheFirstRecord() throws Exception {
         writeWal(append(1, 1), prefix(1));
         assertReplayRefusesMalformedLog("only valid as the first record");
@@ -564,6 +572,36 @@ class FileRaftStorageFailurePathTest {
         }
     }
 
+    /** Returns each verification read in small pieces, as FileChannel is allowed to do. */
+    private static final class ShortReadingDevice extends CompactionIo {
+        @Override int read(FileChannel channel, ByteBuffer buffer, long position) throws IOException {
+            int originalLimit = buffer.limit();
+            buffer.limit(Math.min(originalLimit, buffer.position() + 3));
+            try {
+                return super.read(channel, buffer, position);
+            } finally {
+                buffer.limit(originalLimit);
+            }
+        }
+    }
+
+    /** Simulates a positional read that makes no progress. */
+    private static final class StalledReadingDevice extends CompactionIo {
+        @Override int read(FileChannel channel, ByteBuffer buffer, long position) {
+            return 0;
+        }
+    }
+
+    /** Corrupts the payload-length field while leaving the record size unchanged. */
+    private static final class LyingLengthDevice extends CompactionIo {
+        @Override void writeRecord(FileChannel channel, ByteBuffer record) throws IOException {
+            byte[] bytes = new byte[record.remaining()];
+            record.get(bytes);
+            ByteBuffer.wrap(bytes).putInt(23, Integer.MAX_VALUE);
+            super.writeRecord(channel, ByteBuffer.wrap(bytes));
+        }
+    }
+
     private FileRaftStorage openVerifying(CompactionIo io) throws Exception {
         FileRaftStorage storage = new FileRaftStorage(RaftStorageConfig.builder().verifyWrites(true).build(), io);
         await(storage.open(dir));
@@ -610,6 +648,34 @@ class FileRaftStorageFailurePathTest {
             await(storage.appendEntries(List.of(entry(2, 1))));
         } finally { await(storage.closeAsync()); }
         assertEntries(List.of(entry(1, 1), entry(2, 1)), DurableState.replayAfterRestart(dir));
+    }
+
+    @Test void writeVerificationCompletesShortReads() throws Exception {
+        FileRaftStorage storage = openVerifying(new ShortReadingDevice());
+        try {
+            await(storage.appendEntries(List.of(entry(1, 1))));
+        } finally { await(storage.closeAsync()); }
+        assertEntries(List.of(entry(1, 1)), DurableState.replayAfterRestart(dir));
+    }
+
+    @Test void writeVerificationRejectsAReadThatMakesNoProgress() throws Exception {
+        FileRaftStorage storage = openVerifying(new StalledReadingDevice());
+        try {
+            Throwable cause = failureOf(storage.appendEntries(List.of(entry(1, 1))));
+            assertInstanceOf(FileRaftStorage.StorageException.class, cause);
+            assertTrue(cause.getMessage().contains("made no progress"), cause.getMessage());
+            assertRejected(storage.appendEntries(List.of(entry(1, 1))), WriteRejectionReason.LOG_STATE_UNKNOWN);
+        } finally { await(storage.closeAsync()); }
+    }
+
+    @Test void writeVerificationReportsAnInvalidReadBackLengthAsAStorageFailure() throws Exception {
+        FileRaftStorage storage = openVerifying(new LyingLengthDevice());
+        try {
+            Throwable cause = failureOf(storage.appendEntries(List.of(entry(1, 1))));
+            assertInstanceOf(FileRaftStorage.StorageException.class, cause);
+            assertTrue(cause.getMessage().contains("declares payload length"), cause.getMessage());
+            assertRejected(storage.appendEntries(List.of(entry(1, 1))), WriteRejectionReason.LOG_STATE_UNKNOWN);
+        } finally { await(storage.closeAsync()); }
     }
 
     // ------------------------------------------------------------------ fencing and scheduling
@@ -822,6 +888,52 @@ class FileRaftStorageFailurePathTest {
         buf.putInt(0x52414654).putShort((short) 1).put((byte) 2).putLong(index).putLong(1L).putInt(declaredPayload)
                 .put(presentPayload);
         return buf.array();
+    }
+
+    private static byte[] tornTruncate(long fromIndex) {
+        return ByteBuffer.allocate(27).putInt(0x52414654).putShort((short) 1).put((byte) 1)
+                .putLong(fromIndex).putLong(0L).putInt(10).array();
+    }
+
+    @Test void tornTruncateBelowOneIsNotRepaired() throws Exception {
+        writeWal(append(1, 1), tornTruncate(0));
+        FileRaftStorage storage = open(dir);
+        try {
+            assertInstanceOf(FileRaftStorage.CorruptLogException.class, failureOf(storage.replayLog()));
+        } finally { await(storage.closeAsync()); }
+    }
+
+    @Test void tornTruncateIntoTheCompactedPrefixIsNotRepaired() throws Exception {
+        writeWal(prefix(5), append(6, 1), tornTruncate(5));
+        FileRaftStorage storage = open(dir);
+        try {
+            assertInstanceOf(FileRaftStorage.CorruptLogException.class, failureOf(storage.replayLog()));
+        } finally { await(storage.closeAsync()); }
+    }
+
+    @Test void tornTruncateBeyondTheTailIsNotRepaired() throws Exception {
+        writeWal(append(1, 1), tornTruncate(3));
+        FileRaftStorage storage = open(dir);
+        try {
+            assertInstanceOf(FileRaftStorage.CorruptLogException.class, failureOf(storage.replayLog()));
+        } finally { await(storage.closeAsync()); }
+    }
+
+    @Test void tornAppendWithANonContiguousIndexIsReportedNotRepaired() throws Exception {
+        writeWal(append(1, 1), tornHeader(3, 10, new byte[]{1}));
+        FileRaftStorage storage = open(dir);
+        try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
+            assertInstanceOf(FileRaftStorage.CorruptLogException.class, failureOf(storage.replayLog()));
+        } finally { await(storage.closeAsync()); }
+    }
+
+    @Test void tornAppendAfterLongMaxValueIsReportedWithoutOverflow() throws Exception {
+        writeWal(prefix(Long.MAX_VALUE - 1), append(Long.MAX_VALUE, 1),
+                tornHeader(Long.MAX_VALUE, 10, new byte[]{1}));
+        FileRaftStorage storage = open(dir);
+        try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
+            assertInstanceOf(FileRaftStorage.CorruptLogException.class, failureOf(storage.replayLog()));
+        } finally { await(storage.closeAsync()); }
     }
 
     private static void plant(byte[] target, int offset, String ascii) {
@@ -1058,14 +1170,15 @@ class FileRaftStorageFailurePathTest {
         } finally { await(again.closeAsync()); }
     }
 
-    @Test void tornRecordDeclaringMoreThanTheLimitIsStillReportedRatherThanRepaired() throws Exception {
-        // The limit stays in force as a plausibility check on torn writes: this build never writes
-        // a record larger than its limit, so a fragment claiming to be one was not torn by a crash.
+    @Test void loweringTheLimitDoesNotPreventRepairOfAnOlderLargeTornRecord() throws Exception {
+        // The current write limit cannot classify old bytes: a previous configuration may have
+        // allowed this record before the operator lowered the limit.
         writeWal(append(1, 1), tornHeader(2, 40 * 1024 * 1024, new byte[64]));
         FileRaftStorage storage = open(dir);
-        try (var ignoredUntouched = DurableState.expectUnchanged(dir)) {
-            assertInstanceOf(FileRaftStorage.CorruptLogException.class, failureOf(storage.replayLog()));
+        try {
+            assertEntries(List.of(entry(1, 1)), await(storage.replayLog()));
         } finally { await(storage.closeAsync()); }
+        assertEntries(List.of(entry(1, 1)), DurableState.replayAfterRestart(dir));
     }
 
     // ------------------------------------------------------------------ the scanner decodes quietly

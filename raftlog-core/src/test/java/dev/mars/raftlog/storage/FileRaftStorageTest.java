@@ -111,6 +111,15 @@ class FileRaftStorageTest {
     }
 
     @Test
+    void nullVoteIsRejectedAsInvalidCallerInput() throws Exception {
+        Throwable cause = assertThrows(ExecutionException.class,
+                () -> storage.updateMetadata(1L, null).get(5, TimeUnit.SECONDS)).getCause();
+        assertInstanceOf(IllegalArgumentException.class, cause);
+        assertEquals("votedFor must not be null; use Optional.empty() for no vote", cause.getMessage());
+        assertFalse(Files.exists(tempDir.resolve("meta.dat")));
+    }
+
+    @Test
     void testUpdateMetadata_OverwritesPrevious() throws Exception {
         storage.updateMetadata(1L, Optional.of("node-a")).get(5, TimeUnit.SECONDS);
         storage.updateMetadata(2L, Optional.of("node-b")).get(5, TimeUnit.SECONDS);
@@ -139,6 +148,22 @@ class FileRaftStorageTest {
     // ========================================================================
     // Append Tests
     // ========================================================================
+
+    @Test
+    void logEntryEqualityUsesPayloadContents() {
+        LogEntryData left = new LogEntryData(7, 3, new byte[]{1, 2, 3});
+        LogEntryData right = new LogEntryData(7, 3, new byte[]{1, 2, 3});
+        assertEquals(left, right);
+        assertEquals(left, left);
+        assertEquals(left.hashCode(), right.hashCode());
+        assertNotEquals(left, "not an entry");
+        assertNotEquals(left, new LogEntryData(8, 3, new byte[]{1, 2, 3}));
+        assertNotEquals(left, new LogEntryData(7, 4, new byte[]{1, 2, 3}));
+        assertNotEquals(left, new LogEntryData(7, 3, new byte[]{1, 2, 4}));
+        assertEquals("LogEntryData[index=7, term=3, payload=[1, 2, 3]]", left.toString());
+        assertEquals("LogEntryData[index=7, term=3, payload=null]",
+                new LogEntryData(7, 3, null).toString());
+    }
 
     @Test
     void testAppendAndReplay_SingleEntry() throws Exception {

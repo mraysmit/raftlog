@@ -86,10 +86,13 @@ import java.util.zip.CRC32C;
  * instance; if the failure was corruption, restore the node from its peers.
  * <p>
  * <b>Replay policy:</b>
- * A structurally incomplete EOF fragment is treated as a torn write and truncated. A
- * complete record with a bad CRC, a malformed header, arbitrary garbage, or an invalid
- * record followed by a valid record may be acknowledged data damaged later; it is reported
- * as {@link CorruptLogException} without modifying the file.
+ * A structurally incomplete EOF fragment is treated as a torn write and truncated only when
+ * its header describes the operation that could validly follow the reconstructed log. This
+ * classification deliberately does not use the current payload-size limit: an older process
+ * may have used a larger limit. Consequently, damage to the length field of the otherwise-next
+ * final record can be indistinguishable from a genuine torn write and may be truncated. A
+ * complete record with a bad CRC, a malformed header, arbitrary garbage, or an invalid record
+ * followed by a valid record is reported as {@link CorruptLogException} without modifying the file.
  *
  * @see RaftStorage
  */
@@ -560,6 +563,10 @@ public final class FileRaftStorage implements RaftStorage {
 
     @Override
     public CompletableFuture<Void> updateMetadata(long currentTerm, Optional<String> votedFor) {
+        if (votedFor == null) {
+            return CompletableFuture.failedFuture(
+                    new IllegalArgumentException("votedFor must not be null; use Optional.empty() for no vote"));
+        }
         return runOperation("metadata-update", dataDir, () -> {
             ensureHealthy();
             validateMetadataUpdate(currentTerm, votedFor);
@@ -1198,7 +1205,7 @@ public final class FileRaftStorage implements RaftStorage {
         LOG.atDebug().addKeyValue("event", "metadata.update.validation_started")
                 .addKeyValue("requestedTerm", term).addKeyValue("persistedTerm", persistedTerm)
                 .addKeyValue("metadataReadable", !metaUnreadable)
-                .addKeyValue("requestedVotePresent", votedFor != null && votedFor.isPresent())
+                .addKeyValue("requestedVotePresent", votedFor.isPresent())
                 .log("Validating metadata update against the persisted term and vote");
         if (term < 0) {
             throw refuse(WriteRejectionReason.TERM_REGRESSION,
@@ -1578,7 +1585,8 @@ public final class FileRaftStorage implements RaftStorage {
      * Complete records with a bad CRC and malformed headers are ambiguous: they may
      * be acknowledged data damaged after the write, so replay must not erase them.
      */
-    private boolean isStructurallyIncompleteEofFragment(FileChannel ch, long pos, long fileSize) throws IOException {
+    private boolean isStructurallyIncompleteEofFragment(
+            FileChannel ch, long pos, long fileSize, long last, long boundary) throws IOException {
         long remaining = fileSize - pos;
         if (remaining < HEADER_SIZE) return true;
 
@@ -1589,17 +1597,25 @@ public final class FileRaftStorage implements RaftStorage {
         int magic = header.getInt();
         short version = header.getShort();
         byte type = header.get();
-        header.getLong(); // index
+        long index = header.getLong();
         header.getLong(); // term
         int payloadLen = header.getInt();
 
         if (magic != MAGIC || version < VERSION || version > MAX_SUPPORTED_VERSION) return false;
         if (type != TYPE_TRUNCATE && type != TYPE_APPEND && type != TYPE_PREFIX) return false;
+        // A torn header must also describe the operation replay was expecting next. This
+        // prevents arbitrary bytes containing MAGIC/version/type from turning later damage
+        // into an apparently repairable EOF fragment.
+        if (type == TYPE_APPEND && (last == Long.MAX_VALUE || index != last + 1)) return false;
+        if (type == TYPE_TRUNCATE && (index < 1 || index <= boundary || index - 1 > last)) return false;
         // The compaction boundary is published atomically after a force, so a crash cannot
         // tear it. A short one is later damage, and repairing it would truncate the file to
         // nothing and silently restart the index space at 1.
         if (type == TYPE_PREFIX) return false;
-        if (payloadLen < 0 || payloadLen > maxPayloadSize) return false;
+        // The configured limit governs new writes only. An older process may have written
+        // a larger record before the operator lowered that limit, so it cannot participate
+        // in deciding whether an otherwise valid header describes a torn EOF write.
+        if (payloadLen < 0) return false;
 
         long completeSize = (long) HEADER_SIZE + payloadLen + CRC_SIZE;
         return remaining < completeSize;
@@ -1622,6 +1638,8 @@ public final class FileRaftStorage implements RaftStorage {
         int truncateCount = 0;
         long last = 0;
         long boundary = 0;
+        boolean prefixSeen = false;
+        boolean firstAppendSeen = false;
 
         try (FileChannel ch = compactionIo.openForReplay(logPath)) {
 
@@ -1640,6 +1658,7 @@ public final class FileRaftStorage implements RaftStorage {
                         throw invalidLog("prefix-not-first", "WAL " + logPath + " has a prefix marker at byte " + pos
                                 + "; it is only valid as the first record");
                     }
+                    prefixSeen = true;
                     boundary = record.index();
                     last = boundary;
                     LOG.atDebug().addKeyValue("event", "wal.replay.prefix")
@@ -1648,8 +1667,10 @@ public final class FileRaftStorage implements RaftStorage {
                     long truncateFrom = record.index();
                     int beforeSize = entries.size();
                     entries.removeIf(e -> e.index() >= truncateFrom);
-                    // A boundary at or below the compacted prefix (including the 0 and negative
-                    // values an existing format-1 log may hold) empties the log back to the prefix.
+                    // A complete historical TRUNCATE at or below the compacted prefix (including
+                    // the 0 and negative values an existing format-1 log may hold) empties the log
+                    // back to the prefix. A torn record with such an index is conservatively
+                    // reported instead because it does not describe a valid operation at this tail.
                     // Otherwise truncateFrom is at least 1, so truncateFrom - 1 cannot underflow.
                     long lastAfterTruncate = truncateFrom <= boundary ? boundary : truncateFrom - 1;
                     if (lastAfterTruncate < last) last = lastAfterTruncate;
@@ -1657,6 +1678,13 @@ public final class FileRaftStorage implements RaftStorage {
                     LOG.atDebug().addKeyValue("event", "wal.replay.truncate")
                             .log("Replay TRUNCATE: fromIndex={}, removed {} entries", truncateFrom, beforeSize - entries.size());
                 } else {
+                    // Format 1 has no PREFIX record. Its first retained entry therefore carries
+                    // the implicit compaction boundary, which must be established before a later
+                    // TRUNCATE can remove every retained entry from the in-memory replay result.
+                    if (!firstAppendSeen && !prefixSeen && record.index() > 1) {
+                        boundary = record.index() - 1;
+                    }
+                    firstAppendSeen = true;
                     entries.add(new LogEntryData(record.index(), record.term(), record.payload()));
                     last = record.index();
                     appendCount++;
@@ -1672,7 +1700,8 @@ public final class FileRaftStorage implements RaftStorage {
                 // Only a structurally incomplete EOF fragment is repaired. A complete
                 // bad record or malformed header at the tail may be acknowledged data
                 // damaged later and therefore must be reported without modifying it.
-                boolean incompleteEof = isStructurallyIncompleteEofFragment(ch, lastGoodPos, fileSize);
+                boolean incompleteEof = isStructurallyIncompleteEofFragment(
+                        ch, lastGoodPos, fileSize, last, boundary);
                 LOG.atDebug().addKeyValue("event", "wal.replay.tail_classified")
                         .addKeyValue("lastGoodByte", lastGoodPos)
                         .addKeyValue("fileBytes", fileSize)
@@ -1723,7 +1752,7 @@ public final class FileRaftStorage implements RaftStorage {
         rebuildTermRuns(entries);
 
         long elapsed = System.currentTimeMillis() - startTime;
-        String boundarySource = prefixBoundary == 0 ? "none" : boundary > 0 ? "prefix-record" : "inferred";
+        String boundarySource = prefixBoundary == 0 ? "none" : prefixSeen ? "prefix-record" : "inferred";
         LOG.atInfo().addKeyValue("event", "wal.replay.completed").addKeyValue("durationMs", elapsed)
                 .addKeyValue("recoveredEntries", entries.size())
                 .addKeyValue("lastIndex", lastIndex)
@@ -1944,9 +1973,19 @@ public final class FileRaftStorage implements RaftStorage {
             throw fence("Failed to force WAL before write verification", e);
         }
 
-        // Read back the record
+        // Read back the whole record. Positional FileChannel reads may complete short even
+        // when more bytes are available, so a single read is not a verification failure.
         ByteBuffer readBuf = ByteBuffer.allocate(recordSize);
-        int bytesRead = logChannel.read(readBuf, position);
+        int bytesRead = 0;
+        while (readBuf.hasRemaining()) {
+            int count = compactionIo.read(logChannel, readBuf, position + bytesRead);
+            if (count < 0) break;
+            if (count == 0) {
+                throw new StorageException("Write verification failed: read made no progress after "
+                        + bytesRead + " of " + recordSize + " bytes");
+            }
+            bytesRead += count;
+        }
 
         if (bytesRead != recordSize) {
             LOG.atError().addKeyValue("event", "wal.verify.failed")
@@ -1958,9 +1997,17 @@ public final class FileRaftStorage implements RaftStorage {
 
         readBuf.flip();
 
-        // Verify CRC
+        int payloadLength = readBuf.getInt(HEADER_SIZE - Integer.BYTES);
+        int expectedPayloadLength = recordSize - HEADER_SIZE - CRC_SIZE;
+        if (payloadLength != expectedPayloadLength) {
+            throw new StorageException("Write verification failed: record declares payload length "
+                    + payloadLength + " but the written record contains " + expectedPayloadLength + " bytes");
+        }
+
+        // Verify the exact bytes that precede the stored CRC. Do not use untrusted read-back
+        // header data as an array bound.
         CRC32C verifyCrc = new CRC32C();
-        verifyCrc.update(readBuf.array(), 0, HEADER_SIZE + readBuf.getInt(HEADER_SIZE - 4));
+        verifyCrc.update(readBuf.array(), 0, recordSize - CRC_SIZE);
         int actualCrc = (int) verifyCrc.getValue();
 
         // Read the stored CRC

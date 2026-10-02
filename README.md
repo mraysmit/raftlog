@@ -346,7 +346,7 @@ raftlog/
 │   └── src/
 │       ├── main/java/dev/mars/raftlog/
 │       │   └── storage/    # RaftStorage, FileRaftStorage, RaftStorageConfig, AppendPlan
-│       └── test/java/      # Unit tests (154 tests)
+│       └── test/java/      # Comprehensive unit and integration tests
 ├── raftlog-demo/           # Demo applications and chaos scenarios
 │   ├── README.md           # Demo programs, configuration, logging, and cleanup
 │   └── src/main/java/      # Basic WAL and key/value replay examples

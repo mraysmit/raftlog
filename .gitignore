@@ -96,6 +96,7 @@ logs/
 # Runtime Data (WAL files during development)
 # -----------------------------------------------------------------------------
 data/
+run-data/
 *.dat
 *.wal
 

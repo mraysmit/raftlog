@@ -931,7 +931,7 @@ class ProtectionGuaranteeTest {
         if (truncateAt >= 4) buf.putInt(0x52414654);      // Magic
         if (truncateAt >= 6) buf.putShort((short) 1);     // Version
         if (truncateAt >= 7) buf.put((byte) 2);           // Type APPEND
-        if (truncateAt >= 15) buf.putLong(999L);          // Index
+        if (truncateAt >= 15) buf.putLong(2L);            // Next contiguous index
         if (truncateAt >= 23) buf.putLong(1L);            // Term
         if (truncateAt >= 27) buf.putInt(10);             // Payload length
         if (truncateAt > 27) {

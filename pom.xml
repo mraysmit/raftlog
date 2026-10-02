@@ -82,10 +82,6 @@
         <central.publishing.plugin.version>0.10.0</central.publishing.plugin.version>
 
         <!-- Test Configuration -->
-        <test.parallel>classes</test.parallel>
-        <test.threadCount>4</test.threadCount>
-        <test.groups />
-        <test.excludedGroups />
         <test.log.directory>${maven.multiModuleProjectDirectory}/logs</test.log.directory>
         <test.log.configuration>${maven.multiModuleProjectDirectory}/config/logback-test.xml</test.log.configuration>
     </properties>
@@ -252,10 +248,6 @@
                     <artifactId>maven-surefire-plugin</artifactId>
                     <version>${maven.surefire.plugin.version}</version>
                     <configuration>
-                        <groups>${test.groups}</groups>
-                        <excludedGroups>${test.excludedGroups}</excludedGroups>
-                        <parallel>${test.parallel}</parallel>
-                        <threadCount>${test.threadCount}</threadCount>
                         <forkCount>1</forkCount>
                         <reuseForks>true</reuseForks>
                         <argLine>-XX:+EnableDynamicAgentLoading</argLine>
@@ -273,8 +265,6 @@
                     <artifactId>maven-failsafe-plugin</artifactId>
                     <version>${maven.failsafe.plugin.version}</version>
                     <configuration>
-                        <groups>${test.groups}</groups>
-                        <excludedGroups>${test.excludedGroups}</excludedGroups>
                         <argLine>-XX:+EnableDynamicAgentLoading</argLine>
                         <systemPropertyVariables>
                             <java.io.tmpdir>${project.build.directory}/test-tmp</java.io.tmpdir>
@@ -496,53 +486,6 @@
 
     <profiles>
         <!-- ======================= -->
-        <!-- Core Tests Only         -->
-        <!-- ======================= -->
-        <profile>
-            <id>core-tests</id>
-            <properties>
-                <test.groups>core</test.groups>
-                <test.excludedGroups>integration,performance,slow</test.excludedGroups>
-            </properties>
-        </profile>
-
-        <!-- ======================= -->
-        <!-- Integration Tests       -->
-        <!-- ======================= -->
-        <profile>
-            <id>integration-tests</id>
-            <properties>
-                <test.groups>integration</test.groups>
-                <test.excludedGroups />
-            </properties>
-        </profile>
-
-        <!-- ======================= -->
-        <!-- Performance Tests       -->
-        <!-- ======================= -->
-        <profile>
-            <id>performance-tests</id>
-            <properties>
-                <test.groups>performance</test.groups>
-                <test.excludedGroups />
-                <test.parallel>none</test.parallel>
-            </properties>
-        </profile>
-
-        <!-- ======================= -->
-        <!-- All Tests               -->
-        <!-- ======================= -->
-        <profile>
-            <id>all-tests</id>
-            <properties>
-                <test.groups />
-                <test.excludedGroups />
-                <test.parallel>classes</test.parallel>
-                <test.threadCount>2</test.threadCount>
-            </properties>
-        </profile>
-
-        <!-- ======================= -->
         <!-- Code Coverage           -->
         <!-- ======================= -->
         <profile>
@@ -656,10 +599,6 @@
                 </plugin>
                 </plugins>
             </build>
-            <properties>
-                <test.parallel>classes</test.parallel>
-                <test.threadCount>2</test.threadCount>
-            </properties>
         </profile>
 
     </profiles>

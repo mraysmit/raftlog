@@ -188,8 +188,8 @@ class FileRaftStorageAdversarialTest {
         }
 
         @Test
-        @DisplayName("Payload length exceeds max - should report corruption")
-        void payloadLengthExceedsMax() throws Exception {
+        @DisplayName("Payload length above current write limit is classified without using that limit")
+        void payloadLengthAboveCurrentLimitCanStillDescribeATornTail() throws Exception {
             writeValidEntries(2);
 
             // Set payload length to exceed MAX_PAYLOAD_SIZE
@@ -204,7 +204,9 @@ class FileRaftStorageAdversarialTest {
             }
 
             reopenStorage();
-            assertCorruptReplay(storage);
+            List<LogEntryData> replayed = storage.replayLog().get(5, TimeUnit.SECONDS);
+            assertEquals(1, replayed.size());
+            assertEquals(1, replayed.getFirst().index());
         }
 
         @Test
