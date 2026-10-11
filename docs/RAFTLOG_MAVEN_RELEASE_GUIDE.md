@@ -5,9 +5,26 @@
 | Author | Mark Andrew Ray-Smith, Cityline Ltd |
 | Status | Maintained release runbook |
 | Last updated | 2026-10-11 |
-| Applies to | RaftLog 1.4.1 |
+| Applies to | RaftLog 1.5.0 |
 
 This document provides the exact, repo-specific process for publishing RaftLog to Maven Central via Sonatype Central Portal.
+
+## 1.5.0 release
+
+1.5.0 exposes the durable prefix-compaction boundary through the generic
+`RaftStorage.compactionBoundary()` contract. The method has a default implementation returning
+zero, so existing third-party `RaftStorage` implementations remain source- and binary-compatible.
+`FileRaftStorage` overrides it with the boundary recovered from the WAL. The WAL and metadata
+formats are unchanged, and data directories written by 1.4.1 open without migration. Parent,
+core and demo must all use 1.5.0.
+
+The release also refreshes the WAL design documentation, including explicit crash/restart state
+ownership, recovery rules, and sequence diagrams. These documentation changes do not alter the
+runtime contract beyond the new interface accessor.
+
+Before publishing, complete every Windows and unprivileged-Linux gate in the
+[test documentation](RAFTLOG_TEST_DOCUMENTATION.md#run-everything), including both 2,000-seed
+model soaks and the packaged examples.
 
 ## 1.4.1 release
 
@@ -192,12 +209,12 @@ mvn -B -Pcoverage clean verify
 # Complete the remaining checks in docs/RAFTLOG_TEST_DOCUMENTATION.md#run-everything
 
 # 2) Set release version
-mvn -B versions:set -DnewVersion=1.4.1
+mvn -B versions:set -DnewVersion=1.5.0
 mvn -B versions:commit
 
 # 3) Commit version bump
 git add -A
-git commit -m "Release 1.4.1"
+git commit -m "Release 1.5.0"
 
 # 4) Prepare and verify signed release artifacts from clean target directories
 mvn -B -Prelease -DskipTests clean verify
@@ -206,9 +223,9 @@ mvn -B -Prelease -DskipTests clean verify
 mvn -B -Prelease -DskipTests clean deploy
 
 # 6) Tag and push after successful publish
-git tag v1.4.1
+git tag v1.5.0
 git push origin main
-git push origin v1.4.1
+git push origin v1.5.0
 ```
 
 ### Windows Pre-Deploy Cleanup (Recommended)

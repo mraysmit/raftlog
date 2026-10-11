@@ -82,20 +82,20 @@ handing back a log that replays into something `AppendPlan` cannot reason about.
 <dependency>
     <groupId>io.github.mraysmit</groupId>
     <artifactId>raftlog-core</artifactId>
-    <version>1.4.1</version>
+    <version>1.5.0</version>
 </dependency>
 ```
 
 ### Gradle (Groovy)
 
 ```groovy
-implementation 'io.github.mraysmit:raftlog-core:1.4.1'
+implementation 'io.github.mraysmit:raftlog-core:1.5.0'
 ```
 
 ### Gradle (Kotlin)
 
 ```kotlin
-implementation("io.github.mraysmit:raftlog-core:1.4.1")
+implementation("io.github.mraysmit:raftlog-core:1.5.0")
 ```
 
 ## Building
@@ -250,7 +250,7 @@ example, in PowerShell:
 ```powershell
 $env:RAFTLOG_LOG_LEVEL = "DEBUG"
 $env:RAFTLOG_LOG_DIR = "C:\temp\raftlog-logs"
-java -jar raftlog-demo/target/raftlog-demo-1.4.0.jar
+java -jar raftlog-demo/target/raftlog-demo-1.5.0.jar
 ```
 
 The core library uses the application's SLF4J configuration. In an application with Logback,
@@ -365,16 +365,16 @@ programs, configuration differences, chaos categories, logging, and cleanup.
 mvn clean package -DskipTests
 
 # Run with default config (~/.raftlog/data)
-java -jar raftlog-demo/target/raftlog-demo-1.4.0.jar
+java -jar raftlog-demo/target/raftlog-demo-1.5.0.jar
 
 # Run with custom data directory
-java -Draftlog.dataDir=/tmp/wal-demo -jar raftlog-demo/target/raftlog-demo-1.4.0.jar
+java -Draftlog.dataDir=/tmp/wal-demo -jar raftlog-demo/target/raftlog-demo-1.5.0.jar
 ```
 
 Run the separate key/value replay example:
 
 ```bash
-java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar \
+java -cp raftlog-demo/target/raftlog-demo-1.5.0.jar \
   dev.mars.raftlog.demo.KeyValueExample /tmp/raftlog-key-values
 ```
 

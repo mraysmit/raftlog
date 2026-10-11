@@ -5,7 +5,7 @@
 | Author | Mark Andrew Ray-Smith, Cityline Ltd |
 | Status | Maintained design assessment |
 | Last updated | 2026-10-11 |
-| Applies to | RaftLog 1.4.1 |
+| Applies to | RaftLog 1.5.0 |
 
 RaftLog is intentionally minimal. This document separates the current safety baseline from features that are not part of the core implementation and records the practical trade-offs of adding them.
 

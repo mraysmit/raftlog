@@ -5,7 +5,7 @@
 | Author | Mark Andrew Ray-Smith, Cityline Ltd |
 | Status | Maintained verification guide |
 | Last updated | 2026-10-11 |
-| Applies to | RaftLog 1.4.1 |
+| Applies to | RaftLog 1.5.0 |
 
 This document provides a comprehensive overview of all test cases in the RaftLog project, organized by test class and category.
 
@@ -66,10 +66,10 @@ Run these commands from the project root:
 mvn package -pl raftlog-demo -am -DskipTests
 
 # Run the main WAL example
-java -jar raftlog-demo/target/raftlog-demo-1.4.0.jar .\run-data\wal-demo
+java -jar raftlog-demo/target/raftlog-demo-1.5.0.jar .\run-data\wal-demo
 
 # Run the key/value replay example
-java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.KeyValueExample .\run-data\key-values
+java -cp raftlog-demo/target/raftlog-demo-1.5.0.jar dev.mars.raftlog.demo.KeyValueExample .\run-data\key-values
 ```
 
 Run each example a second time with the same directory to exercise restart and replay.
@@ -92,13 +92,13 @@ WalChaos is an interactive chaos testing suite that runs as a standalone Java ap
 mvn package -pl raftlog-demo -am -DskipTests
 
 # Run all 38 chaos tests
-java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos
+java -cp raftlog-demo/target/raftlog-demo-1.5.0.jar dev.mars.raftlog.demo.WalChaos
 
 # Run specific category
-java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos concurrent
-java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos corruption
-java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos boundary
-java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos stress
+java -cp raftlog-demo/target/raftlog-demo-1.5.0.jar dev.mars.raftlog.demo.WalChaos concurrent
+java -cp raftlog-demo/target/raftlog-demo-1.5.0.jar dev.mars.raftlog.demo.WalChaos corruption
+java -cp raftlog-demo/target/raftlog-demo-1.5.0.jar dev.mars.raftlog.demo.WalChaos boundary
+java -cp raftlog-demo/target/raftlog-demo-1.5.0.jar dev.mars.raftlog.demo.WalChaos stress
 ```
 
 **WalChaos Output:**
@@ -376,13 +376,13 @@ An interactive chaos testing suite that throws every nasty scenario at the WAL t
 mvn package -pl raftlog-demo -am -DskipTests
 
 # Run all chaos tests
-java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos
+java -cp raftlog-demo/target/raftlog-demo-1.5.0.jar dev.mars.raftlog.demo.WalChaos
 
 # Run specific test category
-java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos concurrent
-java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos corruption
-java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos boundary
-java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar dev.mars.raftlog.demo.WalChaos stress
+java -cp raftlog-demo/target/raftlog-demo-1.5.0.jar dev.mars.raftlog.demo.WalChaos concurrent
+java -cp raftlog-demo/target/raftlog-demo-1.5.0.jar dev.mars.raftlog.demo.WalChaos corruption
+java -cp raftlog-demo/target/raftlog-demo-1.5.0.jar dev.mars.raftlog.demo.WalChaos boundary
+java -cp raftlog-demo/target/raftlog-demo-1.5.0.jar dev.mars.raftlog.demo.WalChaos stress
 ```
 
 ### Concurrency Chaos Tests (6 tests)

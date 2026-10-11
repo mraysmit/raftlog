@@ -29,6 +29,7 @@
 import dev.mars.raftlog.storage.FileRaftStorage;
 import dev.mars.raftlog.storage.RaftStorage.LogEntryData;
 import dev.mars.raftlog.storage.RaftStorage.PersistentMeta;
+import dev.mars.raftlog.storage.RaftStorageConfig;
 
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
@@ -174,7 +175,7 @@ public class GoldenFileGenerator {
     static void scenario(String name, Scenario scenario, Tamper tamper) throws Exception {
         Path dir = out.resolve(name);
         Files.createDirectories(dir);
-        try (FileRaftStorage storage = new FileRaftStorage(true)) {
+        try (FileRaftStorage storage = verifiedStorage()) {
             await(storage.open(dir));
             scenario.write(storage);
         }
@@ -188,7 +189,7 @@ public class GoldenFileGenerator {
             if (Files.exists(dir.resolve(f))) Files.copy(dir.resolve(f), copy.resolve(f), StandardCopyOption.REPLACE_EXISTING);
         }
         StringBuilder expected = new StringBuilder();
-        try (FileRaftStorage reader = new FileRaftStorage(true)) {
+        try (FileRaftStorage reader = verifiedStorage()) {
             await(reader.open(copy));
             try {
                 List<LogEntryData> entries = await(reader.replayLog());
@@ -214,6 +215,10 @@ public class GoldenFileGenerator {
         awaitLockRelease(copy);
         Files.writeString(dir.resolve("expected.txt"), expected.toString());
         LOG.info("  " + name + ": " + expected.toString().lines().findFirst().orElse(""));
+    }
+
+    static FileRaftStorage verifiedStorage() {
+        return new FileRaftStorage(RaftStorageConfig.builder().verifyWrites(true).build());
     }
 
     /** close() in these releases returns before the lock is released. */

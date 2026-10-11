@@ -22,7 +22,7 @@ mvn package -pl raftlog-demo -am -DskipTests
 ```
 
 The executable JAR is written to
-`raftlog-demo/target/raftlog-demo-1.4.0.jar`.
+`raftlog-demo/target/raftlog-demo-1.5.0.jar`.
 
 ## WAL walkthrough
 
@@ -64,10 +64,10 @@ the static `StandardCharsets.UTF_8` constant.
 
 ```bash
 # Use RaftLog's default data directory (~/.raftlog/data)
-java -jar raftlog-demo/target/raftlog-demo-1.4.0.jar
+java -jar raftlog-demo/target/raftlog-demo-1.5.0.jar
 
 # Pass a dedicated data directory as the first argument
-java -jar raftlog-demo/target/raftlog-demo-1.4.0.jar ./run-data/wal-demo
+java -jar raftlog-demo/target/raftlog-demo-1.5.0.jar ./run-data/wal-demo
 ```
 
 Run the second command again with the same directory to see restart recovery in
@@ -79,7 +79,7 @@ configuration sources. For example:
 ```bash
 java -Draftlog.dataDir=./run-data/wal-demo \
      -Draftlog.verifyWrites=true \
-     -jar raftlog-demo/target/raftlog-demo-1.4.0.jar
+     -jar raftlog-demo/target/raftlog-demo-1.5.0.jar
 ```
 
 The first command-line argument, when present, selects the data directory and
@@ -133,7 +133,7 @@ assumes the same storage imports as the WAL walkthrough, plus `ByteBuffer` and
 the static `StandardCharsets.UTF_8` constant.
 
 ```bash
-java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar \
+java -cp raftlog-demo/target/raftlog-demo-1.5.0.jar \
   dev.mars.raftlog.demo.KeyValueExample ./run-data/key-values
 ```
 
@@ -170,11 +170,11 @@ to process exit status `0` or `1`.
 
 ```bash
 # Run all 38 scenarios
-java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar \
+java -cp raftlog-demo/target/raftlog-demo-1.5.0.jar \
   dev.mars.raftlog.demo.WalChaos
 
 # Run one category
-java -cp raftlog-demo/target/raftlog-demo-1.4.0.jar \
+java -cp raftlog-demo/target/raftlog-demo-1.5.0.jar \
   dev.mars.raftlog.demo.WalChaos concurrent
 ```
 
@@ -216,7 +216,7 @@ PowerShell example:
 ```powershell
 $env:RAFTLOG_LOG_LEVEL = "DEBUG"
 $env:RAFTLOG_LOG_DIR = ".\run-data\logs"
-java -jar raftlog-demo/target/raftlog-demo-1.4.0.jar .\run-data\wal-demo
+java -jar raftlog-demo/target/raftlog-demo-1.5.0.jar .\run-data\wal-demo
 ```
 
 The text and JSON files use the name

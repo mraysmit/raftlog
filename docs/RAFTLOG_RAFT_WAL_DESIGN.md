@@ -6,7 +6,7 @@
 | Author | Mark Andrew Ray-Smith, Cityline Ltd |
 | Status | Maintained architecture and design specification |
 | Last updated | 2026-10-11 |
-| Applies to | RaftLog 1.4.1 |
+| Applies to | RaftLog 1.5.0 |
 
 ## Introduction
 
