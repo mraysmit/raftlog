@@ -1,5 +1,12 @@
 # RaftLog Non-Goals, Missing Features, and Trade-Offs
 
+| Document metadata | Details |
+| --- | --- |
+| Author | Mark Andrew Ray-Smith, Cityline Ltd |
+| Status | Maintained design assessment |
+| Last updated | 2026-10-11 |
+| Applies to | RaftLog 1.4.1 |
+
 RaftLog is intentionally minimal. This document separates the current safety baseline from features that are not part of the core implementation and records the practical trade-offs of adding them.
 
 ## Scope note

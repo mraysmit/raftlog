@@ -54,6 +54,14 @@ class RaftStorageDefaultsTest {
         }
     }
 
+    @Test void aStorageThatNeverCompactsReportsABoundaryOfZeroByDefault() throws Exception {
+        try (Minimal storage = new Minimal()) {
+            CompletableFuture<Long> boundary = storage.compactionBoundary();
+            assertTrue(boundary.isDone());
+            assertEquals(0L, boundary.get());
+        }
+    }
+
     @Test void defaultCloseAsyncClosesSynchronouslyAndCompletes() throws Exception {
         try (Minimal storage = new Minimal()) {
             CompletableFuture<Void> closed = storage.closeAsync();

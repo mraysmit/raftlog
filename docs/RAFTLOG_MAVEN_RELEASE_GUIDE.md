@@ -1,5 +1,12 @@
 # RaftLog Maven Release Guide
 
+| Document metadata | Details |
+| --- | --- |
+| Author | Mark Andrew Ray-Smith, Cityline Ltd |
+| Status | Maintained release runbook |
+| Last updated | 2026-10-11 |
+| Applies to | RaftLog 1.4.1 |
+
 This document provides the exact, repo-specific process for publishing RaftLog to Maven Central via Sonatype Central Portal.
 
 ## 1.4.1 release

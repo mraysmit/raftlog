@@ -25,7 +25,7 @@ truncated.thenCompose(v -> storage.appendEntries(plan.entriesToAppend()))
 
 **Never modify in-memory state before `sync()` completes.** This is the core Raft "persist-before-response" rule.
 
-`compactionBoundary` is 0 for a log that was never compacted, and the three-argument `AppendPlan.from` assumes that. After `truncatePrefix`, read it from `FileRaftStorage.compactionBoundary()`. `truncateFromIndex()` is `null` when no truncation is needed.
+`compactionBoundary` is 0 for a log that was never compacted, and the three-argument `AppendPlan.from` assumes that. After `truncatePrefix`, read it from `RaftStorage.compactionBoundary()`. `truncateFromIndex()` is `null` when no truncation is needed.
 
 ## Key Components
 

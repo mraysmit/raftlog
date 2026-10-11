@@ -50,7 +50,7 @@ be a valid Raft log, before writing a byte, with a categorised `WriteRejectedExc
 Replay likewise refuses a log that is not contiguous. A fresh log starts at index 1.
 Prefix compaction writes its boundary as the first record of the rewritten WAL, so a
 compacted log continues at the boundary plus one across restarts even when nothing was
-retained. `FileRaftStorage.compactionBoundary()` reports it, and `AppendPlan.from` takes it
+retained. `RaftStorage.compactionBoundary()` reports it, and `AppendPlan.from` takes it
 so that entries already covered by the snapshot are skipped. A compacted log that carries no
 boundary record has the boundary inferred from its first entry.
 

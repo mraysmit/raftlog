@@ -1,5 +1,12 @@
 # RaftLog Test Documentation
 
+| Document metadata | Details |
+| --- | --- |
+| Author | Mark Andrew Ray-Smith, Cityline Ltd |
+| Status | Maintained verification guide |
+| Last updated | 2026-10-11 |
+| Applies to | RaftLog 1.4.1 |
+
 This document provides a comprehensive overview of all test cases in the RaftLog project, organized by test class and category.
 
 ## Running Tests

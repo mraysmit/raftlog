@@ -1247,6 +1247,7 @@ public final class FileRaftStorage implements RaftStorage {
      * The inclusive prefix compaction boundary persisted in the WAL, or 0 if the log
      * has never been compacted. Requires a known log state, like any write.
      */
+    @Override
     public CompletableFuture<Long> compactionBoundary() {
         return supplyOperation("compaction-boundary", dataDir, () -> {
             ensureHealthy();

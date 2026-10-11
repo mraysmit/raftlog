@@ -203,6 +203,26 @@ public interface RaftStorage extends Closeable {
     }
 
     /**
+     * The inclusive prefix compaction boundary: the highest index that
+     * {@link #truncatePrefix(long)} has removed, or 0 if the log has never been compacted.
+     * The log continues at this index plus one, even when no entry is retained, and the
+     * caller's snapshot must reach at least this far.
+     * <p>
+     * FileRaftStorage requires a known log state, as for a write: a non-empty log must be
+     * replayed with {@link #replayLog()} first, and until then the future fails with
+     * {@link WriteRejectionReason#LOG_STATE_UNKNOWN}.
+     * <p>
+     * The default answers 0. That is right for an implementation that keeps the default
+     * {@link #truncatePrefix(long)}, which never compacts. An implementation that
+     * overrides one must override the other.
+     *
+     * @return the boundary, or 0 for a log that has never been compacted
+     */
+    default CompletableFuture<Long> compactionBoundary() {
+        return CompletableFuture.completedFuture(0L);
+    }
+
+    /**
      * Universal Durability Barrier.
      * <p>
      * Forces all pending appends/truncations to physical disk.

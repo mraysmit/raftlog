@@ -391,6 +391,16 @@ class FileRaftStorageInvariantEdgeCaseTest {
     // 6. The compaction boundary is available to the node
     // ------------------------------------------------------------------
 
+    @Test void compactionBoundaryIsReportedThroughTheStorageInterface() throws Exception {
+        RaftStorage storage = open(dir);
+        try {
+            await(storage.appendEntries(List.of(entry(1, 1), entry(2, 1), entry(3, 1))));
+            await(storage.truncatePrefix(2));
+            // The interface's default answers 0, so 2 can only come from the file storage's own record.
+            assertEquals(2L, await(storage.compactionBoundary()));
+        } finally { await(storage.closeAsync()); }
+    }
+
     @Test void compactionBoundaryIsReportedAndSurvivesRestart() throws Exception {
         FileRaftStorage storage = open(dir);
         try {

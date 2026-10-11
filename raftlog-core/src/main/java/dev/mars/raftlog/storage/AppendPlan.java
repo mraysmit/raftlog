@@ -131,7 +131,7 @@ public record AppendPlan(
      * @param currentLog         the current in-memory log, which must begin at
      *                           {@code compactionBoundary + 1} when it is not empty
      * @param compactionBoundary inclusive prefix compaction boundary, or 0 if never compacted; see
-     *                           {@code FileRaftStorage.compactionBoundary()}
+     *                           {@code RaftStorage.compactionBoundary()}
      * @return the calculated plan
      * @throws NullPointerException     if a list or one of its elements is null
      * @throws IllegalArgumentException if the arguments are inconsistent with each other or with
